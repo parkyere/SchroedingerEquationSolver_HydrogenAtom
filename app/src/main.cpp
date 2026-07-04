@@ -42,6 +42,7 @@
 #include <QString>
 #include <QSurfaceFormat>
 #include <QTimer>
+#include <QToolBar>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -484,60 +485,92 @@ protected:
         update();
     }
 
+public:
+    // Control entry points, shared by the keyboard and the toolbar buttons.
+    void toggle_pause() {
+        paused_ = !paused_;
+        after_control();
+    }
+    void set_real_time() {
+        stepping_ = Stepping::RealTime;
+        after_control();
+    }
+    void set_relaxing() {
+        stepping_ = Stepping::Relaxing;
+        if (!use_gpu_path()) {
+            ensure_cpu_current();  // CPU relax (Surface view / no GPU)
+        }
+        after_control();
+    }
+    void reset_simulation() {
+        sim_ = make_simulation();
+        stepping_ = Stepping::RealTime;
+        cpu_is_truth_ = true;  // GPU state discarded with the reset
+        gpu_time_ = 0.0;
+        pending_gpu_steps_ = 0;
+        stage_active_view();
+        after_control();
+    }
+    // Soft position measurement: sample from |psi|^2 (RNG lives here in the
+    // shell; core takes the uniform draw) and let the sharpened packet
+    // re-evolve.
+    void measure_now() {
+        ensure_cpu_current();
+        std::uniform_real_distribution<double> uniform(0.0, 1.0);
+        sim_.measure(uniform(rng_), kMeasureSigma);
+        stepping_ = Stepping::RealTime;
+        stage_active_view();
+        after_control();
+    }
+    void toggle_view_mode() {
+        mode_ = (mode_ == ViewMode::Cloud) ? ViewMode::Surface : ViewMode::Cloud;
+        // Re-stage for the newly selected mode: its data may be stale (tick
+        // only stages the active mode, and we may be paused).
+        if (mode_ == ViewMode::Surface) {
+            ensure_cpu_current();  // meshing reads the CPU field
+        }
+        stage_active_view();
+        after_control();
+    }
+
+protected:
+    void after_control() {
+        refresh_title();
+        update();
+    }
+
     void keyPressEvent(QKeyEvent* e) override {
         switch (e->key()) {
             case Qt::Key_Space:
-                paused_ = !paused_;
+                toggle_pause();
                 break;
             case Qt::Key_1:
-                stepping_ = Stepping::RealTime;
+                set_real_time();
                 break;
             case Qt::Key_2:
-                stepping_ = Stepping::Relaxing;
-                if (!use_gpu_path()) {
-                    ensure_cpu_current();  // CPU relax (Surface view / no GPU)
-                }
+                set_relaxing();
                 break;
             case Qt::Key_R:
-                sim_ = make_simulation();
-                stepping_ = Stepping::RealTime;
-                cpu_is_truth_ = true;  // GPU state discarded with the reset
-                gpu_time_ = 0.0;
-                pending_gpu_steps_ = 0;
-                stage_active_view();
+                reset_simulation();
                 break;
-            case Qt::Key_M: {
-                // Soft position measurement: sample from |psi|^2 (RNG lives
-                // here in the shell; core takes the uniform draw) and let
-                // the sharpened packet re-evolve.
-                ensure_cpu_current();
-                std::uniform_real_distribution<double> uniform(0.0, 1.0);
-                sim_.measure(uniform(rng_), kMeasureSigma);
-                stepping_ = Stepping::RealTime;
-                stage_active_view();
+            case Qt::Key_M:
+                measure_now();
                 break;
-            }
             case Qt::Key_Tab:
-                mode_ = (mode_ == ViewMode::Cloud) ? ViewMode::Surface : ViewMode::Cloud;
-                // Re-stage for the newly selected mode: its data may be stale
-                // (tick only stages the active mode, and we may be paused).
-                if (mode_ == ViewMode::Surface) {
-                    ensure_cpu_current();  // meshing reads the CPU field
-                }
-                stage_active_view();
+                toggle_view_mode();
                 break;
             case Qt::Key_BracketLeft:
                 absorbance_ = std::max(0.1, absorbance_ / 1.3);
+                after_control();
                 break;
             case Qt::Key_BracketRight:
                 absorbance_ = std::min(50.0, absorbance_ * 1.3);
+                after_control();
                 break;
             default:
                 QOpenGLWidget::keyPressEvent(e);
                 return;
         }
-        refresh_title();
-        update();
     }
 
 private:
@@ -899,6 +932,26 @@ int main(int argc, char** argv) {
     window.setWindowTitle(QStringLiteral("Electron wavepacket near a soft-Coulomb nucleus"));
     auto* viewport = new Viewport();
     window.setCentralWidget(viewport);
+
+    // Discoverable controls: toolbar buttons mirroring the hotkeys (the
+    // buttons keep Qt::NoFocus by default, so the keys stay live).
+    QToolBar* controls = window.addToolBar(QStringLiteral("Controls"));
+    controls->setMovable(false);
+    controls->addAction(QStringLiteral("Measure (M)"), viewport,
+                        [viewport] { viewport->measure_now(); });
+    controls->addSeparator();
+    controls->addAction(QStringLiteral("Real time (1)"), viewport,
+                        [viewport] { viewport->set_real_time(); });
+    controls->addAction(QStringLiteral("Relax to ground state (2)"), viewport,
+                        [viewport] { viewport->set_relaxing(); });
+    controls->addSeparator();
+    controls->addAction(QStringLiteral("Reset packet (R)"), viewport,
+                        [viewport] { viewport->reset_simulation(); });
+    controls->addAction(QStringLiteral("Cloud/Surface (Tab)"), viewport,
+                        [viewport] { viewport->toggle_view_mode(); });
+    controls->addAction(QStringLiteral("Pause (Space)"), viewport,
+                        [viewport] { viewport->toggle_pause(); });
+
     window.resize(1024, 768);
     window.show();
     // StrongFocus only ACCEPTS focus; grab it so the 1/2/R/M/space keys work
