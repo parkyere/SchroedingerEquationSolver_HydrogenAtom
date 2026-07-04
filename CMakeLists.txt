@@ -26,6 +26,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(SES_BUILD_TESTS        "Build unit tests"                          ON)
 option(SES_BUILD_APP          "Build the Qt/OpenGL app (requires Qt6)"    ON)
 option(SES_BUILD_BENCH        "Build the manual micro-benchmark"          ON)
+option(SES_ENABLE_AVX2        "Compile with AVX2 (x86-64 CPUs from ~2013)" ON)
 option(SES_WARNINGS_AS_ERRORS "Treat compiler warnings as errors"         OFF)
 
 # ---------------------------------------------------------------------------
@@ -44,6 +45,26 @@ else()
     if(SES_WARNINGS_AS_ERRORS)
         target_compile_options(ses_warnings INTERFACE -Werror)
     endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# CPU architecture flags (INTERFACE target, linked PUBLIC by the core so every
+# TU that compiles the header-only hot loops gets it).
+#
+# NOTE -ffp-contract=off: with bare -mavx2 -mfma the compiler may contract
+# a + b*c into fma(b, c, a), changing rounding and breaking the exact-value
+# FP oracles the tests pin (e.g. symmetric-grid coord(50) == 0.0). Contraction
+# off keeps scalar semantics BITWISE identical to the SSE2 build -- we take
+# only the 4-wide double vectorization.
+# ---------------------------------------------------------------------------
+add_library(ses_arch INTERFACE)
+if(SES_ENABLE_AVX2)
+    if(MSVC)
+        target_compile_options(ses_arch INTERFACE /arch:AVX2)
+    else()
+        target_compile_options(ses_arch INTERFACE -mavx2 -mfma -ffp-contract=off)
+    endif()
+    message(STATUS "AVX2 enabled (SES_ENABLE_AVX2=ON).")
 endif()
 
 # ---------------------------------------------------------------------------

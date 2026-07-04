@@ -18,6 +18,7 @@ add_library(sesolver_core STATIC
 target_include_directories(sesolver_core PUBLIC include)
 target_compile_features(sesolver_core PUBLIC cxx_std_20)
 target_link_libraries(sesolver_core PRIVATE ses_warnings)
+target_link_libraries(sesolver_core PUBLIC ses_arch)
 
 # Parallel hot loops (3D FFT lines, pointwise phase tables). The pragmas are
 # guarded by #ifdef _OPENMP, so a compiler without OpenMP still builds a
