@@ -57,7 +57,11 @@ namespace {
 }
 
 ses::WavepacketSimulation make_simulation() {
-    const ses::Grid1D axis{-12.0, 12.0, 32};
+    // 64^3 (OpenMP-parallel core: advance(1) ~16 ms on this class of machine).
+    // One dt=0.04 step per 16 ms tick keeps the same simulation speed as the
+    // old 2 x dt=0.02 at half the cost; splitting error stays O(dt^2), far
+    // below anything visible.
+    const ses::Grid1D axis{-12.0, 12.0, 64};
     const ses::Grid3D grid{axis, axis, axis};
     return ses::WavepacketSimulation{ses::WavepacketSimulation::Config{
         grid,
@@ -65,12 +69,12 @@ ses::WavepacketSimulation make_simulation() {
         ses::Vec3d{3.0, 0.0, 0.0},  // r0: beside the nucleus
         ses::Vec3d{1.5, 1.5, 1.5},  // sigma
         ses::Vec3d{0.0, 0.4, 0.0},  // k0: tangential kick
-        0.02,                       // dt
+        0.04,                       // dt
     }};
 }
 
-constexpr int kStepsPerTick = 2;
-constexpr int kRelaxStepsPerTick = 2;
+constexpr int kStepsPerTick = 1;
+constexpr int kRelaxStepsPerTick = 1;
 constexpr double kRelaxDtau = 0.05;
 constexpr int kTickMs = 16;
 constexpr double kIsoFraction = 0.25;
