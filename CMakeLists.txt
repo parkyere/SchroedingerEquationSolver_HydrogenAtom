@@ -25,6 +25,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # ---------------------------------------------------------------------------
 option(SES_BUILD_TESTS        "Build unit tests"                          ON)
 option(SES_BUILD_APP          "Build the Qt/OpenGL app (requires Qt6)"    ON)
+option(SES_BUILD_BENCH        "Build the manual micro-benchmark"          ON)
 option(SES_WARNINGS_AS_ERRORS "Treat compiler warnings as errors"         OFF)
 
 # ---------------------------------------------------------------------------
@@ -54,6 +55,10 @@ add_subdirectory(core)
 if(SES_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+if(SES_BUILD_BENCH)
+    add_subdirectory(bench)
 endif()
 
 # GUI shell. Auto-skipped (with a warning) when Qt6 is not installed, so the
