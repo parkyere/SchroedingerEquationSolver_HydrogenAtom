@@ -77,5 +77,14 @@ git config core.hooksPath tools/git-hooks
 
 ## Status
 
-Phase 0 (project scaffolding) complete. Next: Phase 1 core math, test-first.
-See [docs/ROADMAP.md](docs/ROADMAP.md).
+Phases 0-6 complete, Phase 7 first deliverable shipped (105 tests green):
+hand-rolled Complex/FFT/split-operator/imaginary-time stack validated against
+analytic oracles through 3D, and `sesolver_app` renders the softened-hydrogen
+1s electron cloud as a marching-cubes isosurface with mouse orbit + zoom.
+Remaining: wavepacket animation in the viewer, volume rendering, phase
+coloring in 3D. See [docs/ROADMAP.md](docs/ROADMAP.md).
+
+> Toolchain note: build with the Qt-bundled MinGW kit
+> (`-DCMAKE_PREFIX_PATH=C:/Qt/6.8.1/mingw_64`, compilers from
+> `C:/Qt/Tools/mingw1310_64`); the repo is toolchain-agnostic but this is the
+> tested configuration on Windows.
