@@ -71,6 +71,45 @@ TEST(RayBox, DiagonalThroughCorners) {
     EXPECT_NEAR(h.t_far, 3.0 * std::sqrt(3.0), 1e-12);
 }
 
+TEST(RaySphere, HitsHeadOn) {
+    const ses::RayHit h =
+        ses::ray_sphere(Vec3d{-3.0, 0.0, 0.0}, Vec3d{1.0, 0.0, 0.0}, Vec3d{}, 1.0);
+    ASSERT_TRUE(h.hit);
+    EXPECT_DOUBLE_EQ(h.t_near, 2.0);
+    EXPECT_DOUBLE_EQ(h.t_far, 4.0);
+}
+
+TEST(RaySphere, MissesBeside) {
+    const ses::RayHit h =
+        ses::ray_sphere(Vec3d{-3.0, 2.0, 0.0}, Vec3d{1.0, 0.0, 0.0}, Vec3d{}, 1.0);
+    EXPECT_FALSE(h.hit);
+}
+
+TEST(RaySphere, TangentTouchesAtOnePoint) {
+    // Grazing ray at y = 1 exactly: discriminant 0, t_near == t_far.
+    const ses::RayHit h =
+        ses::ray_sphere(Vec3d{-3.0, 1.0, 0.0}, Vec3d{1.0, 0.0, 0.0}, Vec3d{}, 1.0);
+    ASSERT_TRUE(h.hit);
+    EXPECT_DOUBLE_EQ(h.t_near, 3.0);
+    EXPECT_DOUBLE_EQ(h.t_far, 3.0);
+}
+
+TEST(RaySphere, StartingInsideGivesNegativeEntry) {
+    const ses::RayHit h =
+        ses::ray_sphere(Vec3d{}, Vec3d{0.0, 0.0, 1.0}, Vec3d{}, 1.0);
+    ASSERT_TRUE(h.hit);
+    EXPECT_DOUBLE_EQ(h.t_near, -1.0);
+    EXPECT_DOUBLE_EQ(h.t_far, 1.0);
+}
+
+TEST(RaySphere, OffsetCenter) {
+    const ses::RayHit h = ses::ray_sphere(Vec3d{0.0, 0.0, 0.0}, Vec3d{1.0, 0.0, 0.0},
+                                          Vec3d{5.0, 0.0, 0.0}, 2.0);
+    ASSERT_TRUE(h.hit);
+    EXPECT_DOUBLE_EQ(h.t_near, 3.0);
+    EXPECT_DOUBLE_EQ(h.t_far, 7.0);
+}
+
 TEST(SampleAlpha, ZeroDensityIsTransparent) {
     EXPECT_EQ(ses::sample_alpha(0.0, 5.0, 0.1), 0.0);
 }
