@@ -35,16 +35,16 @@ TEST(Field1D, SizeMatchesGrid) {
 TEST(Field1D, InitializesToZero) {
     const Field1D f{Grid1D{0.0, 8.0, 16}};
     for (int i = 0; i < f.size(); ++i) {
-        EXPECT_EQ(f[i].re, 0.0);
-        EXPECT_EQ(f[i].im, 0.0);
+        EXPECT_EQ(f[i].real(), 0.0);
+        EXPECT_EQ(f[i].imag(), 0.0);
     }
 }
 
 TEST(Field1D, ElementReadWrite) {
     Field1D f{Grid1D{0.0, 8.0, 16}};
     f[3] = Complex<double>{1.5, -2.5};
-    EXPECT_EQ(f[3].re, 1.5);
-    EXPECT_EQ(f[3].im, -2.5);
+    EXPECT_EQ(f[3].real(), 1.5);
+    EXPECT_EQ(f[3].imag(), -2.5);
 }
 
 TEST(Field1D, NormSqIncludesGridWeight) {

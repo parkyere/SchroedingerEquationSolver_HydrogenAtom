@@ -43,8 +43,8 @@ TEST(TrilinearSample, ExactAtGridPoints) {
     Field3D f{integer_grid()};
     f(2, 3, 4) = Complex<double>{1.5, -2.5};
     const Complex<double> s = ses::sample_trilinear(f, Vec3d{2.0, 3.0, 4.0});
-    EXPECT_EQ(s.re, 1.5);
-    EXPECT_EQ(s.im, -2.5);
+    EXPECT_EQ(s.real(), 1.5);
+    EXPECT_EQ(s.imag(), -2.5);
 }
 
 TEST(TrilinearSample, MidpointOfEdgeAveragesEndpoints) {
@@ -52,8 +52,8 @@ TEST(TrilinearSample, MidpointOfEdgeAveragesEndpoints) {
     f(2, 3, 4) = Complex<double>{1.0, 4.0};
     f(3, 3, 4) = Complex<double>{3.0, -2.0};
     const Complex<double> s = ses::sample_trilinear(f, Vec3d{2.5, 3.0, 4.0});
-    EXPECT_DOUBLE_EQ(s.re, 2.0);
-    EXPECT_DOUBLE_EQ(s.im, 1.0);
+    EXPECT_DOUBLE_EQ(s.real(), 2.0);
+    EXPECT_DOUBLE_EQ(s.imag(), 1.0);
 }
 
 TEST(TrilinearSample, ReproducesLinearFieldsExactly) {
@@ -72,8 +72,8 @@ TEST(TrilinearSample, ReproducesLinearFieldsExactly) {
     const Vec3d probes[] = {{1.3, 4.7, 2.2}, {0.1, 0.9, 6.3}, {5.999, 3.5, 0.5}};
     for (const Vec3d& p : probes) {
         const Complex<double> s = ses::sample_trilinear(f, p);
-        EXPECT_NEAR(s.re, re(p.x, p.y, p.z), 1e-12);
-        EXPECT_NEAR(s.im, im(p.x, p.y, p.z), 1e-12);
+        EXPECT_NEAR(s.real(), re(p.x, p.y, p.z), 1e-12);
+        EXPECT_NEAR(s.imag(), im(p.x, p.y, p.z), 1e-12);
     }
 }
 
@@ -81,8 +81,8 @@ TEST(TrilinearSample, WorksAtTheLastGridPoint) {
     Field3D f{integer_grid()};
     f(7, 7, 7) = Complex<double>{9.0, -9.0};
     const Complex<double> s = ses::sample_trilinear(f, Vec3d{7.0, 7.0, 7.0});
-    EXPECT_DOUBLE_EQ(s.re, 9.0);
-    EXPECT_DOUBLE_EQ(s.im, -9.0);
+    EXPECT_DOUBLE_EQ(s.real(), 9.0);
+    EXPECT_DOUBLE_EQ(s.imag(), -9.0);
 }
 
 TEST(PhaseColors, UniformPhaseGivesExactlyUniformColor) {

@@ -26,16 +26,16 @@ const Grid3D kSmall{Grid1D{0.0, 8.0, 16}, Grid1D{0.0, 4.0, 8}, Grid1D{-1.0, 1.0,
 TEST(Field3D, SizeMatchesGridAndZeroInit) {
     const Field3D f{kSmall};
     EXPECT_EQ(f.size(), 16 * 8 * 4);
-    EXPECT_EQ(f(5, 3, 2).re, 0.0);
-    EXPECT_EQ(f(5, 3, 2).im, 0.0);
+    EXPECT_EQ(f(5, 3, 2).real(), 0.0);
+    EXPECT_EQ(f(5, 3, 2).imag(), 0.0);
 }
 
 TEST(Field3D, TripleIndexMatchesFlatLayout) {
     Field3D f{kSmall};
     f(3, 2, 1) = Complex<double>{1.5, -2.5};
     const int flat = kSmall.flat(3, 2, 1);
-    EXPECT_EQ(f.data()[static_cast<std::size_t>(flat)].re, 1.5);
-    EXPECT_EQ(f.data()[static_cast<std::size_t>(flat)].im, -2.5);
+    EXPECT_EQ(f.data()[static_cast<std::size_t>(flat)].real(), 1.5);
+    EXPECT_EQ(f.data()[static_cast<std::size_t>(flat)].imag(), -2.5);
 }
 
 TEST(Field3D, NormIncludesCellVolume) {

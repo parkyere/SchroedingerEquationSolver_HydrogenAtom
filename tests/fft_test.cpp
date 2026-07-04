@@ -29,8 +29,8 @@ constexpr double kTol = 1e-12;
 constexpr double kTwoPi = 2.0 * std::numbers::pi;
 
 void expect_near(const Cd& z, double re, double im, double tol = kTol) {
-    EXPECT_NEAR(z.re, re, tol);
-    EXPECT_NEAR(z.im, im, tol);
+    EXPECT_NEAR(z.real(), re, tol);
+    EXPECT_NEAR(z.imag(), im, tol);
 }
 
 TEST(Fft, SizeOneIsIdentity) {
@@ -113,7 +113,7 @@ TEST(Fft, InverseRestoresInput) {
     ses::fft(a);
     ses::ifft(a);
     for (std::size_t i = 0; i < a.size(); ++i) {
-        expect_near(a[i], original[i].re, original[i].im);
+        expect_near(a[i], original[i].real(), original[i].imag());
     }
 }
 
@@ -134,7 +134,7 @@ TEST(Fft, IsLinear) {
     ses::fft(combo);
     for (std::size_t i = 0; i < n; ++i) {
         const Cd expected = 2.0 * x[i] + y[i];
-        expect_near(combo[i], expected.re, expected.im);
+        expect_near(combo[i], expected.real(), expected.imag());
     }
 }
 

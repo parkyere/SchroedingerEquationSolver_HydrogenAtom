@@ -35,11 +35,11 @@ TEST(Fft3, DcConcentratesAtOriginBin) {
         v = Complex<double>{1.0, 0.0};
     }
     ses::fft(f);
-    EXPECT_NEAR(f(0, 0, 0).re, 64.0, kTol);  // N = 8*4*2
-    EXPECT_NEAR(f(0, 0, 0).im, 0.0, kTol);
-    EXPECT_NEAR(f(1, 0, 0).re, 0.0, kTol);
-    EXPECT_NEAR(f(0, 1, 0).re, 0.0, kTol);
-    EXPECT_NEAR(f(0, 0, 1).re, 0.0, kTol);
+    EXPECT_NEAR(f(0, 0, 0).real(), 64.0, kTol);  // N = 8*4*2
+    EXPECT_NEAR(f(0, 0, 0).imag(), 0.0, kTol);
+    EXPECT_NEAR(f(1, 0, 0).real(), 0.0, kTol);
+    EXPECT_NEAR(f(0, 1, 0).real(), 0.0, kTol);
+    EXPECT_NEAR(f(0, 0, 1).real(), 0.0, kTol);
 }
 
 TEST(Fft3, PlaneWaveSpikesAtItsBin) {
@@ -60,9 +60,9 @@ TEST(Fft3, PlaneWaveSpikesAtItsBin) {
         for (int j = 0; j < ny; ++j) {
             for (int i = 0; i < nx; ++i) {
                 const double expected = (i == 3 && j == 5 && k == 1) ? 512.0 : 0.0;
-                EXPECT_NEAR(f(i, j, k).re, expected, 1e-9)
+                EXPECT_NEAR(f(i, j, k).real(), expected, 1e-9)
                     << "at (" << i << "," << j << "," << k << ")";
-                EXPECT_NEAR(f(i, j, k).im, 0.0, 1e-9);
+                EXPECT_NEAR(f(i, j, k).imag(), 0.0, 1e-9);
             }
         }
     }
@@ -80,8 +80,8 @@ TEST(Fft3, InverseRestoresInput) {
     ses::ifft(f);
     for (int idx = 0; idx < f.size(); ++idx) {
         const std::size_t s = static_cast<std::size_t>(idx);
-        EXPECT_NEAR(f.data()[s].re, original.data()[s].re, kTol);
-        EXPECT_NEAR(f.data()[s].im, original.data()[s].im, kTol);
+        EXPECT_NEAR(f.data()[s].real(), original.data()[s].real(), kTol);
+        EXPECT_NEAR(f.data()[s].imag(), original.data()[s].imag(), kTol);
     }
 }
 

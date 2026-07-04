@@ -38,8 +38,8 @@ TEST(PropagatorTables, HalfPotentialPhaseMatchesFormula) {
     ASSERT_EQ(half.size(), v.size());
     for (const std::size_t idx : {std::size_t{0}, std::size_t{17}, v.size() - 1}) {
         const double th = -0.5 * v[idx] * dt;
-        EXPECT_DOUBLE_EQ(half[idx].re, std::cos(th));
-        EXPECT_DOUBLE_EQ(half[idx].im, std::sin(th));
+        EXPECT_DOUBLE_EQ(half[idx].real(), std::cos(th));
+        EXPECT_DOUBLE_EQ(half[idx].imag(), std::sin(th));
     }
 }
 
@@ -62,8 +62,8 @@ TEST(PropagatorTables, KineticPhaseMatchesFormula) {
         const double kzz = kz[static_cast<std::size_t>(k)];
         const double th = -0.5 * (kxx * kxx + kyy * kyy + kzz * kzz) * dt;
         const std::size_t idx = static_cast<std::size_t>(g.flat(i, j, k));
-        EXPECT_DOUBLE_EQ(kin[idx].re, std::cos(th));
-        EXPECT_DOUBLE_EQ(kin[idx].im, std::sin(th));
+        EXPECT_DOUBLE_EQ(kin[idx].real(), std::cos(th));
+        EXPECT_DOUBLE_EQ(kin[idx].imag(), std::sin(th));
     }
 }
 

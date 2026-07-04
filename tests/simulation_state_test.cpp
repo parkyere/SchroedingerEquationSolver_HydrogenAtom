@@ -69,9 +69,9 @@ TEST(SimulationState, AdvanceEvolvesTheInjectedState) {
     double max_diff = 0.0;
     for (std::size_t i = 0; i < manual.data().size(); ++i) {
         max_diff = std::max(max_diff,
-                            std::abs(sim.psi().data()[i].re - manual.data()[i].re));
+                            std::abs(sim.psi().data()[i].real() - manual.data()[i].real()));
         max_diff = std::max(max_diff,
-                            std::abs(sim.psi().data()[i].im - manual.data()[i].im));
+                            std::abs(sim.psi().data()[i].imag() - manual.data()[i].imag()));
     }
     EXPECT_LT(max_diff, 1e-14);
 }
@@ -84,14 +84,14 @@ TEST(SimulationState, PropagatorExposesTheTables) {
     const auto& half = sim.propagator().half_potential_phase();
     const auto& ref_half = reference.half_potential_phase();
     ASSERT_EQ(half.size(), ref_half.size());
-    EXPECT_EQ(half[17].re, ref_half[17].re);
-    EXPECT_EQ(half[17].im, ref_half[17].im);
+    EXPECT_EQ(half[17].real(), ref_half[17].real());
+    EXPECT_EQ(half[17].imag(), ref_half[17].imag());
 
     const auto& kin = sim.propagator().kinetic_phase();
     const auto& ref_kin = reference.kinetic_phase();
     ASSERT_EQ(kin.size(), ref_kin.size());
-    EXPECT_EQ(kin[123].re, ref_kin[123].re);
-    EXPECT_EQ(kin[123].im, ref_kin[123].im);
+    EXPECT_EQ(kin[123].real(), ref_kin[123].real());
+    EXPECT_EQ(kin[123].imag(), ref_kin[123].imag());
 }
 
 }  // namespace

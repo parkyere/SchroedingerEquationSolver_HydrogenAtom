@@ -75,8 +75,8 @@ TEST(WavepacketSimulation, MatchesManualPropagation) {
     const Field3D& s = sim.psi();
     double max_diff = 0.0;
     for (std::size_t i = 0; i < s.data().size(); ++i) {
-        max_diff = std::max(max_diff, std::abs(s.data()[i].re - manual.data()[i].re));
-        max_diff = std::max(max_diff, std::abs(s.data()[i].im - manual.data()[i].im));
+        max_diff = std::max(max_diff, std::abs(s.data()[i].real() - manual.data()[i].real()));
+        max_diff = std::max(max_diff, std::abs(s.data()[i].imag() - manual.data()[i].imag()));
     }
     EXPECT_LT(max_diff, 1e-14);
 }

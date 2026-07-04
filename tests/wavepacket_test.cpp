@@ -42,15 +42,15 @@ TEST(GaussianWavepacket, PhaseCarriesThePlaneWave) {
         const double x = kGrid.coord(i);
         const Complex<double> unwound =
             psi[i] * Complex<double>{std::cos(-k0 * x), std::sin(-k0 * x)};
-        EXPECT_NEAR(unwound.im, 0.0, 1e-12);
-        EXPECT_GE(unwound.re, -1e-12);
+        EXPECT_NEAR(unwound.imag(), 0.0, 1e-12);
+        EXPECT_GE(unwound.real(), -1e-12);
     }
 }
 
 TEST(GaussianWavepacket, ZeroMomentumPacketIsReal) {
     const Field1D psi = ses::gaussian_wavepacket(kGrid, 0.0, 1.0, 0.0);
     for (int i = 0; i < psi.size(); ++i) {
-        EXPECT_EQ(psi[i].im, 0.0);
+        EXPECT_EQ(psi[i].imag(), 0.0);
     }
 }
 
