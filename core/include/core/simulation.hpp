@@ -8,6 +8,7 @@
 #include <core/field.hpp>
 #include <core/grid.hpp>
 #include <core/imaginary_time.hpp>
+#include <core/measurement.hpp>
 #include <core/propagator.hpp>
 #include <core/vec.hpp>
 #include <core/wavepacket.hpp>
@@ -50,6 +51,20 @@ public:
             relaxer_dtau_ = dtau;
         }
         relaxer_->relax(psi_, nsteps);
+    }
+
+    // Soft position measurement: sample a collapse cell from |psi|^2 using
+    // the injected uniform draw u, collapse psi onto a Gaussian of width
+    // sigma_m there, and return the collapse center. Instantaneous: real
+    // time does not advance.
+    Vec3d measure(double u, double sigma_m) {
+        const int idx = sample_collapse_index(psi_, u);
+        const int i = idx % grid_.x.n;
+        const int j = (idx / grid_.x.n) % grid_.y.n;
+        const int k = idx / (grid_.x.n * grid_.y.n);
+        const Vec3d center{grid_.x.coord(i), grid_.y.coord(j), grid_.z.coord(k)};
+        collapse_wavepacket(psi_, center, sigma_m);
+        return center;
     }
 
     double time() const { return steps_ * dt_; }
