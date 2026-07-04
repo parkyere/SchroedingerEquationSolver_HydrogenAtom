@@ -10,6 +10,7 @@
 #include <core/marching_cubes_tables.hpp>
 #include <core/vec.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <vector>
@@ -109,6 +110,14 @@ inline Mesh marching_cubes(const std::vector<double>& field, const Grid3D& g, do
     }
 
     return mesh;
+}
+
+// Isovalue as a fraction of the current field peak -- keeps an animated
+// (dispersing) cloud visible as its maximum density decays.
+inline Mesh marching_cubes_at_fraction(const std::vector<double>& field, const Grid3D& g,
+                                       double fraction) {
+    const double peak = *std::max_element(field.begin(), field.end());
+    return marching_cubes(field, g, fraction * peak);
 }
 
 }  // namespace ses
