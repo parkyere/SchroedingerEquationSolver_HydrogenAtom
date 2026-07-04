@@ -29,6 +29,8 @@
 #include <core/vec.hpp>
 #include <core/volume.hpp>
 
+#include "gpu_engine.hpp"
+
 #include <QApplication>
 #include <QKeyEvent>
 #include <QMainWindow>
@@ -59,11 +61,10 @@ namespace {
 }
 
 ses::WavepacketSimulation make_simulation() {
-    // 64^3 (OpenMP-parallel core: advance(1) ~16 ms on this class of machine).
-    // One dt=0.04 step per 16 ms tick keeps the same simulation speed as the
-    // old 2 x dt=0.02 at half the cost; splitting error stays O(dt^2), far
-    // below anything visible.
-    const ses::Grid1D axis{-12.0, 12.0, 64};
+    // 128^3: real-time stepping runs on the GPU engine (docs/GPU_PLAN.md G5);
+    // the CPU session stays the double-precision truth for relax / measure /
+    // surface meshing, synced on demand.
+    const ses::Grid1D axis{-12.0, 12.0, 128};
     const ses::Grid3D grid{axis, axis, axis};
     return ses::WavepacketSimulation{ses::WavepacketSimulation::Config{
         grid,
@@ -76,6 +77,7 @@ ses::WavepacketSimulation make_simulation() {
 }
 
 constexpr int kStepsPerTick = 1;
+constexpr int kMaxPendingGpuSteps = 8;  // backlog cap: a stalled paint cannot spiral
 constexpr int kRelaxStepsPerTick = 1;
 constexpr double kRelaxDtau = 0.05;
 constexpr int kTickMs = 16;
@@ -204,6 +206,13 @@ public:
     }
 
 protected:
+    // GPU stepping is used only on the hot path: Cloud view + real time.
+    // Everything else (relax, measure, surface meshing) runs on the CPU
+    // double session, synced through the single cpu_is_truth_ invariant.
+    bool use_gpu_path() const {
+        return gpu_ok_ && mode_ == ViewMode::Cloud && stepping_ == Stepping::RealTime;
+    }
+
     void initializeGL() override {
         if (!initializeOpenGLFunctions()) {
             const QSurfaceFormat got = context()->format();
@@ -236,6 +245,13 @@ protected:
 
         upload_proton_marker();
 
+        // -- GPU propagation engine (fp32 transcription of the tested CPU
+        //    tables; verified by sesolver_gpucheck). Falls back to CPU
+        //    stepping when compute programs fail to build. --
+        gpu_ok_ = engine_.initialize(*this, sim_.grid(),
+                                     sim_.propagator().half_potential_phase(),
+                                     sim_.propagator().kinetic_phase(), sim_.psi());
+
         // -- volume pipeline --
         volume_program_ = link_program(kVolumeVertexShader, kVolumeFragmentShader);
         vol_mvp_loc_ = glGetUniformLocation(volume_program_, "mvp");
@@ -267,6 +283,59 @@ protected:
         float mvp_f[16];
         for (int i = 0; i < 16; ++i) {
             mvp_f[i] = static_cast<float>(mvp.m[i]);
+        }
+
+        // GPU stepping happens here, where the context is guaranteed current.
+        if (use_gpu_path()) {
+            if (cpu_is_truth_) {
+                // The CPU state is authoritative here: refresh the brightness
+                // normalizer from it (covers post-M collapse, post-R reset).
+                double pk = 0.0;
+                for (const ses::Complex<double>& z : sim_.psi().data()) {
+                    pk = std::max(pk, ses::norm_sq(z));
+                }
+                if (pk > 0.0) {
+                    peak_ = pk;
+                }
+                engine_.upload_state(*this, sim_.psi());
+                cpu_is_truth_ = false;
+                volume_dirty_ = false;  // texture comes from the bridge now
+                // Bridge immediately: with an empty step queue (paused R/M,
+                // first frame) the block below would never refresh psi_tex_
+                // and the screen would keep the stale (or undefined) cloud.
+                engine_.write_psi_texture(*this, psi_tex_);
+            }
+            if (pending_gpu_steps_ > 0) {
+                if (gpu_title_due_) {
+                    // Read BEFORE enqueueing new steps: the implicit sync then
+                    // waits only on long-finished work instead of draining the
+                    // fresh pipeline (norm is one frame stale -- immaterial).
+                    gpu_title_due_ = false;
+                    engine_.readback(*this, readback_buf_);
+                    double acc = 0.0;
+                    double pk = 0.0;
+                    for (std::size_t i = 0; i + 1 < readback_buf_.size(); i += 2) {
+                        const double re = readback_buf_[i];
+                        const double im = readback_buf_[i + 1];
+                        const double d = re * re + im * im;
+                        acc += d;
+                        pk = std::max(pk, d);
+                    }
+                    norm_display_ = acc * sim_.grid().cell_volume();
+                    if (pk > 0.0) {
+                        peak_ = pk;  // brightness tracks the evolving cloud
+                    }
+                    refresh_title();
+                }
+                engine_.step(*this, pending_gpu_steps_);
+                // Time is credited where steps EXECUTE, so a stalled or
+                // occluded paint (dropped ticks) cannot desync the clock
+                // from the state.
+                gpu_time_ += pending_gpu_steps_ * sim_.dt();
+                pending_gpu_steps_ = 0;
+                engine_.write_psi_texture(*this, psi_tex_);
+                volume_dirty_ = false;
+            }
         }
 
         // The proton marker draws first in both modes (depth-tested); in
@@ -361,17 +430,22 @@ protected:
                 stepping_ = Stepping::RealTime;
                 break;
             case Qt::Key_2:
+                ensure_cpu_current();  // relaxation runs on the CPU session
                 stepping_ = Stepping::Relaxing;
                 break;
             case Qt::Key_R:
                 sim_ = make_simulation();
                 stepping_ = Stepping::RealTime;
+                cpu_is_truth_ = true;  // GPU state discarded with the reset
+                gpu_time_ = 0.0;
+                pending_gpu_steps_ = 0;
                 stage_active_view();
                 break;
             case Qt::Key_M: {
                 // Soft position measurement: sample from |psi|^2 (RNG lives
                 // here in the shell; core takes the uniform draw) and let
                 // the sharpened packet re-evolve.
+                ensure_cpu_current();
                 std::uniform_real_distribution<double> uniform(0.0, 1.0);
                 sim_.measure(uniform(rng_), kMeasureSigma);
                 stepping_ = Stepping::RealTime;
@@ -382,6 +456,9 @@ protected:
                 mode_ = (mode_ == ViewMode::Cloud) ? ViewMode::Surface : ViewMode::Cloud;
                 // Re-stage for the newly selected mode: its data may be stale
                 // (tick only stages the active mode, and we may be paused).
+                if (mode_ == ViewMode::Surface) {
+                    ensure_cpu_current();  // meshing reads the CPU field
+                }
                 stage_active_view();
                 break;
             case Qt::Key_BracketLeft:
@@ -403,6 +480,19 @@ private:
         if (paused_) {
             return;
         }
+        if (use_gpu_path()) {
+            // Steps run in paintGL (context current there). Cap the backlog
+            // so a stalled paint cannot spiral; time is credited at
+            // execution, so dropped ticks drop cleanly.
+            pending_gpu_steps_ = std::min(pending_gpu_steps_ + kStepsPerTick,
+                                          kMaxPendingGpuSteps);
+            if (++ticks_ % 10 == 0) {
+                gpu_title_due_ = true;
+            }
+            update();
+            return;
+        }
+        ensure_cpu_current();
         if (stepping_ == Stepping::RealTime) {
             sim_.advance(kStepsPerTick);
         } else {
@@ -410,13 +500,37 @@ private:
         }
         stage_active_view();
         if (++ticks_ % 10 == 0) {
+            norm_display_ = ses::norm_sq(sim_.psi());
             refresh_title();
         }
         update();
     }
 
+    // Pull the GPU-evolved state back into the CPU double session (fp32
+    // precision at the handoff -- the display path's documented tradeoff).
+    void ensure_cpu_current() {
+        // Queued-but-unexecuted steps were never credited to gpu_time_;
+        // discard them so they cannot fire later against a different state.
+        pending_gpu_steps_ = 0;
+        if (cpu_is_truth_ || !gpu_ok_) {
+            return;
+        }
+        makeCurrent();
+        engine_.readback(*this, readback_buf_);
+        doneCurrent();
+        ses::Field3D f{sim_.grid()};
+        for (std::size_t i = 0; i < f.data().size(); ++i) {
+            f.data()[i] = ses::Complex<double>{readback_buf_[2 * i], readback_buf_[2 * i + 1]};
+        }
+        sim_.set_psi(f);
+        cpu_is_truth_ = true;
+    }
+
     void stage_active_view() {
         if (mode_ == ViewMode::Cloud) {
+            if (use_gpu_path()) {
+                return;  // paintGL uploads the state and bridges the texture
+            }
             stage_volume();
             volume_dirty_ = true;
         } else {
@@ -446,18 +560,26 @@ private:
     }
 
     void refresh_title() {
-        const double energy = ses::mean_energy(sim_.psi(), sim_.potential());
+        // <H> costs an fft3 (CPU) -- shown only while relaxing, where the
+        // convergence readout is the whole point and the state is CPU-side.
+        const QString energy =
+            (stepping_ == Stepping::Relaxing && cpu_is_truth_)
+                ? QStringLiteral("E = %1 Ha   ")
+                      .arg(ses::mean_energy(sim_.psi(), sim_.potential()), 0, 'f', 4)
+                : QString();
         window()->setWindowTitle(
-            QStringLiteral("Electron near a soft-Coulomb nucleus   t = %1   E = %2 Ha   "
-                           "norm = %3   [%4, %5]  1=real 2=relax R=reset tab=view [ ]=density")
-                .arg(sim_.time(), 0, 'f', 2)
-                .arg(energy, 0, 'f', 4)
-                .arg(ses::norm_sq(sim_.psi()), 0, 'f', 9)
+            QStringLiteral("Electron near a soft-Coulomb nucleus   t = %1   %2"
+                           "norm = %3   [%4, %5, %6]  1=real 2=relax R=reset tab=view "
+                           "[ ]=density M=measure")
+                .arg(sim_.time() + gpu_time_, 0, 'f', 2)
+                .arg(energy)
+                .arg(norm_display_, 0, 'f', 6)
                 .arg(mode_ == ViewMode::Cloud ? QStringLiteral("cloud")
                                               : QStringLiteral("surface"))
                 .arg(stepping_ == Stepping::RealTime ? QStringLiteral("real-time")
-                                                     : QStringLiteral("relaxing")) +
-            QStringLiteral(" M=measure"));
+                                                     : QStringLiteral("relaxing"))
+                .arg(use_gpu_path() ? QStringLiteral("gpu 128^3")
+                                    : QStringLiteral("cpu 128^3")));
     }
 
     // ---- GL uploads (current context required: called from initializeGL/paintGL) ----
@@ -633,6 +755,18 @@ private:
     ses::WavepacketSimulation sim_;
     ViewMode mode_ = ViewMode::Cloud;
     Stepping stepping_ = Stepping::RealTime;
+
+    // GPU stepping state (docs/GPU_PLAN.md G5). cpu_is_truth_ is the single
+    // sync invariant: true -> sim_.psi() is current, false -> the engine's
+    // SSBO is ahead and must be read back before any CPU-side operation.
+    ses_gpu::GpuEngine engine_;
+    bool gpu_ok_ = false;
+    bool cpu_is_truth_ = true;
+    int pending_gpu_steps_ = 0;
+    bool gpu_title_due_ = false;
+    double gpu_time_ = 0.0;
+    double norm_display_ = 1.0;
+    std::vector<float> readback_buf_;
 
     ses::Mesh mesh_;
     std::vector<ses::Rgb> colors_;

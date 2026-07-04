@@ -54,6 +54,9 @@ GLuint make_ssbo(Gl& gl, GLuint binding, const std::vector<float>& data) {
 
 std::vector<float> read_ssbo(Gl& gl, GLuint buf, std::size_t floats) {
     std::vector<float> out(floats);
+    // Spec-required visibility of incoherent compute writes to the
+    // buffer-update API (matches the production readback path).
+    gl.glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
     gl.glBindBuffer(GL_SHADER_STORAGE_BUFFER, buf);
     gl.glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
                           static_cast<GLsizeiptr>(floats * sizeof(float)), out.data());

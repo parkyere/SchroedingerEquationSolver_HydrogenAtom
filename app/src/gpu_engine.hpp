@@ -278,6 +278,10 @@ public:
 
     void upload_state(Gl& gl, const ses::Field3D& psi) {
         const std::vector<float> staged = to_rg32f(psi.data());
+        // Order this API write against any in-flight shader writes from
+        // earlier frames (GL 4.3: SSBO shader writes are incoherent, and the
+        // per-dispatch SHADER_STORAGE barrier only covers shader-to-shader).
+        gl.glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
         gl.glBindBuffer(GL_SHADER_STORAGE_BUFFER, psi_buf_);
         gl.glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
                            static_cast<GLsizeiptr>(staged.size() * sizeof(float)),
@@ -287,6 +291,9 @@ public:
     // Interleaved RG floats, 2 per cell.
     void readback(Gl& gl, std::vector<float>& out) const {
         out.resize(2 * cells_);
+        // Make incoherent compute writes visible to the buffer-update API
+        // before glGetBufferSubData (spec-required; drivers often forgive).
+        gl.glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
         gl.glBindBuffer(GL_SHADER_STORAGE_BUFFER, psi_buf_);
         gl.glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
                               static_cast<GLsizeiptr>(out.size() * sizeof(float)),
