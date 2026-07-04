@@ -9,12 +9,14 @@
 //  - amplitude 0 reproduces the static propagator BITWISE (cis(0) = (1,0));
 //  - omega 0 is a constant force: Ehrenfest gives <p_z> = -E0 t exactly and
 //    <z> = -E0 t^2 / 2 (linear potential: no force-gradient error);
-//  - RABI: in a harmonic trap (w0 = 1), driving at resonance transfers the
-//    ground state to the first excited z-state with the textbook frequency
-//    Omega = E0 * <1_z|z|0> = E0 / sqrt(2 w0); population sin^2(Omega t / 2)
-//    -> ~0.5 at t_pi/2, > 0.9 at t_pi (both states are ANALYTIC here);
-//  - SELECTION RULE: the same z-polarized drive leaves the y-flavored state
-//    empty (<1_y|z|0> = 0 by symmetry).
+//  - COHERENT LADDER: a resonantly driven harmonic trap is NOT a two-level
+//    Rabi system (all gaps are equal!) -- the exact solution is a coherent
+//    state with |alpha(t)| = E0 t / (2 sqrt(2 w0)):
+//      <z>(t)  = -(E0 / 2 w0) t sin(w0 t)        (Ehrenfest, exact),
+//      P_n     = e^{-|a|^2} |a|^{2n} / n!         (Poisson populations);
+//    (true two-level Rabi needs the ANHARMONIC soft-Coulomb spectrum -- T3);
+//  - SELECTION RULE: the z-polarized drive leaves the y-flavored state
+//    empty (<1_y|z|0> = 0 by symmetry) -- exact regardless of the ladder.
 
 #include <core/complex.hpp>
 #include <core/drive.hpp>
@@ -91,9 +93,10 @@ TEST(DipoleDrive, ConstantFieldObeysEhrenfest) {
     EXPECT_NEAR(ses::norm_sq(psi), 1.0, 1e-12);
 }
 
-TEST(DipoleDrive, ResonantRabiAndSelectionRule) {
-    // Harmonic trap w0 = 1: phi_0 and the z/y first excited states are
-    // analytic. Drive z-polarized at resonance omega = w0.
+TEST(DipoleDrive, ResonantCoherentLadderAndSelectionRule) {
+    // Harmonic trap w0 = 1 driven z-polarized at resonance: the exact result
+    // is a coherent state (equal level spacing means the drive climbs the
+    // whole ladder -- there is NO two-level Rabi here).
     const double w0 = 1.0;
     const Grid3D g = cube(-8.0, 8.0, 32);
     const std::vector<double> v = ses::harmonic_potential(g, w0, Vec3d{});
@@ -121,23 +124,26 @@ TEST(DipoleDrive, ResonantRabiAndSelectionRule) {
     ses::normalize(excited_y);
 
     const double e0 = 0.2;
-    const double rabi = e0 / std::sqrt(2.0 * w0);        // Omega = E0 <1|z|0>
-    const double t_pi = std::numbers::pi / rabi;          // full inversion
-    const int steps_pi = static_cast<int>(t_pi / dt + 0.5);
+    const int steps = 283;  // t ~= 14.15, near a sin(w0 t) maximum
+    const double t = steps * dt;
 
     Field3D psi = ground;
-    const DipoleDrive drive{Vec3d{0.0, 0.0, 1.0}, e0, w0};
+    ses::driven_step(psi, prop, DipoleDrive{Vec3d{0.0, 0.0, 1.0}, e0, w0}, 0.0, steps);
 
-    ses::driven_step(psi, prop, drive, 0.0, steps_pi / 2);
-    const double p_half = population(excited_z, psi);
-    EXPECT_GT(p_half, 0.4);  // sin^2(pi/4) = 0.5 up to RWA corrections
-    EXPECT_LT(p_half, 0.6);
+    // Ehrenfest is EXACT for quadratic + linear potentials:
+    // <z>(t) = -(E0 / 2 w0) t sin(w0 t).
+    const double expected_z = -(e0 / (2.0 * w0)) * t * std::sin(w0 * t);
+    EXPECT_NEAR(ses::mean_position(psi).z, expected_z, 0.02);
 
-    ses::driven_step(psi, prop, drive, (steps_pi / 2) * dt, steps_pi - steps_pi / 2);
-    const double p_full = population(excited_z, psi);
-    EXPECT_GT(p_full, 0.9);  // near-complete inversion at t_pi
+    // Poisson populations of the coherent state, |alpha| = E0 t/(2 sqrt(2 w0)).
+    const double alpha_sq = std::pow(e0 * t / (2.0 * std::sqrt(2.0 * w0)), 2.0);
+    const double p0_expected = std::exp(-alpha_sq);
+    const double p1_expected = alpha_sq * std::exp(-alpha_sq);
+    EXPECT_NEAR(population(ground, psi), p0_expected, 0.06);
+    EXPECT_NEAR(population(excited_z, psi), p1_expected, 0.06);
 
-    // Selection rule: the z-polarized drive cannot populate the y state.
+    // Selection rule: the z-polarized drive cannot populate the y state --
+    // exact by symmetry, ladder or not.
     EXPECT_LT(population(excited_y, psi), 1e-4);
     EXPECT_NEAR(ses::norm_sq(psi), 1.0, 1e-10);
 }
