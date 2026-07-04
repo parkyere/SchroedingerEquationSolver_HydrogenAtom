@@ -552,8 +552,8 @@ private:
         psi_staging_.resize(data.size() * 2);
         double peak = 0.0;
         for (std::size_t i = 0; i < data.size(); ++i) {
-            psi_staging_[2 * i] = static_cast<float>(data[i].re);
-            psi_staging_[2 * i + 1] = static_cast<float>(data[i].im);
+            psi_staging_[2 * i] = static_cast<float>(data[i].real());
+            psi_staging_[2 * i + 1] = static_cast<float>(data[i].imag());
             peak = std::max(peak, ses::norm_sq(data[i]));
         }
         peak_ = peak;

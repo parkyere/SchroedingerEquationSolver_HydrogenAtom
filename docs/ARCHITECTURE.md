@@ -40,14 +40,20 @@ research-grade mean-field (DFT) project. We stay single-electron on purpose.
 
 ## Reuse boundary (purist reinvention)
 
+The boundary applies to THIRD-PARTY libraries only. The **C++ standard
+library is always fair game** (user decision): `ses::Complex` is an alias of
+`std::complex` (built with `-fcx-limited-range` so multiply/divide use the
+naive formulas the exact-value test oracles pin), and `std::vector`,
+`<cmath>`, `<numbers>`, `<random>` etc. are used freely.
+
 Hand-written (the learning lives here):
-- math (complex, vectors, matrices, quaternions)
-- FFT (1D radix-2 → N-D), used by the split-operator propagator
+- vector/matrix/camera math (no stdlib equivalent until C++26 `<linalg>`)
+- FFT (1D radix-2 → N-D, CPU and GPU compute-shader variants)
 - grid, complex field, finite-difference / spectral operators
-- time propagation (split-operator Fourier method)
-- potentials (harmonic, softened Coulomb, box)
+- time propagation (split-operator Fourier method, real and imaginary time)
+- potentials (harmonic, softened Coulomb)
 - visualization geometry/color math (marching cubes, transfer functions)
-- all OpenGL rendering logic (shaders, buffers, camera, volume/cloud rendering)
+- all OpenGL rendering/compute logic (shaders, buffers, camera, volume cloud)
 
 Reused (pure plumbing, not the learning target):
 - **Qt 6** — window, OpenGL context + function loading, widgets/UI only

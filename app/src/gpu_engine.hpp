@@ -242,8 +242,8 @@ inline void run_conj_scale(Gl& gl, GLuint prog, std::size_t n, float scale) {
 inline std::vector<float> to_rg32f(const std::vector<ses::Complex<double>>& src) {
     std::vector<float> out(2 * src.size());
     for (std::size_t i = 0; i < src.size(); ++i) {
-        out[2 * i] = static_cast<float>(src[i].re);
-        out[2 * i + 1] = static_cast<float>(src[i].im);
+        out[2 * i] = static_cast<float>(src[i].real());
+        out[2 * i + 1] = static_cast<float>(src[i].imag());
     }
     return out;
 }

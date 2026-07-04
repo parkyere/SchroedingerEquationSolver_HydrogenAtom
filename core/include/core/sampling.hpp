@@ -41,7 +41,7 @@ inline Complex<double> sample_trilinear(const Field3D& f, Vec3d p) {
     const auto [k, tz] = sampling_detail::cell_and_t(p.z, g.z);
 
     auto lerp = [](Complex<double> a, Complex<double> b, double t) {
-        return Complex<double>{a.re + t * (b.re - a.re), a.im + t * (b.im - a.im)};
+        return a + t * (b - a);  // component-wise: same math as before
     };
 
     const Complex<double> c00 = lerp(f(i, j, k), f(i + 1, j, k), tx);
@@ -57,7 +57,7 @@ inline std::vector<Rgb> phase_colors(const Mesh& mesh, const Field3D& psi) {
     colors.reserve(mesh.vertices.size());
     for (const Vec3d& v : mesh.vertices) {
         const Complex<double> s = sample_trilinear(psi, v);
-        colors.push_back(phase_color(std::atan2(s.im, s.re)));
+        colors.push_back(phase_color(std::atan2(s.imag(), s.real())));
     }
     return colors;
 }

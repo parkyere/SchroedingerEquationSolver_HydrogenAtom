@@ -78,10 +78,10 @@ bool compare(const char* label, const std::vector<float>& gpu, const ses::Field3
     double max_err = 0.0;
     double max_mag = 0.0;
     for (std::size_t i = 0; i < cpu.data().size(); ++i) {
-        max_err = std::max(max_err, std::abs(gpu[2 * i] - cpu.data()[i].re));
-        max_err = std::max(max_err, std::abs(gpu[2 * i + 1] - cpu.data()[i].im));
-        max_mag = std::max(max_mag, std::abs(cpu.data()[i].re));
-        max_mag = std::max(max_mag, std::abs(cpu.data()[i].im));
+        max_err = std::max(max_err, std::abs(gpu[2 * i] - cpu.data()[i].real()));
+        max_err = std::max(max_err, std::abs(gpu[2 * i + 1] - cpu.data()[i].imag()));
+        max_mag = std::max(max_mag, std::abs(cpu.data()[i].real()));
+        max_mag = std::max(max_mag, std::abs(cpu.data()[i].imag()));
     }
     const double tol = abs_tol + 1e-5 * max_mag;
     const bool pass = max_err < tol;
@@ -113,8 +113,8 @@ bool check_phase_multiply(Gl& gl) {
     double max_err = 0.0;
     for (std::size_t i = 0; i < n; ++i) {
         const ses::Complex<double> expected = psi_d[i] * phase_d[i];
-        max_err = std::max(max_err, std::abs(out[2 * i] - expected.re));
-        max_err = std::max(max_err, std::abs(out[2 * i + 1] - expected.im));
+        max_err = std::max(max_err, std::abs(out[2 * i] - expected.real()));
+        max_err = std::max(max_err, std::abs(out[2 * i + 1] - expected.imag()));
     }
     const bool pass = max_err < 1e-5;
     std::printf("phase-multiply kernel: max |gpu - cpu| = %.3e  [%s]\n", max_err,

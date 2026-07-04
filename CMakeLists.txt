@@ -58,6 +58,13 @@ endif()
 # only the 4-wide double vectorization.
 # ---------------------------------------------------------------------------
 add_library(ses_arch INTERFACE)
+if(NOT MSVC)
+    # ses::Complex is std::complex: compile complex * and / to the naive
+    # formulas (no C99 Annex G NaN/inf fixups, no __muldc3 branches in the
+    # FFT hot loop) -- bitwise identical to the arithmetic the exact-value
+    # test oracles were pinned against. (MSVC never emits Annex G fixups.)
+    target_compile_options(ses_arch INTERFACE -fcx-limited-range)
+endif()
 if(SES_ENABLE_AVX2)
     if(MSVC)
         target_compile_options(ses_arch INTERFACE /arch:AVX2)
