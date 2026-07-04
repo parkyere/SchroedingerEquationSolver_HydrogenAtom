@@ -87,16 +87,32 @@ git config core.hooksPath tools/git-hooks
 
 ## Status
 
-Phases 0-7 delivered (128 tests green): the hand-rolled Complex/FFT/
-split-operator/imaginary-time stack is validated against analytic oracles
-through 3D, and `sesolver_app` renders the TDSE in real time -- a Gaussian
-electron wavepacket swinging past a soft-Coulomb nucleus, shown as a TRUE
-VOLUME-RENDERED cloud (GPU ray marching, opacity ~ |psi|^2, hue = arg(psi)
-via the cyclic colormap) at ~57 fps with the norm conserved to 1e-9 live.
+Phases 0-7 plus the GPU engine and the transitions arc delivered (168 tests
+green): the hand-rolled Complex/FFT/split-operator/imaginary-time stack is
+validated against analytic oracles through 3D, and `sesolver_app` renders
+the TDSE as a TRUE VOLUME-RENDERED electron cloud at 128^3 -- propagation,
+relaxation, and rendering all GPU-resident (OpenGL 4.3 compute; every
+kernel verified against the unit-tested CPU double core by
+`sesolver_gpucheck`). The full atom-and-light demo works from first
+principles computed by the solver itself:
+
+- **1** real time / **2** relax to 1s / **3** relax to 2p_z (deflated
+  imaginary time; the ITP energy readout converges live);
+- **M** soft Gaussian position measurement (collapse and re-evolution);
+- **D** spontaneous decay via quantum jumps -- Gamma from the Einstein A
+  coefficient over OUR wavefunctions (tau ~ 4.5 ns, same order as real
+  hydrogen 2p), photon flash + counter, honestly-labeled display
+  acceleration;
+- **L** resonant laser at w = E(2p) - E(1s): Z-polarization Rabi-pumps
+  1s -> 2p_z (live P(1s)/P(2pz) readout), X-polarization leaves P(2pz)
+  flat -- the selection rule on screen. Laser + decay = repeated
+  absorb/emit cycles (fluorescence).
+
 Tab switches to the marching-cubes isosurface view; drag orbits, wheel
-zooms, space pauses, [ ] tunes cloud density. All shader math (ray/box,
-Beer-Lambert opacity, front-to-back compositing, phase LUT) is unit-tested
-in core and transcribed into GLSL. See [docs/ROADMAP.md](docs/ROADMAP.md).
+zooms, space pauses, [ ] tunes cloud density. All shader math is
+unit-tested in core and transcribed into GLSL; the demo arcs regress
+headlessly via `--selftest-decay` / `--selftest-rabi`. See
+[docs/ROADMAP.md](docs/ROADMAP.md) and [docs/GPU_PLAN.md](docs/GPU_PLAN.md).
 
 > Toolchain note: build with the Qt-bundled MinGW kit
 > (`-DCMAKE_PREFIX_PATH=C:/Qt/6.8.1/mingw_64`, compilers from
