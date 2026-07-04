@@ -20,6 +20,7 @@ add_executable(sesolver_tests
     fft_test.cpp
     field_test.cpp
     grid_test.cpp
+    spectral_test.cpp
 )
 target_link_libraries(sesolver_tests
     PRIVATE
