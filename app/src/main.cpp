@@ -145,6 +145,9 @@ uniform vec3 box_min;
 uniform vec3 box_max;
 uniform float inv_peak;
 uniform float absorbance;
+uniform vec3 proton_center;
+uniform float proton_radius;
+uniform vec3 proton_color;
 uniform sampler3D psi_tex;
 uniform sampler1D phase_tex;
 out vec4 frag;
@@ -159,6 +162,19 @@ vec2 ray_box(vec3 o, vec3 d) {
                 min(min(tmax.x, tmax.y), tmax.z));
 }
 
+// Mirrors the tested ses::ray_sphere (unit direction, raw interval).
+vec2 ray_sphere(vec3 o, vec3 d) {
+    vec3 oc = o - proton_center;
+    float b = dot(oc, d);
+    float c = dot(oc, oc) - proton_radius * proton_radius;
+    float disc = b * b - c;
+    if (disc < 0.0) {
+        return vec2(1.0, -1.0);  // empty interval = miss
+    }
+    float s = sqrt(disc);
+    return vec2(-b - s, -b + s);
+}
+
 void main() {
     vec3 dir = normalize(v_world - eye);
     vec2 t = ray_box(eye, dir);
@@ -166,8 +182,20 @@ void main() {
     if (t.y <= tn) {
         discard;
     }
+
+    // Terminate the march at the proton sphere: cloud IN FRONT still fogs
+    // it, cloud BEHIND is correctly occluded (the earlier mesh marker was
+    // fogged from both sides and vanished at the density peak).
+    float t_stop = t.y;
+    bool hit_proton = false;
+    vec2 sp = ray_sphere(eye, dir);
+    if (sp.x <= sp.y && sp.x > tn && sp.x < t_stop) {
+        hit_proton = true;
+        t_stop = sp.x;
+    }
+
     const int kSteps = 160;
-    float step_len = (t.y - tn) / float(kSteps);
+    float step_len = (t_stop - tn) / float(kSteps);
     // Per-pixel jitter of the ray start kills wood-grain banding.
     float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
 
@@ -188,6 +216,18 @@ void main() {
             break;
         }
     }
+
+    if (hit_proton) {
+        // Shade the sphere point with the same headlight model as the mesh.
+        vec3 p = eye + sp.x * dir;
+        vec3 n = (p - proton_center) / proton_radius;
+        float diffuse = max(dot(n, -dir), 0.0);
+        float spec = pow(diffuse, 32.0);
+        vec3 shaded = proton_color * (0.25 + 0.75 * diffuse) + vec3(0.2) * spec;
+        C += (1.0 - A) * shaded;
+        A = 1.0;
+    }
+
     frag = vec4(C, A);  // premultiplied; blended over the clear color
 }
 )";
@@ -266,6 +306,9 @@ protected:
         vol_boxmax_loc_ = glGetUniformLocation(volume_program_, "box_max");
         vol_invpeak_loc_ = glGetUniformLocation(volume_program_, "inv_peak");
         vol_absorb_loc_ = glGetUniformLocation(volume_program_, "absorbance");
+        vol_pcenter_loc_ = glGetUniformLocation(volume_program_, "proton_center");
+        vol_pradius_loc_ = glGetUniformLocation(volume_program_, "proton_radius");
+        vol_pcolor_loc_ = glGetUniformLocation(volume_program_, "proton_color");
         glUseProgram(volume_program_);
         glUniform1i(glGetUniformLocation(volume_program_, "psi_tex"), 0);
         glUniform1i(glGetUniformLocation(volume_program_, "phase_tex"), 1);
@@ -355,11 +398,6 @@ protected:
             }
         }
 
-        // The proton marker draws first in both modes (depth-tested); in
-        // cloud mode the volume then blends over it, so the nucleus dims
-        // naturally behind dense parts of the electron cloud.
-        draw_proton(mvp_f, eye);
-
         if (mode_ == ViewMode::Cloud) {
             if (volume_dirty_) {
                 upload_volume();
@@ -382,6 +420,11 @@ protected:
                         static_cast<float>(g.y.xmax), static_cast<float>(g.z.xmax));
             glUniform1f(vol_invpeak_loc_, static_cast<float>(peak_ > 0.0 ? 1.0 / peak_ : 0.0));
             glUniform1f(vol_absorb_loc_, static_cast<float>(absorbance_));
+            // The nucleus lives INSIDE the ray marcher now (analytic sphere):
+            // fogged by cloud in front, occluding cloud behind.
+            glUniform3f(vol_pcenter_loc_, 0.0f, 0.0f, 0.0f);
+            glUniform1f(vol_pradius_loc_, static_cast<float>(kProtonMarkerRadius));
+            glUniform3f(vol_pcolor_loc_, 1.0f, 0.45f, 0.2f);
 
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_3D, psi_tex_);
@@ -399,6 +442,9 @@ protected:
                 upload_mesh();
                 mesh_dirty_ = false;
             }
+            // Surface mode keeps the mesh proton (depth-tested against the
+            // opaque isosurface, so occlusion is already correct there).
+            draw_proton(mvp_f, eye);
             glEnable(GL_DEPTH_TEST);
             glUseProgram(mesh_program_);
             glUniformMatrix4fv(mesh_mvp_loc_, 1, GL_FALSE, mvp_f);
@@ -827,6 +873,9 @@ private:
     GLint vol_boxmax_loc_ = -1;
     GLint vol_invpeak_loc_ = -1;
     GLint vol_absorb_loc_ = -1;
+    GLint vol_pcenter_loc_ = -1;
+    GLint vol_pradius_loc_ = -1;
+    GLint vol_pcolor_loc_ = -1;
 
     double azimuth_ = 0.6;
     double elevation_ = 0.4;
