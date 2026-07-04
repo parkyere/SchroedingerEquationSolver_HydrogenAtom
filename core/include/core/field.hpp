@@ -91,4 +91,15 @@ inline void normalize(Field3D& f) {
     }
 }
 
+// |psi|^2 per grid point -- the probability-density scalar field handed to
+// visualization (marching cubes, volume rendering). No volume weight: this
+// is a density, not an integral.
+inline std::vector<double> probability_density(const Field3D& f) {
+    std::vector<double> rho(f.data().size());
+    for (std::size_t i = 0; i < rho.size(); ++i) {
+        rho[i] = norm_sq(f.data()[i]);
+    }
+    return rho;
+}
+
 }  // namespace ses
