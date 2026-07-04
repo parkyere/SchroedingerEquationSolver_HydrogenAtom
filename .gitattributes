@@ -1,0 +1,10 @@
+# Normalize all text files to LF in the repository (cross-platform Win/Linux).
+# Critically keeps the POSIX git hook runnable on Linux (CRLF breaks the shebang).
+* text=auto eol=lf
+
+# Binary assets (no EOL conversion)
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.ico  binary
+*.spv  binary
