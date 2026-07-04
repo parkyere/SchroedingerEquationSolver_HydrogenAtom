@@ -39,13 +39,16 @@ Compute shaders cannot be gtest-unit-tested from the pure core. Instead:
 
 ## Milestones
 
-- G1: harness + SSBO plumbing + pointwise complex phase multiply kernel
-  (the e^{-iVdt/2} / e^{-ik^2dt/2} application).
-- G2: workgroup shared-memory radix-2 FFT along contiguous x-lines
-  (bit-reversal + staged butterflies, one line per workgroup).
-- G3: strided-axis FFT passes (y, z) -> full 3D FFT; inverse via conjugation.
-- G4: full split-operator step on GPU; psi lives in an SSBO; a final compute
-  pass writes the RG32F 3D texture for the existing volume renderer (no CPU
-  round-trip).
-- G5: shell switch to GPU stepping at 128^3; CPU path kept as a runtime
+- [x] G1: harness + SSBO plumbing + pointwise complex phase multiply kernel
+  (the e^{-iVdt/2} / e^{-ik^2dt/2} application). Verified: 1.6e-7.
+- [x] G2+G3: axis-generic workgroup shared-memory radix-2 line FFT (one line
+  per workgroup, base = (l%A)*B + (l/A)*C enumerates any axis) -> full 3D
+  FFT; inverse via the conj/scale kernel. Verified vs CPU double fft3 on
+  16x8x4 (distinct dims: axis mapping) and 64^3; GPU round-trip restores the
+  original to ~1e-6.
+- [ ] G4: full split-operator step on GPU; psi lives in an SSBO; phase
+  tables (e^{-iVdt/2}, e^{-ik^2dt/2}) uploaded once; a final compute pass
+  writes the RG32F 3D texture for the existing volume renderer (no CPU
+  round-trip). Verify: N GPU steps vs N CPU steps at fp32 tolerance.
+- [ ] G5: shell switch to GPU stepping at 128^3; CPU path kept as a runtime
   fallback and as the verification reference.

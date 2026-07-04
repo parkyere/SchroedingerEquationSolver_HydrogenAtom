@@ -6,10 +6,18 @@
 // Exit codes: 0 = all kernels match, 1 = mismatch, 77 = no GL 4.3 context
 // (registered to ctest as SKIP).
 //
-// G1 kernel: in-place pointwise complex multiply -- the e^{-iVdt/2} and
-// e^{-ik^2dt/2} phase applications of the split-operator step.
+// Kernels so far:
+//  G1: in-place pointwise complex multiply (the phase applications);
+//  G2+G3: shared-memory radix-2 line FFT, axis-generic (one workgroup per
+//         line; base = (l % A)*B + (l/A)*C enumerates lines on any axis),
+//         verified against the CPU double fft3 on a distinct-dims grid
+//         (16x8x4, catches axis mix-ups) and at production size (64^3);
+//         inverse via a conj/scale kernel, verified by GPU round-trip.
 
 #include <core/complex.hpp>
+#include <core/fft.hpp>
+#include <core/field.hpp>
+#include <core/grid.hpp>
 
 #include <QGuiApplication>
 #include <QOffscreenSurface>
@@ -20,6 +28,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstddef>
+#include <string>
 #include <vector>
 
 namespace {
@@ -42,7 +51,96 @@ void main() {
 }
 )";
 
+// Axis-generic line FFT: one workgroup per line, the line staged in shared
+// memory, bit-reversal load, log2(N) butterfly stages with barriers.
+// Transcribes the tested CPU radix-2 (core/fft.hpp) with in-shader twiddles.
+const char* kLineFftTemplate = R"(#version 430 core
+layout(local_size_x = @NHALF@) in;
+layout(std430, binding = 0) buffer DataBuf { vec2 data[]; };
+uniform int mod_a;
+uniform int mul_b;
+uniform int mul_c;
+uniform int stride;
+uniform int n_lines;
+
+shared vec2 line_sm[@N@];
+
+const float kTwoPi = 6.28318530717958647692;
+
+uint bit_reverse(uint v) { return bitfieldReverse(v) >> (32u - @LOG2N@u); }
+
+void main() {
+    int l = int(gl_WorkGroupID.x);
+    if (l >= n_lines) {
+        return;
+    }
+    int base = (l % mod_a) * mul_b + (l / mod_a) * mul_c;
+    uint t = gl_LocalInvocationID.x;
+    uint i0 = t;
+    uint i1 = t + @NHALF@u;
+
+    line_sm[i0] = data[base + int(bit_reverse(i0)) * stride];
+    line_sm[i1] = data[base + int(bit_reverse(i1)) * stride];
+    barrier();
+
+    for (uint len = 2u; len <= @N@u; len <<= 1u) {
+        uint half_len = len >> 1u;
+        uint j = t % half_len;
+        uint pos = (t / half_len) * len + j;
+        float ang = -kTwoPi * float(j) / float(len);
+        vec2 w = vec2(cos(ang), sin(ang));
+        vec2 u = line_sm[pos];
+        vec2 q = line_sm[pos + half_len];
+        vec2 v = vec2(q.x * w.x - q.y * w.y, q.x * w.y + q.y * w.x);
+        line_sm[pos] = u + v;
+        line_sm[pos + half_len] = u - v;
+        barrier();
+    }
+
+    data[base + int(i0) * stride] = line_sm[i0];
+    data[base + int(i1) * stride] = line_sm[i1];
+}
+)";
+
+// conj + uniform scale: psi <- s * conj(psi). With the forward FFT this
+// yields the inverse (conjugation identity), same as the CPU core.
+const char* kConjScaleSrc = R"(#version 430 core
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer DataBuf { vec2 data[]; };
+uniform uint n;
+uniform float scale;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= n) {
+        return;
+    }
+    data[i] = scale * vec2(data[i].x, -data[i].y);
+}
+)";
+
 struct Gl : QOpenGLFunctions_4_3_Core {};
+
+std::string instantiate(std::string tmpl, const char* token, int value) {
+    const std::string t{token};
+    const std::string v = std::to_string(value);
+    for (std::size_t p = tmpl.find(t); p != std::string::npos; p = tmpl.find(t, p)) {
+        tmpl.replace(p, t.size(), v);
+        p += v.size();
+    }
+    return tmpl;
+}
+
+std::string line_fft_source(int n) {
+    int log2n = 0;
+    while ((1 << log2n) < n) {
+        ++log2n;
+    }
+    std::string src{kLineFftTemplate};
+    src = instantiate(std::move(src), "@NHALF@", n / 2);
+    src = instantiate(std::move(src), "@N@", n);
+    src = instantiate(std::move(src), "@LOG2N@", log2n);
+    return src;
+}
 
 GLuint compile_compute(Gl& gl, const char* src) {
     const GLuint shader = gl.glCreateShader(GL_COMPUTE_SHADER);
@@ -127,6 +225,119 @@ bool check_phase_multiply(Gl& gl) {
     return pass;
 }
 
+// GPU 3D FFT: the axis-generic line kernel dispatched once per axis.
+void gpu_fft3(Gl& gl, const ses::Grid3D& g) {
+    struct AxisPass {
+        int n;        // line length
+        int n_lines;
+        int mod_a;
+        int mul_b;
+        int mul_c;
+        int stride;
+    };
+    const int nx = g.x.n;
+    const int ny = g.y.n;
+    const int nz = g.z.n;
+    const AxisPass passes[3] = {
+        {nx, ny * nz, ny * nz, nx, 0, 1},        // x-lines (contiguous)
+        {ny, nx * nz, nx, 1, nx * ny, nx},       // y-lines
+        {nz, nx * ny, nx * ny, 1, 0, nx * ny},   // z-lines
+    };
+    for (const AxisPass& p : passes) {
+        const GLuint prog = compile_compute(gl, line_fft_source(p.n).c_str());
+        gl.glUseProgram(prog);
+        gl.glUniform1i(gl.glGetUniformLocation(prog, "mod_a"), p.mod_a);
+        gl.glUniform1i(gl.glGetUniformLocation(prog, "mul_b"), p.mul_b);
+        gl.glUniform1i(gl.glGetUniformLocation(prog, "mul_c"), p.mul_c);
+        gl.glUniform1i(gl.glGetUniformLocation(prog, "stride"), p.stride);
+        gl.glUniform1i(gl.glGetUniformLocation(prog, "n_lines"), p.n_lines);
+        gl.glDispatchCompute(static_cast<GLuint>(p.n_lines), 1, 1);
+        gl.glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+        gl.glDeleteProgram(prog);
+    }
+}
+
+void gpu_conj_scale(Gl& gl, std::size_t n, float scale) {
+    const GLuint prog = compile_compute(gl, kConjScaleSrc);
+    gl.glUseProgram(prog);
+    gl.glUniform1ui(gl.glGetUniformLocation(prog, "n"), static_cast<GLuint>(n));
+    gl.glUniform1f(gl.glGetUniformLocation(prog, "scale"), scale);
+    gl.glDispatchCompute(static_cast<GLuint>((n + 255) / 256), 1, 1);
+    gl.glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    gl.glDeleteProgram(prog);
+}
+
+ses::Field3D deterministic_field(const ses::Grid3D& g) {
+    ses::Field3D f{g};
+    for (int i = 0; i < f.size(); ++i) {
+        const double x = static_cast<double>(i);
+        f.data()[static_cast<std::size_t>(i)] =
+            ses::Complex<double>{std::sin(0.61 * x) + 0.15, std::cos(1.27 * x) - 0.2};
+    }
+    return f;
+}
+
+std::vector<float> to_rg32f(const ses::Field3D& f) {
+    std::vector<float> out(2 * f.data().size());
+    for (std::size_t i = 0; i < f.data().size(); ++i) {
+        out[2 * i] = static_cast<float>(f.data()[i].re);
+        out[2 * i + 1] = static_cast<float>(f.data()[i].im);
+    }
+    return out;
+}
+
+bool compare(const char* label, const std::vector<float>& gpu, const ses::Field3D& cpu) {
+    double max_err = 0.0;
+    double max_mag = 0.0;
+    for (std::size_t i = 0; i < cpu.data().size(); ++i) {
+        max_err = std::max(max_err, std::abs(gpu[2 * i] - cpu.data()[i].re));
+        max_err = std::max(max_err, std::abs(gpu[2 * i + 1] - cpu.data()[i].im));
+        max_mag = std::max(max_mag, std::abs(cpu.data()[i].re));
+        max_mag = std::max(max_mag, std::abs(cpu.data()[i].im));
+    }
+    const double tol = 1e-4 + 1e-5 * max_mag;  // fp32 quantization at spectrum scale
+    const bool pass = max_err < tol;
+    std::printf("%s: max |gpu - cpu| = %.3e (tol %.3e)  [%s]\n", label, max_err, tol,
+                pass ? "PASS" : "FAIL");
+    return pass;
+}
+
+// G2+G3: GPU 3-axis FFT vs CPU double fft3, plus GPU inverse round-trip.
+bool check_fft3(Gl& gl, const ses::Grid3D& g, const char* label) {
+    const ses::Field3D original = deterministic_field(g);
+    const std::vector<float> staged = to_rg32f(original);
+    const std::size_t cells = original.data().size();
+
+    const GLuint buf = make_ssbo(gl, 0, staged);
+
+    // forward on the GPU vs CPU
+    gpu_fft3(gl, g);
+    std::vector<float> gpu_fwd(2 * cells);
+    gl.glBindBuffer(GL_SHADER_STORAGE_BUFFER, buf);
+    gl.glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
+                          static_cast<GLsizeiptr>(gpu_fwd.size() * sizeof(float)),
+                          gpu_fwd.data());
+    ses::Field3D cpu = original;
+    ses::fft(cpu);
+    std::string fwd_label = std::string{label} + " forward";
+    bool ok = compare(fwd_label.c_str(), gpu_fwd, cpu);
+
+    // inverse on the GPU (conjugation identity) must restore the original
+    gpu_conj_scale(gl, cells, 1.0f);
+    gpu_fft3(gl, g);
+    gpu_conj_scale(gl, cells, 1.0f / static_cast<float>(cells));
+    std::vector<float> gpu_rt(2 * cells);
+    gl.glBindBuffer(GL_SHADER_STORAGE_BUFFER, buf);
+    gl.glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
+                          static_cast<GLsizeiptr>(gpu_rt.size() * sizeof(float)),
+                          gpu_rt.data());
+    std::string rt_label = std::string{label} + " round-trip";
+    ok = compare(rt_label.c_str(), gpu_rt, original) && ok;
+
+    gl.glDeleteBuffers(1, &buf);
+    return ok;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -158,6 +369,17 @@ int main(int argc, char** argv) {
         return kSkipExitCode;
     }
 
-    const bool ok = check_phase_multiply(gl);
+    bool ok = check_phase_multiply(gl);
+
+    // Distinct dims force any axis-mapping/stride bug to change the answer.
+    const ses::Grid3D small{ses::Grid1D{0.0, 1.0, 16}, ses::Grid1D{0.0, 1.0, 8},
+                            ses::Grid1D{0.0, 1.0, 4}};
+    ok = check_fft3(gl, small, "fft3 16x8x4") && ok;
+
+    // Production size.
+    const ses::Grid1D axis64{0.0, 1.0, 64};
+    const ses::Grid3D big{axis64, axis64, axis64};
+    ok = check_fft3(gl, big, "fft3 64^3") && ok;
+
     return ok ? 0 : 1;
 }
