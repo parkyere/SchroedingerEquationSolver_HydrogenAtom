@@ -18,6 +18,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
 namespace ses {
@@ -115,10 +116,16 @@ public:
     }
 
 private:
+    // Elementwise (disjoint) multiply: threaded result is bitwise identical.
     static void apply_phase(const std::vector<Complex<double>>& phase,
                             std::vector<Complex<double>>& a) {
-        for (std::size_t i = 0; i < a.size(); ++i) {
-            a[i] = a[i] * phase[i];
+        const std::int64_t n = static_cast<std::int64_t>(a.size());
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+        for (std::int64_t i = 0; i < n; ++i) {
+            a[static_cast<std::size_t>(i)] =
+                a[static_cast<std::size_t>(i)] * phase[static_cast<std::size_t>(i)];
         }
     }
 

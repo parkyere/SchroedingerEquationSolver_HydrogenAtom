@@ -13,6 +13,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <numbers>
 #include <utility>
 #include <vector>
@@ -82,7 +83,11 @@ inline void ifft(std::vector<Complex<double>>& a) {
 
 // 3D forward transform: 1D FFT along each axis. x-lines are contiguous in
 // the x-fastest layout and transform in place; y/z lines are gathered into a
-// scratch buffer, transformed, and scattered back.
+// per-thread scratch buffer, transformed, and scattered back.
+//
+// Parallelism note: every 1D line owns a disjoint slice of memory and is
+// transformed by exactly one thread, so the threaded result is BITWISE
+// IDENTICAL to the serial one (no reductions, no FP reordering).
 inline void fft(Field3D& f) {
     std::vector<Complex<double>>& a = f.data();
     const Grid3D& g = f.grid();
@@ -90,48 +95,80 @@ inline void fft(Field3D& f) {
     const int ny = g.y.n;
     const int nz = g.z.n;
 
+#ifdef _OPENMP
+#pragma omp parallel for collapse(2) schedule(static)
+#endif
     for (int k = 0; k < nz; ++k) {
         for (int j = 0; j < ny; ++j) {
             fft(a.data() + g.flat(0, j, k), static_cast<std::size_t>(nx));
         }
     }
 
-    std::vector<Complex<double>> line(static_cast<std::size_t>(ny));
-    for (int k = 0; k < nz; ++k) {
-        for (int i = 0; i < nx; ++i) {
-            for (int j = 0; j < ny; ++j) {
-                line[static_cast<std::size_t>(j)] = a[static_cast<std::size_t>(g.flat(i, j, k))];
-            }
-            fft(line.data(), line.size());
-            for (int j = 0; j < ny; ++j) {
-                a[static_cast<std::size_t>(g.flat(i, j, k))] = line[static_cast<std::size_t>(j)];
+#ifdef _OPENMP
+#pragma omp parallel
+#endif
+    {
+        std::vector<Complex<double>> line(static_cast<std::size_t>(ny));
+#ifdef _OPENMP
+#pragma omp for collapse(2) schedule(static)
+#endif
+        for (int k = 0; k < nz; ++k) {
+            for (int i = 0; i < nx; ++i) {
+                for (int j = 0; j < ny; ++j) {
+                    line[static_cast<std::size_t>(j)] =
+                        a[static_cast<std::size_t>(g.flat(i, j, k))];
+                }
+                fft(line.data(), line.size());
+                for (int j = 0; j < ny; ++j) {
+                    a[static_cast<std::size_t>(g.flat(i, j, k))] =
+                        line[static_cast<std::size_t>(j)];
+                }
             }
         }
     }
 
-    line.resize(static_cast<std::size_t>(nz));
-    for (int j = 0; j < ny; ++j) {
-        for (int i = 0; i < nx; ++i) {
-            for (int k = 0; k < nz; ++k) {
-                line[static_cast<std::size_t>(k)] = a[static_cast<std::size_t>(g.flat(i, j, k))];
-            }
-            fft(line.data(), line.size());
-            for (int k = 0; k < nz; ++k) {
-                a[static_cast<std::size_t>(g.flat(i, j, k))] = line[static_cast<std::size_t>(k)];
+#ifdef _OPENMP
+#pragma omp parallel
+#endif
+    {
+        std::vector<Complex<double>> line(static_cast<std::size_t>(nz));
+#ifdef _OPENMP
+#pragma omp for collapse(2) schedule(static)
+#endif
+        for (int j = 0; j < ny; ++j) {
+            for (int i = 0; i < nx; ++i) {
+                for (int k = 0; k < nz; ++k) {
+                    line[static_cast<std::size_t>(k)] =
+                        a[static_cast<std::size_t>(g.flat(i, j, k))];
+                }
+                fft(line.data(), line.size());
+                for (int k = 0; k < nz; ++k) {
+                    a[static_cast<std::size_t>(g.flat(i, j, k))] =
+                        line[static_cast<std::size_t>(k)];
+                }
             }
         }
     }
 }
 
-// 3D inverse: conjugation identity with N = nx*ny*nz.
+// 3D inverse: conjugation identity with N = nx*ny*nz. The elementwise loops
+// are threaded (disjoint elements: bitwise identical to serial).
 inline void ifft(Field3D& f) {
-    for (Complex<double>& z : f.data()) {
-        z = conj(z);
+    std::vector<Complex<double>>& a = f.data();
+    const std::int64_t n = static_cast<std::int64_t>(a.size());
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+    for (std::int64_t i = 0; i < n; ++i) {
+        a[static_cast<std::size_t>(i)] = conj(a[static_cast<std::size_t>(i)]);
     }
     fft(f);
     const double inv = 1.0 / static_cast<double>(f.size());
-    for (Complex<double>& z : f.data()) {
-        z = inv * conj(z);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+    for (std::int64_t i = 0; i < n; ++i) {
+        a[static_cast<std::size_t>(i)] = inv * conj(a[static_cast<std::size_t>(i)]);
     }
 }
 

@@ -18,3 +18,15 @@ add_library(sesolver_core STATIC
 target_include_directories(sesolver_core PUBLIC include)
 target_compile_features(sesolver_core PUBLIC cxx_std_20)
 target_link_libraries(sesolver_core PRIVATE ses_warnings)
+
+# Parallel hot loops (3D FFT lines, pointwise phase tables). The pragmas are
+# guarded by #ifdef _OPENMP, so a compiler without OpenMP still builds a
+# correct serial core. PUBLIC: the code lives in headers, so consumers need
+# the flag too.
+find_package(OpenMP QUIET)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(sesolver_core PUBLIC OpenMP::OpenMP_CXX)
+    message(STATUS "OpenMP found - parallel core hot loops enabled.")
+else()
+    message(STATUS "OpenMP not found - core runs serial.")
+endif()
