@@ -397,32 +397,6 @@ bool check_driven_step(Gl& gl) {
     return ok;
 }
 
-// B-field: the rigid-rotation kernel (Larmor precession) vs core rotate_field.
-bool check_rotate(Gl& gl) {
-    const ses::Grid1D axis{-8.0, 8.0, 32};
-    const ses::Grid3D g{axis, axis, axis};
-    const std::vector<double> v = ses::soft_coulomb_potential(g, 1.0, 1.0, ses::Vec3d{});
-    const ses::SplitOperator3D cpu_prop{g, v, 0.02};  // only for the phase tables
-    const ses::Field3D psi0 = ses::gaussian_wavepacket(
-        g, ses::Vec3d{2.0, 1.0, 0.0}, ses::Vec3d{1.2, 1.2, 1.2}, ses::Vec3d{0.3, 0.0, 0.0});
-    ses_gpu::GpuEngine engine;
-    if (!engine.initialize(gl, g, cpu_prop.half_potential_phase(),
-                           cpu_prop.kinetic_phase(), psi0)) {
-        std::printf("engine init: FAIL\n");
-        return false;
-    }
-    bool ok = true;
-    for (int ax = 0; ax <= 2; ax += 2) {  // about x, then z
-        engine.upload_state(gl, psi0);
-        engine.rotate_psi(gl, ax, 0.7);
-        const ses::Field3D cpu = ses::rotate_field(psi0, ax, 0.7);
-        std::vector<float> gpu_out;
-        engine.readback(gl, gpu_out);
-        ok = compare(ax == 0 ? "rotate about x" : "rotate about z", gpu_out, cpu, 1e-4) && ok;
-    }
-    return ok;
-}
-
 // B-field PROPER solve: the exact three-shear rotate_z on the GPU psi SSBO vs
 // core ses::rotate_z, and the full magnetic Strang step vs core
 // MagneticPropagator3D (diamagnetic potential + paramagnetic rotation).
@@ -514,7 +488,6 @@ int main(int argc, char** argv) {
     ok = check_relax(gl) && ok;
     ok = check_deflation(gl) && ok;
     ok = check_driven_step(gl) && ok;
-    ok = check_rotate(gl) && ok;
     ok = check_magnetic(gl) && ok;
 
     return ok ? 0 : 1;
