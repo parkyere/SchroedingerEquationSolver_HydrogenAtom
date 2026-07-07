@@ -112,6 +112,44 @@ TEST(MagneticPropagator, EvolutionFactorsIntoCorePlusLarmorRotation) {
     EXPECT_LT(max_abs_diff(mag, ref), 1e-4);
 }
 
+TEST(MagneticPropagator, AboutXCarriesThePerpendicularDiamagneticTerm) {
+    const Grid3D g = cube(12.0, 32);
+    const std::vector<double> v = ses::soft_coulomb_potential(g, 1.0, 1.0, ses::Vec3d{});
+    const double b = 0.4;
+    const ses::MagneticPropagator3D prop{g, v, 0.01, b, 0};  // axis x
+    const std::vector<double>& veff = prop.effective_potential();
+    for (int k = 0; k < g.z.n; k += 7) {
+        for (int j = 0; j < g.y.n; j += 5) {
+            for (int i = 0; i < g.x.n; i += 5) {
+                const double perp2 =  // (B/2)L_x -> diamagnetic in y,z
+                    g.y.coord(j) * g.y.coord(j) + g.z.coord(k) * g.z.coord(k);
+                const double expected =
+                    v[static_cast<std::size_t>(g.flat(i, j, k))] + b * b / 8.0 * perp2;
+                EXPECT_NEAR(veff[static_cast<std::size_t>(g.flat(i, j, k))], expected,
+                            1e-12);
+            }
+        }
+    }
+}
+
+TEST(MagneticPropagator, AboutXFactorsIntoCorePlusRotation) {
+    const Grid3D g = cube(12.0, 32);
+    const std::vector<double> v = ses::soft_coulomb_potential(g, 1.0, 1.0, ses::Vec3d{});
+    const double dt = 0.01;
+    const double b = 0.5;
+    const int n = 40;
+    Field3D psi0 = ses::gaussian_wavepacket(g, ses::Vec3d{0.5, 2.5, 0.0},
+                                            ses::Vec3d{1.4, 1.4, 1.4},
+                                            ses::Vec3d{0.4, 0.0, 0.0});
+    const ses::MagneticPropagator3D prop{g, v, dt, b, 0};  // axis x
+    Field3D mag = psi0;
+    prop.step(mag, n);
+    Field3D ref = psi0;
+    ses::SplitOperator3D{g, prop.effective_potential(), dt}.step(ref, n);
+    ses::rotate_axis(ref, 0, 0.5 * b * (n * dt));
+    EXPECT_LT(max_abs_diff(mag, ref), 1e-4);
+}
+
 TEST(MagneticPropagator, ConservesNorm) {
     const Grid3D g = cube(12.0, 32);
     const std::vector<double> v = ses::soft_coulomb_potential(g, 1.0, 1.0, ses::Vec3d{});
