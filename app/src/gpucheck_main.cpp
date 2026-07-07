@@ -31,8 +31,10 @@
 #include <core/field.hpp>
 #include <core/grid.hpp>
 #include <core/emission.hpp>
+#include <core/harmonics.hpp>
 #include <core/imaginary_time.hpp>
 #include <core/magnetic.hpp>
+#include <core/radial.hpp>
 #include <core/potential.hpp>
 #include <core/propagator.hpp>
 #include <core/sampling.hpp>
@@ -520,6 +522,58 @@ bool check_dipole(Gl& gl) {
     return ok;
 }
 
+// T10: orbital synthesis psi = (u/r) Y_lm on the GPU vs core synthesize_orbital.
+// The radial u is solved once on the CPU (harmonic trap, exercises l up to 5)
+// and fed to BOTH paths; the GPU builds + normalizes on-device while the core
+// builds in double, so the residual is the fp32-vs-double synthesis error.
+bool check_synth(Gl& gl) {
+    const ses::Grid1D axis{-8.0, 8.0, 32};
+    const ses::Grid3D g{axis, axis, axis};
+    const std::vector<double> v = ses::soft_coulomb_potential(g, 1.0, 1.0, ses::Vec3d{});
+    const ses::SplitOperator3D prop{g, v, 0.02};
+    const ses::Field3D seed = ses::gaussian_wavepacket(
+        g, ses::Vec3d{}, ses::Vec3d{1.5, 1.5, 1.5}, ses::Vec3d{});
+    ses_gpu::GpuEngine eng;
+    if (!eng.initialize(gl, g, prop.half_potential_phase(), prop.kinetic_phase(), seed)) {
+        std::printf("engine init: FAIL\n");
+        return false;
+    }
+    const ses::RadialGrid rg{8.0, 1599};
+    std::vector<double> vr(static_cast<std::size_t>(rg.n));
+    for (int i = 0; i < rg.n; ++i) {
+        vr[static_cast<std::size_t>(i)] = 0.5 * rg.r(i) * rg.r(i);
+    }
+    struct SynCase {
+        int l, k, m;
+    };
+    const SynCase cases[] = {{0, 0, 0}, {1, 0, -1}, {2, 0, 1},
+                             {3, 0, -2}, {4, 0, 3}, {5, 0, 5}, {5, 0, 0}};
+    double worst = 0.0;
+    for (const SynCase& c : cases) {
+        const ses::RadialState st =
+            ses::radial_eigenstate(rg, ses::radial_hamiltonian(rg, vr, c.l), c.k);
+        const ses::Field3D cpu = ses::synthesize_orbital(g, rg, st.u, c.l, c.m);
+        const GLuint buf =
+            eng.synthesize_state(gl, st.u, c.l, c.m, rg.h(), rg.rmax, rg.n);
+        eng.copy_into_psi(gl, buf);
+        std::vector<float> gpu;
+        eng.readback(gl, gpu);
+        double err = 0.0;
+        for (std::size_t i = 0; i < cpu.data().size(); ++i) {
+            err = std::max(err, std::abs(static_cast<double>(gpu[2 * i]) -
+                                         cpu.data()[i].real()));
+            err = std::max(err, std::abs(static_cast<double>(gpu[2 * i + 1]) -
+                                         cpu.data()[i].imag()));
+        }
+        worst = std::max(worst, err);
+        gl.glDeleteBuffers(1, &buf);
+    }
+    const bool ok = worst < 1e-4;
+    std::printf("orbital synthesis (u/r)Ylm: max |gpu - cpu| = %.3e  [%s]\n", worst,
+                ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -568,6 +622,7 @@ int main(int argc, char** argv) {
     ok = check_magnetic(gl) && ok;
     ok = check_mean_force(gl) && ok;
     ok = check_dipole(gl) && ok;
+    ok = check_synth(gl) && ok;
 
     return ok ? 0 : 1;
 }

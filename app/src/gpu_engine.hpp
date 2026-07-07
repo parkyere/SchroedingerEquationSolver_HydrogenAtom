@@ -409,6 +409,118 @@ void main() {
 }
 )";
 
+// Orbital synthesis psi = (u(r)/r) Y_lm on the GPU: the atlas builds every
+// eigenstate straight into its resident buffer, no CPU field. real_Ylm mirrors
+// core/harmonics.hpp (l <= 5), and the radial interpolation mirrors
+// synthesize_orbital's (u(0)=0 pins the inner segment). Verified against the
+// unit-tested core by sesolver_gpucheck. Not normalized here -- the caller runs
+// the norm reduction + scale afterwards (as the core's normalize() does).
+inline const char* kSynthSrc = R"(#version 430 core
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) writeonly buffer PsiBuf { vec2 psi[]; };
+layout(std430, binding = 5) readonly buffer RadialBuf { float u[]; };
+uniform uint n;
+uniform int nx;
+uniform int ny;
+uniform vec3 box_min;
+uniform vec3 cell_h;
+uniform int l;
+uniform int m;
+uniform float h_radial;   // radial spacing rmax/(n_radial+1)
+uniform float rmax;
+uniform int n_radial;
+
+const float PI = 3.14159265358979323846;
+
+float real_Ylm(float x, float y, float z) {
+    float r2 = x * x + y * y + z * z;
+    if (l == 0) return 1.0 / (2.0 * sqrt(PI));
+    if (r2 == 0.0) return 0.0;
+    if (l == 1) {
+        float c = sqrt(3.0 / (4.0 * PI)) / sqrt(r2);
+        if (m == -1) return c * y;
+        if (m == 0) return c * z;
+        return c * x;
+    }
+    if (l == 2) {
+        float c = sqrt(15.0 / PI) / r2;
+        if (m == -2) return 0.5 * c * x * y;
+        if (m == -1) return 0.5 * c * y * z;
+        if (m == 0) return 0.25 * sqrt(5.0 / PI) * (3.0 * z * z - r2) / r2;
+        if (m == 1) return 0.5 * c * z * x;
+        return 0.25 * c * (x * x - y * y);
+    }
+    if (l == 3) {
+        float r3 = r2 * sqrt(r2);
+        if (m == -3) return 0.25 * sqrt(35.0 / (2.0 * PI)) * y * (3.0 * x * x - y * y) / r3;
+        if (m == -2) return 0.5 * sqrt(105.0 / PI) * x * y * z / r3;
+        if (m == -1) return 0.25 * sqrt(21.0 / (2.0 * PI)) * y * (5.0 * z * z - r2) / r3;
+        if (m == 0) return 0.25 * sqrt(7.0 / PI) * z * (5.0 * z * z - 3.0 * r2) / r3;
+        if (m == 1) return 0.25 * sqrt(21.0 / (2.0 * PI)) * x * (5.0 * z * z - r2) / r3;
+        if (m == 2) return 0.25 * sqrt(105.0 / PI) * z * (x * x - y * y) / r3;
+        return 0.25 * sqrt(35.0 / (2.0 * PI)) * x * (x * x - 3.0 * y * y) / r3;
+    }
+    if (l == 4) {
+        float r4 = r2 * r2;
+        if (m == -4) return 0.75 * sqrt(35.0 / PI) * x * y * (x * x - y * y) / r4;
+        if (m == -3) return 0.75 * sqrt(35.0 / (2.0 * PI)) * y * z * (3.0 * x * x - y * y) / r4;
+        if (m == -2) return 0.75 * sqrt(5.0 / PI) * x * y * (7.0 * z * z - r2) / r4;
+        if (m == -1) return 0.75 * sqrt(5.0 / (2.0 * PI)) * y * z * (7.0 * z * z - 3.0 * r2) / r4;
+        if (m == 0) return (3.0 / 16.0) * sqrt(1.0 / PI) *
+                           (35.0 * z * z * z * z - 30.0 * z * z * r2 + 3.0 * r2 * r2) / r4;
+        if (m == 1) return 0.75 * sqrt(5.0 / (2.0 * PI)) * x * z * (7.0 * z * z - 3.0 * r2) / r4;
+        if (m == 2) return 0.375 * sqrt(5.0 / PI) * (x * x - y * y) * (7.0 * z * z - r2) / r4;
+        if (m == 3) return 0.75 * sqrt(35.0 / (2.0 * PI)) * x * z * (x * x - 3.0 * y * y) / r4;
+        return (3.0 / 16.0) * sqrt(35.0 / PI) *
+               (x * x * x * x - 6.0 * x * x * y * y + y * y * y * y) / r4;
+    }
+    // l == 5
+    float r5 = r2 * r2 * sqrt(r2);
+    float x2 = x * x;
+    float y2 = y * y;
+    float z2 = z * z;
+    float zpoly = 21.0 * z2 * z2 - 14.0 * z2 * r2 + r2 * r2;
+    if (m == -5) return (1.0 / 32.0) * sqrt(1386.0 / PI) *
+                        y * (5.0 * x2 * x2 - 10.0 * x2 * y2 + y2 * y2) / r5;
+    if (m == -4) return (1.0 / 16.0) * sqrt(3465.0 / PI) * 4.0 * x * y * (x2 - y2) * z / r5;
+    if (m == -3) return (1.0 / 32.0) * sqrt(770.0 / PI) * y * (3.0 * x2 - y2) * (9.0 * z2 - r2) / r5;
+    if (m == -2) return (1.0 / 8.0) * sqrt(1155.0 / PI) * 2.0 * x * y * z * (3.0 * z2 - r2) / r5;
+    if (m == -1) return (1.0 / 16.0) * sqrt(165.0 / PI) * y * zpoly / r5;
+    if (m == 0) return (1.0 / 16.0) * sqrt(11.0 / PI) *
+                       z * (63.0 * z2 * z2 - 70.0 * z2 * r2 + 15.0 * r2 * r2) / r5;
+    if (m == 1) return (1.0 / 16.0) * sqrt(165.0 / PI) * x * zpoly / r5;
+    if (m == 2) return (1.0 / 8.0) * sqrt(1155.0 / PI) * (x2 - y2) * z * (3.0 * z2 - r2) / r5;
+    if (m == 3) return (1.0 / 32.0) * sqrt(770.0 / PI) * x * (x2 - 3.0 * y2) * (9.0 * z2 - r2) / r5;
+    if (m == 4) return (1.0 / 16.0) * sqrt(3465.0 / PI) *
+                       (x2 * x2 - 6.0 * x2 * y2 + y2 * y2) * z / r5;
+    return (1.0 / 32.0) * sqrt(1386.0 / PI) * x * (x2 * x2 - 10.0 * x2 * y2 + 5.0 * y2 * y2) / r5;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= n) {
+        return;
+    }
+    int i = int(idx) % nx;
+    int j = (int(idx) / nx) % ny;
+    int k = int(idx) / (nx * ny);
+    vec3 r3 = box_min + vec3(float(i), float(j), float(k)) * cell_h;
+    float r = length(r3);
+    float u_over_r = 0.0;
+    if (r < h_radial) {
+        u_over_r = u[0] / h_radial;             // u(0)=0 pinned: l=0 limit u_0/h
+    } else if (r < rmax) {
+        float t = r / h_radial - 1.0;           // r_i = (i+1) h
+        int i0 = int(t);
+        float frac = t - float(i0);
+        float ui = (i0 + 1 < n_radial) ? (1.0 - frac) * u[i0] + frac * u[i0 + 1]
+                                       : (1.0 - frac) * u[i0];  // outer: u(rmax)=0
+        u_over_r = ui / r;
+    }
+    psi[idx] = vec2(u_over_r * real_Ylm(r3.x, r3.y, r3.z), 0.0);
+}
+)";
+
 // ---- helpers ---------------------------------------------------------------
 
 inline std::string instantiate(std::string tmpl, const char* token, int value) {
@@ -612,10 +724,11 @@ public:
         shear_prog_ = build_program(gl, kShearSrc, "shear");
         force_prog_ = build_program(gl, kMeanForceSrc, "mean force");
         dipole_prog_ = build_program(gl, kDipoleSrc, "dipole");
+        synth_prog_ = build_program(gl, kSynthSrc, "orbital synthesis");
         fft_progs_ = build_fft_programs(gl, grid);
         if (mul_prog_ == 0 || conj_prog_ == 0 || bridge_prog_ == 0 || norm_prog_ == 0 ||
             scale_prog_ == 0 || inner_prog_ == 0 || axpy_prog_ == 0 || kick_prog_ == 0 ||
-            shear_prog_ == 0 || force_prog_ == 0 || dipole_prog_ == 0 ||
+            shear_prog_ == 0 || force_prog_ == 0 || dipole_prog_ == 0 || synth_prog_ == 0 ||
             fft_progs_.axis[0] == 0 || fft_progs_.axis[1] == 0 ||
             fft_progs_.axis[2] == 0) {
             return false;
@@ -849,6 +962,76 @@ public:
     // footprint (~12 GB VRAM -> ~24 GB committed). Static keeps them GPU-side.
     GLuint create_state_buffer(Gl& gl, const ses::Field3D& state) {
         return make_static_buffer(gl, to_rg32f(state.data()));
+    }
+
+    // Upload the radial u_nl(r) table (fp32) that kSynthSrc interpolates.
+    void upload_radial(Gl& gl, const std::vector<double>& u) {
+        std::vector<float> f(u.size());
+        for (std::size_t i = 0; i < u.size(); ++i) {
+            f[i] = static_cast<float>(u[i]);
+        }
+        if (radial_u_buf_ == 0 || radial_u_count_ != u.size()) {
+            if (radial_u_buf_ != 0) {
+                gl.glDeleteBuffers(1, &radial_u_buf_);
+            }
+            radial_u_buf_ = make_buffer(gl, f);
+            radial_u_count_ = u.size();
+        } else {
+            gl.glBindBuffer(GL_SHADER_STORAGE_BUFFER, radial_u_buf_);
+            gl.glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
+                               static_cast<GLsizeiptr>(f.size() * sizeof(float)), f.data());
+        }
+    }
+
+    // Synthesize psi = (u/r) Y_lm INTO A NEW normalized state buffer on the GPU
+    // -- the atlas builds each eigenstate straight on the GPU, no CPU field.
+    // Never touches psi_buf_, so it is safe to call mid-simulation. h_radial =
+    // rmax/(n_radial+1). *out_peak (if given) receives the normalized peak
+    // |psi|^2. The buffer is GL_STATIC_COPY (a write-once eigenstate).
+    GLuint synthesize_state(Gl& gl, const std::vector<double>& u, int l, int m,
+                            double h_radial, double rmax, int n_radial,
+                            double* out_peak = nullptr) {
+        upload_radial(gl, u);
+        GLuint buf = 0;
+        gl.glGenBuffers(1, &buf);
+        gl.glBindBuffer(GL_SHADER_STORAGE_BUFFER, buf);
+        gl.glBufferData(GL_SHADER_STORAGE_BUFFER,
+                        static_cast<GLsizeiptr>(2 * cells_ * sizeof(float)), nullptr,
+                        GL_STATIC_COPY);
+        // Synthesize into the new buffer (binding 0), reading the radial table.
+        gl.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, buf);
+        gl.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, radial_u_buf_);
+        gl.glUseProgram(synth_prog_);
+        gl.glUniform1ui(gl.glGetUniformLocation(synth_prog_, "n"),
+                        static_cast<GLuint>(cells_));
+        gl.glUniform1i(gl.glGetUniformLocation(synth_prog_, "nx"), grid_.x.n);
+        gl.glUniform1i(gl.glGetUniformLocation(synth_prog_, "ny"), grid_.y.n);
+        gl.glUniform3f(gl.glGetUniformLocation(synth_prog_, "box_min"),
+                       static_cast<float>(grid_.x.xmin), static_cast<float>(grid_.y.xmin),
+                       static_cast<float>(grid_.z.xmin));
+        gl.glUniform3f(gl.glGetUniformLocation(synth_prog_, "cell_h"),
+                       static_cast<float>(grid_.x.spacing()),
+                       static_cast<float>(grid_.y.spacing()),
+                       static_cast<float>(grid_.z.spacing()));
+        gl.glUniform1i(gl.glGetUniformLocation(synth_prog_, "l"), l);
+        gl.glUniform1i(gl.glGetUniformLocation(synth_prog_, "m"), m);
+        gl.glUniform1f(gl.glGetUniformLocation(synth_prog_, "h_radial"),
+                       static_cast<float>(h_radial));
+        gl.glUniform1f(gl.glGetUniformLocation(synth_prog_, "rmax"),
+                       static_cast<float>(rmax));
+        gl.glUniform1i(gl.glGetUniformLocation(synth_prog_, "n_radial"), n_radial);
+        gl.glDispatchCompute(static_cast<GLuint>((cells_ + 255) / 256), 1, 1);
+        gl.glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+        // Normalize in place: the norm reduction and scale act on binding 0
+        // (still `buf`), exactly the core's normalize().
+        const NormPeak np = run_norm_peak(gl, norm_prog_, partials_buf_, cells_);
+        const double norm_sq = np.sum * grid_.cell_volume();
+        const double inv = (norm_sq > 0.0) ? 1.0 / std::sqrt(norm_sq) : 0.0;
+        run_scale(gl, scale_prog_, cells_, static_cast<float>(inv));
+        if (out_peak != nullptr) {
+            *out_peak = (norm_sq > 0.0) ? np.peak / norm_sq : 0.0;
+        }
+        return buf;
     }
 
     // psi <- contents of another state buffer (e.g. the quantum-jump
@@ -1121,6 +1304,8 @@ private:
     GLuint force_partials_buf_ = 0;    // vec4 partials for mean_force
     GLuint dipole_partials_buf_ = 0;   // 6-float partials for dipole_between
     GLuint grad_v_buf_ = 0;            // grad V field (vec4 per cell)
+    GLuint radial_u_buf_ = 0;          // radial u_nl(r) table for synthesis
+    std::size_t radial_u_count_ = 0;   // current radial table length
     GLuint mul_prog_ = 0;
     GLuint conj_prog_ = 0;
     GLuint bridge_prog_ = 0;
@@ -1132,6 +1317,7 @@ private:
     GLuint shear_prog_ = 0;
     GLuint force_prog_ = 0;
     GLuint dipole_prog_ = 0;
+    GLuint synth_prog_ = 0;
     FftPrograms fft_progs_;
 };
 
