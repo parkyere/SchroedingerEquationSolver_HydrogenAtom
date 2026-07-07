@@ -23,6 +23,7 @@ add_executable(sesolver_tests
     deflation_test.cpp
     drive_test.cpp
     dynamics3_test.cpp
+    emission_test.cpp
     fft3_test.cpp
     fft_test.cpp
     field3_test.cpp
