@@ -778,7 +778,8 @@ protected:
 
     void wheelEvent(QWheelEvent* e) override {
         distance_ *= std::pow(0.999, e->angleDelta().y());
-        distance_ = std::clamp(distance_, 4.0, 200.0);  // frame the +-64 box
+        distance_ = std::clamp(distance_, 4.0, 300.0);  // out past the +-64 box
+                                                         // (dynamic zfar follows)
         update();
     }
 
@@ -1780,7 +1781,9 @@ private:
 
     double azimuth_ = 0.6;
     double elevation_ = 0.4;
-    double distance_ = 28.0;
+    double distance_ = 120.0;  // default frames ~+-50 Bohr (45 deg fovy): the
+                               // whole n<=5 manifold, incl. the ~50 Bohr 5s tail
+                               // (wheel in toward 4 for a close-up of small ones)
     QPointF last_pos_;
 };
 
