@@ -842,8 +842,13 @@ public:
     }
 
     // Upload an auxiliary state (e.g. a cached eigenstate) into its own SSBO.
+    // These are WRITE-ONCE -- a synthesized eigenstate never changes after
+    // upload -- so they use GL_STATIC_COPY, not the engine's GL_DYNAMIC_COPY.
+    // The dynamic hint makes drivers keep a system-memory shadow for fast
+    // re-uploads; with 91 resident 134 MB buffers that shadow ~doubles the host
+    // footprint (~12 GB VRAM -> ~24 GB committed). Static keeps them GPU-side.
     GLuint create_state_buffer(Gl& gl, const ses::Field3D& state) {
-        return make_buffer(gl, to_rg32f(state.data()));
+        return make_static_buffer(gl, to_rg32f(state.data()));
     }
 
     // psi <- contents of another state buffer (e.g. the quantum-jump
@@ -1079,6 +1084,19 @@ private:
         gl.glBufferData(GL_SHADER_STORAGE_BUFFER,
                         static_cast<GLsizeiptr>(data.size() * sizeof(float)), data.data(),
                         GL_DYNAMIC_COPY);
+        return buf;
+    }
+
+    // Write-once GPU buffer (GL_STATIC_COPY): for data uploaded once and only
+    // read by shaders afterwards (the cached eigenstates / absorber mask).
+    // Signals the driver it need not keep a host staging copy for re-uploads.
+    static GLuint make_static_buffer(Gl& gl, const std::vector<float>& data) {
+        GLuint buf = 0;
+        gl.glGenBuffers(1, &buf);
+        gl.glBindBuffer(GL_SHADER_STORAGE_BUFFER, buf);
+        gl.glBufferData(GL_SHADER_STORAGE_BUFFER,
+                        static_cast<GLsizeiptr>(data.size() * sizeof(float)), data.data(),
+                        GL_STATIC_COPY);
         return buf;
     }
 
