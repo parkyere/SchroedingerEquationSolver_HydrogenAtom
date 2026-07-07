@@ -811,8 +811,64 @@ protected:
         glDrawArrays(GL_TRIANGLES, 0, gizmo_vertex_count_);
         glBindVertexArray(0);
 
+        draw_z_label(view, eye);  // label only Z; X, Y follow by the RH rule
+
         glDisable(GL_SCISSOR_TEST);
         glViewport(vp[0], vp[1], vp[2], vp[3]);  // restore the full viewport
+    }
+
+    // A small billboarded "z" glyph just past the +Z arrow tip, always facing
+    // the gizmo camera. Built each frame (18 verts) into z_label_vbo_; drawn
+    // with the mesh program / gizmo MVP already bound by draw_axes_gizmo.
+    void draw_z_label(const ses::Mat4& view, const ses::Vec3d& eye) {
+        const ses::Vec3d right{view.m[0], view.m[4], view.m[8]};
+        const ses::Vec3d up{view.m[1], view.m[5], view.m[9]};
+        const ses::Vec3d center{0.0, 0.0, 1.18};  // just past the length-1 tip
+        const double s = 0.24;
+        const ses::Vec3d nrm = normalized(eye - center);  // faces the camera
+
+        // "z" as three strokes in [-0.4,0.4] x [-0.5,0.5]: top bar, diagonal
+        // (top-right -> bottom-left), bottom bar. Each a rectangle (2 tris).
+        std::vector<std::array<double, 2>> pts;
+        auto quad = [&](std::array<double, 2> a, std::array<double, 2> b,
+                        std::array<double, 2> c, std::array<double, 2> d) {
+            pts.push_back(a);
+            pts.push_back(b);
+            pts.push_back(c);
+            pts.push_back(a);
+            pts.push_back(c);
+            pts.push_back(d);
+        };
+        quad({-0.4, 0.5}, {0.4, 0.5}, {0.4, 0.34}, {-0.4, 0.34});      // top bar
+        quad({-0.4, -0.34}, {0.4, -0.34}, {0.4, -0.5}, {-0.4, -0.5});  // bottom
+        const double ax = 0.4, ay = 0.40, bx = -0.4, by = -0.40, ht = 0.11;
+        const double dx = bx - ax, dy = by - ay;
+        const double dl = std::sqrt(dx * dx + dy * dy);
+        const double px = -dy / dl * ht, py = dx / dl * ht;  // perpendicular
+        quad({ax + px, ay + py}, {ax - px, ay - py}, {bx - px, by - py},
+             {bx + px, by + py});  // diagonal bar
+
+        std::vector<float> data;
+        data.reserve(pts.size() * 9);
+        for (const std::array<double, 2>& p : pts) {
+            const ses::Vec3d w = center + (p[0] * s) * right + (p[1] * s) * up;
+            data.push_back(static_cast<float>(w.x));
+            data.push_back(static_cast<float>(w.y));
+            data.push_back(static_cast<float>(w.z));
+            data.push_back(static_cast<float>(nrm.x));
+            data.push_back(static_cast<float>(nrm.y));
+            data.push_back(static_cast<float>(nrm.z));
+            data.push_back(0.75f);
+            data.push_back(0.85f);
+            data.push_back(1.0f);
+        }
+        glBindVertexArray(z_label_vao_);
+        glBindBuffer(GL_ARRAY_BUFFER, z_label_vbo_);
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(data.size() * sizeof(float)),
+                     data.data(), GL_DYNAMIC_DRAW);
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(pts.size()));
+        glBindVertexArray(0);
     }
 
     void draw_proton(const float* mvp_f, const ses::Vec3d& eye) {
@@ -1048,6 +1104,12 @@ public:
     // Result of the most recent energy measurement: eigenstate index, -1 for
     // the outside-the-manifold outcome, -2 if none has run yet (selftest hook).
     int last_measured_index() const { return last_measured_index_; }
+    // <z> of the current cloud (bridges the GPU state to the CPU session first);
+    // a selftest hook for the Stark polarization along +z.
+    double mean_z() {
+        ensure_cpu_current();
+        return ses::mean_position(sim_.psi()).z;
+    }
     double peak_excited_population() const { return rabi_peak_; }
 
 protected:
@@ -1639,6 +1701,22 @@ private:
                               reinterpret_cast<void*>(6 * sizeof(float)));
         glEnableVertexAttribArray(2);
         glBindVertexArray(0);
+
+        // Dynamic VBO for the billboarded "z" glyph (rebuilt each frame in
+        // draw_z_label); same attribute layout as the arrows.
+        glGenVertexArrays(1, &z_label_vao_);
+        glBindVertexArray(z_label_vao_);
+        glGenBuffers(1, &z_label_vbo_);
+        glBindBuffer(GL_ARRAY_BUFFER, z_label_vbo_);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, kStride, reinterpret_cast<void*>(0));
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, kStride,
+                              reinterpret_cast<void*>(3 * sizeof(float)));
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, kStride,
+                              reinterpret_cast<void*>(6 * sizeof(float)));
+        glEnableVertexAttribArray(2);
+        glBindVertexArray(0);
     }
 
     // Static warm-colored sphere at the nucleus, in the mesh vertex format.
@@ -1895,6 +1973,8 @@ private:
     GLuint gizmo_vao_ = 0;
     GLuint gizmo_vbo_ = 0;
     int gizmo_vertex_count_ = 0;
+    GLuint z_label_vao_ = 0;
+    GLuint z_label_vbo_ = 0;  // billboarded "z" glyph, rebuilt each frame
     std::mt19937 rng_{std::random_device{}()};
 
     GLuint volume_program_ = 0;
@@ -1974,23 +2054,36 @@ int main(int argc, char** argv) {
                         [viewport] { viewport->toggle_decay(); });
     controls->addAction(QStringLiteral("Laser (L)"), viewport,
                         [viewport] { viewport->toggle_laser(); });
-    // Draggable static E-field (+z) magnitude: 0 = off, full-scale = 0.05 au.
-    // The field is the dipole drive at omega = 0 (Stark). Drag up to polarize
-    // (and, hard enough, field-ionize) the cloud along +z -- the blue Z gizmo
-    // arrow shows the direction.
+    // Draggable static E-field (+z) magnitude: 0 = off, full-scale = 0.1 au
+    // (~5.1e10 V/m). The field is the dipole drive at omega = 0 (Stark). The 1s
+    // ground state is STIFF -- it barely polarizes (~0.2 Bohr) below ~0.03 au,
+    // then field-ionizes (cloud streams off +z). A live label shows the value.
     controls->addWidget(new QLabel(QStringLiteral(" E-field +z ")));
     {
+        constexpr double kMaxEfield = 0.1;  // au at full slider
+        auto* efield_val = new QLabel(QStringLiteral("off      "));
+        efield_val->setMinimumWidth(96);
         auto* efield_slider = new QSlider(Qt::Horizontal);
         efield_slider->setRange(0, 100);
         efield_slider->setFixedWidth(140);
         efield_slider->setFocusPolicy(Qt::NoFocus);  // keep the hotkeys live
         efield_slider->setToolTip(QStringLiteral(
-            "Static uniform electric field along +z (Stark). 0 = off."));
-        QObject::connect(efield_slider, &QSlider::valueChanged, viewport,
-                         [viewport](int val) {
-                             viewport->set_efield_e0(val / 100.0 * 0.05);
-                         });
+            "Static uniform E-field along +z (Stark). 0 = off; full = 0.1 au "
+            "(~5.1e10 V/m).\nThe 1s ground state barely moves below ~0.03 au, "
+            "then field-ionizes."));
+        QObject::connect(
+            efield_slider, &QSlider::valueChanged, viewport,
+            [viewport, efield_val](int val) {
+                const double e0 = val / 100.0 * kMaxEfield;
+                viewport->set_efield_e0(e0);
+                efield_val->setText(
+                    e0 > 0.0 ? QStringLiteral("%1 au / %2 V/m")
+                                   .arg(e0, 0, 'f', 3)
+                                   .arg(e0 * 5.14220674e11, 0, 'e', 1)
+                             : QStringLiteral("off"));
+            });
         controls->addWidget(efield_slider);
+        controls->addWidget(efield_val);
     }
     controls->addSeparator();
     controls->addAction(QStringLiteral("Reset packet (R)"), viewport,
@@ -2047,6 +2140,30 @@ int main(int argc, char** argv) {
                         idx >= 0 ? kStateSpec[static_cast<std::size_t>(idx)].name
                                  : "outside-manifold",
                         pass ? "PASS" : "FAIL");
+                    app.exit(pass ? 0 : 1);
+                });
+            });
+        });
+    }
+
+    // Headless-ish regression of the static E-field: relax to 1s (symmetric,
+    // <z> ~ 0), switch on a sub-ionization +z field, and require the cloud to
+    // polarize -- <z> shifts measurably off center (Stark). Proves the field
+    // actually acts on the cloud.
+    if (app.arguments().contains(QStringLiteral("--selftest-efield"))) {
+        run_when_manifold_ready(viewport, [viewport, &app] {
+            viewport->toggle_decay();  // OFF: keep the state put
+            viewport->set_relaxing();  // cool to 1s
+            QTimer::singleShot(12000, viewport, [viewport, &app] {
+                const double z0 = viewport->mean_z();
+                viewport->set_real_time();
+                viewport->set_efield_e0(0.02);  // sub-ionization: clean polarization
+                QTimer::singleShot(15000, viewport, [viewport, &app, z0] {
+                    const double z1 = viewport->mean_z();
+                    const bool pass = std::abs(z1 - z0) > 0.03;
+                    std::fprintf(stderr,
+                                 "selftest-efield: <z> %.4f -> %.4f Bohr  [%s]\n",
+                                 z0, z1, pass ? "PASS" : "FAIL");
                     app.exit(pass ? 0 : 1);
                 });
             });
