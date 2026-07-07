@@ -131,7 +131,9 @@ constexpr double kRelaxDtau = 0.05;
 constexpr int kTickMs = 16;
 constexpr double kIsoFraction = 0.25;
 constexpr int kPhaseLutSize = 256;
-constexpr double kMeasureSigma = 0.8;  // measurement resolution (Bohr)
+constexpr double kMeasureSigma = 0.5;  // position measurement resolution (Bohr):
+                                       // the sharpest a h = 0.5 grid resolves
+                                       // without aliasing (smaller needs finer h)
 // Display decay rate: the TRUE Einstein-A lifetime is ~1e8 a.u. (unwatchable);
 // this gives tau_display ~ 8 a.u. (~3 s of wall time). The title reports the
 // true lifetime and the acceleration factor honestly.
@@ -525,6 +527,35 @@ protected:
                 // and the screen would keep the stale (or undefined) cloud.
                 engine_.write_psi_texture(*this, psi_tex_);
             }
+            // Projective ENERGY measurement (Key E): sample an eigenstate n
+            // from P_n = |<phi_n|psi>|^2 over the tracked manifold and collapse
+            // psi onto it. The incomplete-manifold deficit 1 - sum(P_n) is the
+            // continuum outcome (n = -1): leave psi and say so. Reuses the same
+            // GPU inner-product / collapse primitives as the decay jump; works
+            // even while paused (it writes psi_tex_ itself).
+            if (pending_energy_measure_) {
+                pending_energy_measure_ = false;
+                std::vector<double> pop(static_cast<std::size_t>(kNumStates));
+                for (int s = 0; s < kNumStates; ++s) {
+                    const ses_gpu::NormPeak ip = engine_.inner_with_psi(
+                        *this, state_buf_[static_cast<std::size_t>(s)]);
+                    pop[static_cast<std::size_t>(s)] = ip.sum * ip.sum + ip.peak * ip.peak;
+                }
+                std::uniform_real_distribution<double> uniform(0.0, 1.0);
+                const int n = ses::sample_energy_eigenstate(pop, uniform(rng_));
+                last_measured_index_ = n;  // >=0 eigenstate, -1 outside manifold
+                if (n >= 0) {
+                    engine_.copy_into_psi(*this, state_buf_[static_cast<std::size_t>(n)]);
+                    engine_.write_psi_texture(*this, psi_tex_);
+                    last_measure_ =
+                        QStringLiteral("%1 (E %2 Ha)")
+                            .arg(QLatin1String(kStateSpec[static_cast<std::size_t>(n)].name))
+                            .arg(state_energy_[static_cast<std::size_t>(n)], 0, 'f', 4);
+                } else {
+                    last_measure_ = QStringLiteral("outside tracked manifold");
+                }
+                refresh_title();
+            }
             if (pending_gpu_steps_ > 0) {
                 if (stepping_ == Stepping::RealTime) {
                     if (gpu_title_due_) {
@@ -787,6 +818,20 @@ public:
         stage_active_view();
         after_control();
     }
+
+    // Projective ENERGY measurement (the energy-basis analogue of M): request
+    // a collapse onto an energy eigenstate sampled by |<phi_n|psi>|^2. The GPU
+    // reductions + collapse-copy need a current context, so the actual work is
+    // deferred to paintGL (see pending_energy_measure_). Needs the manifold.
+    void measure_energy_now() {
+        if (solving() || !use_gpu_path() || !manifold_ready()) {
+            return;
+        }
+        pending_energy_measure_ = true;
+        stepping_ = Stepping::RealTime;  // observe, then let H evolve it
+        laser_pol_ = LaserPol::Off;
+        update();
+    }
     void toggle_view_mode() {
         if (solving()) {
             return;
@@ -916,6 +961,9 @@ public:
     }
 
     long long photon_count() const { return photon_count_; }
+    // Result of the most recent energy measurement: eigenstate index, -1 for
+    // the outside-the-manifold outcome, -2 if none has run yet (selftest hook).
+    int last_measured_index() const { return last_measured_index_; }
     double peak_excited_population() const { return rabi_peak_; }
 
 protected:
@@ -1273,6 +1321,9 @@ protected:
             case Qt::Key_M:
                 measure_now();
                 break;
+            case Qt::Key_E:
+                measure_energy_now();
+                break;
             case Qt::Key_D:
                 toggle_decay();
                 break;
@@ -1400,7 +1451,7 @@ private:
         window()->setWindowTitle(
             QStringLiteral("Electron near a soft-Coulomb nucleus   t = %1   %2"
                            "norm = %3   [%4, %5, %6]  1=real 2=relax R=reset tab=view "
-                           "[ ]=density M=measure")
+                           "[ ]=density M=pos E=energy")
                 .arg(sim_.time() + gpu_time_, 0, 'f', 2)
                 .arg(energy)
                 .arg(norm_display_, 0, 'f', 6)
@@ -1442,7 +1493,10 @@ private:
                        .arg(laser_e0_, 0, 'f', 4)
                        .arg(pop_ground_, 0, 'f', 3)
                        .arg(pop_excited_, 0, 'f', 3)
-                 : QString()));
+                 : QString()) +
+            (last_measure_.isEmpty()
+                 ? QString()
+                 : QStringLiteral("  measured %1").arg(last_measure_)));
     }
 
     // ---- GL uploads (current context required: called from initializeGL/paintGL) ----
@@ -1626,6 +1680,7 @@ private:
     bool gpu_ok_ = false;
     bool cpu_is_truth_ = true;
     int pending_gpu_steps_ = 0;
+    bool pending_energy_measure_ = false;  // Key E: serviced in paintGL
     bool gpu_title_due_ = false;
     double gpu_time_ = 0.0;
     double norm_display_ = 1.0;
@@ -1640,6 +1695,8 @@ private:
     std::vector<ShellChannel> channels_;
     double accel_display_ = 0.0;  // common display acceleration factor
     QString last_jump_;
+    QString last_measure_;  // last energy-measurement readout (Key E)
+    int last_measured_index_ = -2;  // last energy-measurement outcome (selftest)
     QString relax_label_ = QStringLiteral("2p");
     std::vector<GLuint> relax_deflate_;  // live RelaxingExcited deflation set
     double relax_prev_energy_ = 0.0;     // T7 auto-complete plateau tracking
@@ -1753,6 +1810,8 @@ int main(int argc, char** argv) {
     controls->setMovable(false);
     controls->addAction(QStringLiteral("Measure (M)"), viewport,
                         [viewport] { viewport->measure_now(); });
+    controls->addAction(QStringLiteral("Measure E (E)"), viewport,
+                        [viewport] { viewport->measure_energy_now(); });
     controls->addSeparator();
     controls->addAction(QStringLiteral("Real time (1)"), viewport,
                         [viewport] { viewport->set_real_time(); });
@@ -1801,6 +1860,29 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "selftest-decay: photons = %lld  [%s]\n",
                                  fresh, fresh >= 1 ? "PASS" : "FAIL");
                     app.exit(fresh >= 1 ? 0 : 1);
+                });
+            });
+        });
+    }
+
+    // Headless-ish regression of the energy-measurement feature: relax to 1s
+    // (decay OFF so the prepared state stays put), then a projective energy
+    // measurement must collapse onto -- and report -- the 1s eigenstate.
+    if (app.arguments().contains(QStringLiteral("--selftest-energy"))) {
+        run_when_manifold_ready(viewport, [viewport, &app] {
+            viewport->toggle_decay();  // OFF: keep the relaxed state stationary
+            viewport->set_relaxing();  // cool to 1s
+            QTimer::singleShot(12000, viewport, [viewport, &app] {
+                viewport->measure_energy_now();
+                QTimer::singleShot(1500, viewport, [viewport, &app] {
+                    const int idx = viewport->last_measured_index();
+                    const bool pass = idx == kS1;
+                    std::fprintf(
+                        stderr, "selftest-energy: measured %s  [%s]\n",
+                        idx >= 0 ? kStateSpec[static_cast<std::size_t>(idx)].name
+                                 : "outside-manifold",
+                        pass ? "PASS" : "FAIL");
+                    app.exit(pass ? 0 : 1);
                 });
             });
         });

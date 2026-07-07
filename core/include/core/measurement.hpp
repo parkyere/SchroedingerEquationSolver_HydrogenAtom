@@ -15,8 +15,27 @@
 
 #include <cmath>
 #include <cstddef>
+#include <vector>
 
 namespace ses {
+
+// Projective energy measurement over eigenstate populations P_n =
+// |<phi_n|psi>|^2. Because the tracked bound manifold is incomplete (no
+// continuum states), the P_n sum to <= 1; the deficit 1 - sum(P) is the
+// probability of an "outside the tracked manifold" outcome. Given a uniform
+// draw u in [0,1), returns the collapsed eigenstate index n (psi should then
+// be projected onto phi_n), or -1 for the outside outcome (leave psi as is).
+// CDF inversion in index order; randomness stays with the caller.
+inline int sample_energy_eigenstate(const std::vector<double>& populations, double u) {
+    double cum = 0.0;
+    for (std::size_t n = 0; n < populations.size(); ++n) {
+        cum += populations[n];
+        if (u < cum) {
+            return static_cast<int>(n);
+        }
+    }
+    return -1;  // fell into the 1 - sum(P) deficit: continuum / untracked
+}
 
 // First flat index whose cumulative probability exceeds u * total.
 inline int sample_collapse_index(const Field3D& psi, double u) {

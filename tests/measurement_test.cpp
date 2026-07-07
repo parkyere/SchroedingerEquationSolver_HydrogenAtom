@@ -75,6 +75,36 @@ TEST(SampleCollapseIndex, StratifiedDrawsReproduceProbabilitiesExactly) {
     EXPECT_EQ(count_b, 750);  // exact for stratified sampling
 }
 
+TEST(SampleEnergyEigenstate, InvertsThePopulationCdfWithIncompleteManifold) {
+    // Projective energy measurement over eigenstate populations that do NOT
+    // sum to 1: the tracked bound manifold is incomplete, so the deficit
+    // 1 - sum(P) is the "outside the manifold" (continuum) outcome, index -1.
+    const std::vector<double> pops = {0.5, 0.3};  // sum 0.8, deficit 0.2
+    EXPECT_EQ(ses::sample_energy_eigenstate(pops, 0.0), 0);
+    EXPECT_EQ(ses::sample_energy_eigenstate(pops, 0.4999), 0);
+    EXPECT_EQ(ses::sample_energy_eigenstate(pops, 0.5), 1);
+    EXPECT_EQ(ses::sample_energy_eigenstate(pops, 0.7999), 1);
+    EXPECT_EQ(ses::sample_energy_eigenstate(pops, 0.8), -1);  // into the deficit
+    EXPECT_EQ(ses::sample_energy_eigenstate(pops, 0.9999), -1);
+}
+
+TEST(SampleEnergyEigenstate, CompleteManifoldNeverEscapesAndIsExactStratified) {
+    // Sum = 1: every draw lands on an eigenstate, and stratified draws
+    // u_k = (k + 1/2)/K reproduce the populations exactly.
+    const std::vector<double> pops = {0.25, 0.25, 0.5};
+    const int kDraws = 1000;
+    int counts[3] = {0, 0, 0};
+    for (int k = 0; k < kDraws; ++k) {
+        const int idx = ses::sample_energy_eigenstate(pops, (k + 0.5) / kDraws);
+        ASSERT_GE(idx, 0);
+        ASSERT_LT(idx, 3);
+        ++counts[idx];
+    }
+    EXPECT_EQ(counts[0], 250);
+    EXPECT_EQ(counts[1], 250);
+    EXPECT_EQ(counts[2], 500);
+}
+
 TEST(CollapseWavepacket, MatchesAnalyticGaussianPosterior) {
     // Broad packet (s_pre = 2, r0 = 0) collapsed at r_m with s_m = 0.5:
     // per-axis center r_m * (1/s_m^2)/(1/s_m^2 + 1/s_pre^2) = r_m * 16/17,
