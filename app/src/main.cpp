@@ -89,6 +89,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <optional>
 #include <random>
 #include <utility>
@@ -1207,6 +1208,32 @@ public:
         return ses::mean_position(sim_.psi()).z;
     }
     double peak_excited_population() const { return rabi_peak_; }
+
+    // Selftest hooks (magnetic Larmor precession): set psi to a cached
+    // manifold eigenstate and probe another state's population. A field along
+    // z rotates 2p_x -> 2p_y at omega_L = B/2, so P(2p_y) must rise -- proving
+    // the field evolves psi itself, not just the display.
+    void debug_prepare_state(int idx) {
+        if (!manifold_ready() || idx < 0 || idx >= kNumStates) {
+            return;
+        }
+        makeCurrent();
+        engine_.copy_into_psi(*this, state_buf_[static_cast<std::size_t>(idx)]);
+        doneCurrent();
+        cpu_is_truth_ = false;
+        stepping_ = Stepping::RealTime;
+        after_control();
+    }
+    double probe_population(int idx) {
+        if (!manifold_ready() || idx < 0 || idx >= kNumStates) {
+            return 0.0;
+        }
+        makeCurrent();
+        const ses_gpu::NormPeak ip =
+            engine_.inner_with_psi(*this, state_buf_[static_cast<std::size_t>(idx)]);
+        doneCurrent();
+        return ip.sum * ip.sum + ip.peak * ip.peak;
+    }
 
 protected:
     ses::Vec3d laser_axis() const {
@@ -2372,6 +2399,36 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "selftest-cascade: photons = %lld  [%s]\n",
                              fresh, fresh >= 2 ? "PASS" : "FAIL");
                 app.exit(fresh >= 2 ? 0 : 1);
+            });
+        });
+    }
+
+    // Magnetic regression: a field along z rotates 2p_x -> 2p_y at
+    // omega_L = B/2. Prepare 2p_x (decay off, for pure precession), turn B on,
+    // and require P(2p_y) to rise past 0.3 -- proving psi ITSELF precesses (the
+    // old display trick left psi pristine, so P(2p_y) would stay 0). Probed
+    // periodically so the sin^2 oscillation phase cannot alias the verdict.
+    if (app.arguments().contains(QStringLiteral("--selftest-magnetic"))) {
+        run_when_manifold_ready(viewport, [viewport, &app] {
+            viewport->toggle_decay();            // decay OFF: pure precession
+            viewport->debug_prepare_state(kP2X);  // psi = 2p_x
+            // Modest field: omega_L = B/2 precession with only a MILD
+            // diamagnetic term, so 2p_x rotates substantially into 2p_y (a
+            // large B would diamagnetically deform the state and cap the
+            // overlap -- itself why the display trick was wrong). Real-time
+            // magnetic stepping is slow (~0.4 au/s), so the window is long.
+            viewport->set_bfield_b(0.08);         // B along z (default axis)
+            auto max_py = std::make_shared<double>(0.0);
+            auto* probe = new QTimer(viewport);
+            QObject::connect(probe, &QTimer::timeout, viewport, [viewport, max_py] {
+                *max_py = std::max(*max_py, viewport->probe_population(kP2Y));
+            });
+            probe->start(1500);
+            QTimer::singleShot(90000, viewport, [&app, max_py, probe] {
+                probe->stop();
+                std::fprintf(stderr, "selftest-magnetic: max P(2p_y) = %.3f  [%s]\n",
+                             *max_py, *max_py > 0.3 ? "PASS" : "FAIL");
+                app.exit(*max_py > 0.3 ? 0 : 1);
             });
         });
     }
