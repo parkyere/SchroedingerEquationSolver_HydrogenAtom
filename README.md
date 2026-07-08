@@ -97,9 +97,17 @@ AVX2) · `linux-clang` · `linux-gcc`. `linux-native` pins the vector width to
 256-bit, so it stays **bitwise-reproducible with the AVX2 oracles even on an
 AVX-512 host** (`-mprefer-vector-width=256`) -- fine for the app **and** the
 suite (`ctest --preset linux-native`). Verify GPU kernels with
-`sesolver_gpucheck` (needs a GL context). To pin an exact compiler instead of
-auto-detect, set `CMAKE_CXX_COMPILER` (e.g. `-DCMAKE_CXX_COMPILER=clang++-19`)
-or `$CXX`.
+`sesolver_gpucheck` (needs a GL context).
+
+`linux-native` auto-detects the newest `clang++`/`g++` on `PATH` (up to
+`clang++-25`, LLVM before GCC), so an installed `clang++-22` (LLVM 22) is
+picked automatically. For a custom/from-source toolchain, pin it:
+`-DCMAKE_CXX_COMPILER=/path/to/clang++` (or export `$CXX`). Two notes when you
+swap compilers: the exact-value test oracles are pinned against GCC, so a
+different compiler may differ bitwise on a few reduction-based `EXPECT_EQ`
+tests (compiler-dependent FP rounding -- not a bug; the app is unaffected);
+and `SES_WARNINGS_AS_ERRORS` is OFF by default, so a bleeding-edge clang's new
+`-Wall`/`-Wextra` diagnostics won't fail the build.
 
 ## Working agreement
 

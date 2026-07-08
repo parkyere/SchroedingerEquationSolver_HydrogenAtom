@@ -9,14 +9,20 @@ cmake_minimum_required(VERSION 3.21)
 # ---------------------------------------------------------------------------
 if(UNIX AND SES_AUTODETECT_COMPILER
    AND NOT DEFINED CMAKE_CXX_COMPILER AND "$ENV{CXX}" STREQUAL "")
+    # Newest first (LLVM ahead of GCC). Extend the top as toolchains land.
     foreach(_cxx IN ITEMS
-            clang++-21 clang++-20 clang++-19 clang++-18 clang++-17 clang++-16
-            g++-15 g++-14 g++-13 g++-12 clang++ g++)
+            clang++-25 clang++-24 clang++-23 clang++-22 clang++-21 clang++-20
+            clang++-19 clang++-18 clang++-17 clang++-16
+            g++-16 g++-15 g++-14 g++-13 g++-12 clang++ g++)
+        # unset(CACHE) each iteration: find_program caches its result, so a
+        # reused var would keep the first (possibly NOTFOUND) answer forever.
+        unset(_ses_cxx_path CACHE)
         find_program(_ses_cxx_path NAMES ${_cxx})
         if(_ses_cxx_path)
             set(CMAKE_CXX_COMPILER "${_ses_cxx_path}" CACHE FILEPATH "C++ compiler" FORCE)
             string(REPLACE "clang++" "clang" _cc "${_cxx}")
             string(REPLACE "g++" "gcc" _cc "${_cc}")
+            unset(_ses_cc_path CACHE)
             find_program(_ses_cc_path NAMES ${_cc})
             if(_ses_cc_path)
                 set(CMAKE_C_COMPILER "${_ses_cc_path}" CACHE FILEPATH "C compiler" FORCE)
