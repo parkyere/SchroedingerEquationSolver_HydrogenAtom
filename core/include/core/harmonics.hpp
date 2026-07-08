@@ -137,11 +137,13 @@ inline double real_spherical_harmonic(int l, int m, double x, double y, double z
 // psi(x, y, z) = (u(r)/r) Y_lm, u linearly interpolated from the radial
 // grid (u(0) = 0 pins the inner segment, so u/r -> u_0/h as r -> 0, the
 // correct l = 0 limit; higher l vanish there through Y's r^l factor).
-// Returns the grid-normalized field.
-inline Field3D synthesize_orbital(const Grid3D& g, const RadialGrid& rg,
-                                  const std::vector<double>& u, int l, int m) {
+// fill_orbital writes the UN-normalized field in place; synthesize_orbital
+// normalizes and returns. The un-normalized form is the single source of truth
+// the orbital-free projection (core/projection.hpp) reorganizes -- its radial
+// deposit shape must mirror this interpolation exactly.
+inline void fill_orbital(Field3D& psi, const Grid3D& g, const RadialGrid& rg,
+                         const std::vector<double>& u, int l, int m) {
     const double h = rg.h();
-    Field3D psi{g};
     // Disjoint z-slabs: bitwise-deterministic parallelism (project rule).
 #pragma omp parallel for
     for (int k = 0; k < g.z.n; ++k) {
@@ -170,6 +172,12 @@ inline Field3D synthesize_orbital(const Grid3D& g, const RadialGrid& rg,
             }
         }
     }
+}
+
+inline Field3D synthesize_orbital(const Grid3D& g, const RadialGrid& rg,
+                                  const std::vector<double>& u, int l, int m) {
+    Field3D psi{g};
+    fill_orbital(psi, g, rg, u, l, m);
     normalize(psi);
     return psi;
 }
