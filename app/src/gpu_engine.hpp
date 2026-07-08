@@ -286,6 +286,7 @@ struct GpuState {
 // here -- AFTER the shared utilities above (bind, build_program, make_*) -- so
 // they can use them; they are not standalone headers.
 #include "gpu_projection.hpp"
+#include "gpu_orbital.hpp"
 
 // ---- the engine ------------------------------------------------------------
 
@@ -311,15 +312,14 @@ public:
         shear_prog_ = build_program(gl, kShearSrc, "shear");
         force_prog_ = build_program(gl, kMeanForceSrc, "mean force");
         dipole_prog_ = build_program(gl, kDipoleSrc, "dipole");
-        synth_prog_ = build_program(gl, kSynthSrc, "orbital synthesis");
-        pack_prog_ = build_program(gl, kPackHalfSrc, "pack half");
-        unpack_prog_ = build_program(gl, kUnpackHalfSrc, "unpack half");
+        orbital_.build(gl);
         projector_.build(gl);
         st_.fft_progs_ = build_fft_programs(gl, grid);
         if (st_.mul_prog_ == 0 || st_.conj_prog_ == 0 || st_.bridge_prog_ == 0 || st_.norm_prog_ == 0 ||
             st_.scale_prog_ == 0 || inner_prog_ == 0 || axpy_prog_ == 0 || kick_prog_ == 0 ||
-            shear_prog_ == 0 || force_prog_ == 0 || dipole_prog_ == 0 || synth_prog_ == 0 ||
-            pack_prog_ == 0 || unpack_prog_ == 0 || projector_.prog_ == 0 ||
+            shear_prog_ == 0 || force_prog_ == 0 || dipole_prog_ == 0 ||
+            orbital_.synth_prog_ == 0 || orbital_.pack_prog_ == 0 ||
+            orbital_.unpack_prog_ == 0 || projector_.prog_ == 0 ||
             st_.fft_progs_.axis[0] == 0 || st_.fft_progs_.axis[1] == 0 ||
             st_.fft_progs_.axis[2] == 0) {
             return false;
@@ -565,35 +565,17 @@ public:
 
     // Allocate a write-once fp16 state buffer (cells uints = half the fp32 size).
     GLuint make_half_state_buffer(Gl& gl) {
-        GLuint buf = 0;
-        gl.glGenBuffers(1, &buf);
-        gl.glBindBuffer(GL_SHADER_STORAGE_BUFFER, buf);
-        gl.glBufferData(GL_SHADER_STORAGE_BUFFER,
-                        static_cast<GLsizeiptr>(st_.cells_ * sizeof(GLuint)), nullptr,
-                        GL_STATIC_COPY);
-        return buf;
+        return orbital_.make_half_state_buffer(gl, st_.cells_);
     }
 
     // dst_half <- packHalf2x16(src_fp32).
     void pack_to_half(Gl& gl, GLuint src_fp32, GLuint dst_half) {
-        gl.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, bind::kPsi, src_fp32);
-        gl.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, bind::kAux, dst_half);
-        gl.glUseProgram(pack_prog_);
-        gl.glUniform1ui(gl.glGetUniformLocation(pack_prog_, "n"),
-                        static_cast<GLuint>(st_.cells_));
-        gl.glDispatchCompute(static_cast<GLuint>((st_.cells_ + 255) / 256), 1, 1);
-        gl.glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+        orbital_.pack_to_half(gl, src_fp32, dst_half, st_.cells_);
     }
 
     // dst_fp32 <- unpackHalf2x16(src_half).
     void unpack_from_half(Gl& gl, GLuint src_half, GLuint dst_fp32) {
-        gl.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, bind::kAux, src_half);
-        gl.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, bind::kPsi, dst_fp32);
-        gl.glUseProgram(unpack_prog_);
-        gl.glUniform1ui(gl.glGetUniformLocation(unpack_prog_, "n"),
-                        static_cast<GLuint>(st_.cells_));
-        gl.glDispatchCompute(static_cast<GLuint>((st_.cells_ + 255) / 256), 1, 1);
-        gl.glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+        orbital_.unpack_from_half(gl, src_half, dst_fp32, st_.cells_);
     }
 
     // psi <- unpackHalf2x16(src_half): collapse onto an fp16-stored eigenstate.
@@ -619,12 +601,8 @@ public:
     GLuint synthesize_state_half(Gl& gl, const std::vector<double>& u, int l, int m,
                                  double h_radial, double rmax, int n_radial,
                                  double* out_peak = nullptr, double* out_norm2 = nullptr) {
-        const GLuint fp32 =
-            synthesize_state(gl, u, l, m, h_radial, rmax, n_radial, out_peak, out_norm2);
-        const GLuint half = make_half_state_buffer(gl);
-        pack_to_half(gl, fp32, half);
-        gl.glDeleteBuffers(1, &fp32);
-        return half;
+        return orbital_.synthesize_state_half(gl, st_, u, l, m, h_radial, rmax, n_radial,
+                                              out_peak, out_norm2);
     }
 
     // ---- precision-aware consumers (decode-on-use) ---------------------
@@ -664,79 +642,16 @@ public:
     }
 
     // Upload the radial u_nl(r) table (fp32) that kSynthSrc interpolates.
-    void upload_radial(Gl& gl, const std::vector<double>& u) {
-        std::vector<float> f(u.size());
-        for (std::size_t i = 0; i < u.size(); ++i) {
-            f[i] = static_cast<float>(u[i]);
-        }
-        if (radial_u_buf_ == 0 || radial_u_count_ != u.size()) {
-            if (radial_u_buf_ != 0) {
-                gl.glDeleteBuffers(1, &radial_u_buf_);
-            }
-            radial_u_buf_ = make_buffer(gl, f);
-            radial_u_count_ = u.size();
-        } else {
-            gl.glBindBuffer(GL_SHADER_STORAGE_BUFFER, radial_u_buf_);
-            gl.glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
-                               static_cast<GLsizeiptr>(f.size() * sizeof(float)), f.data());
-        }
-    }
+    void upload_radial(Gl& gl, const std::vector<double>& u) { orbital_.upload_radial(gl, u); }
 
     // Synthesize psi = (u/r) Y_lm INTO A NEW normalized state buffer on the GPU
-    // -- the atlas builds each eigenstate straight on the GPU, no CPU field.
-    // Never touches st_.psi_buf_, so it is safe to call mid-simulation. h_radial =
-    // rmax/(n_radial+1). *out_peak (if given) receives the normalized peak
-    // |psi|^2. The buffer is GL_STATIC_COPY (a write-once eigenstate).
+    // -- forwarded to the OrbitalSynth concern module (gpu_orbital.hpp). Never
+    // touches st_.psi_buf_, so it is safe to call mid-simulation.
     GLuint synthesize_state(Gl& gl, const std::vector<double>& u, int l, int m,
                             double h_radial, double rmax, int n_radial,
                             double* out_peak = nullptr, double* out_norm2 = nullptr) {
-        upload_radial(gl, u);
-        GLuint buf = 0;
-        gl.glGenBuffers(1, &buf);
-        gl.glBindBuffer(GL_SHADER_STORAGE_BUFFER, buf);
-        gl.glBufferData(GL_SHADER_STORAGE_BUFFER,
-                        static_cast<GLsizeiptr>(2 * st_.cells_ * sizeof(float)), nullptr,
-                        GL_STATIC_COPY);
-        // Synthesize into the new buffer (binding 0), reading the radial table.
-        gl.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, bind::kPsi, buf);
-        gl.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, bind::kRadial, radial_u_buf_);
-        gl.glUseProgram(synth_prog_);
-        gl.glUniform1ui(gl.glGetUniformLocation(synth_prog_, "n"),
-                        static_cast<GLuint>(st_.cells_));
-        gl.glUniform1i(gl.glGetUniformLocation(synth_prog_, "nx"), st_.grid_.x.n);
-        gl.glUniform1i(gl.glGetUniformLocation(synth_prog_, "ny"), st_.grid_.y.n);
-        gl.glUniform3f(gl.glGetUniformLocation(synth_prog_, "box_min"),
-                       static_cast<float>(st_.grid_.x.xmin), static_cast<float>(st_.grid_.y.xmin),
-                       static_cast<float>(st_.grid_.z.xmin));
-        gl.glUniform3f(gl.glGetUniformLocation(synth_prog_, "cell_h"),
-                       static_cast<float>(st_.grid_.x.spacing()),
-                       static_cast<float>(st_.grid_.y.spacing()),
-                       static_cast<float>(st_.grid_.z.spacing()));
-        gl.glUniform1i(gl.glGetUniformLocation(synth_prog_, "l"), l);
-        gl.glUniform1i(gl.glGetUniformLocation(synth_prog_, "m"), m);
-        gl.glUniform1f(gl.glGetUniformLocation(synth_prog_, "h_radial"),
-                       static_cast<float>(h_radial));
-        gl.glUniform1f(gl.glGetUniformLocation(synth_prog_, "rmax"),
-                       static_cast<float>(rmax));
-        gl.glUniform1i(gl.glGetUniformLocation(synth_prog_, "n_radial"), n_radial);
-        gl.glDispatchCompute(static_cast<GLuint>((st_.cells_ + 255) / 256), 1, 1);
-        gl.glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-        // Normalize in place: the norm reduction and scale act on binding 0
-        // (still `buf`), exactly the core's normalize().
-        const NormPeak np = run_norm_peak(gl, st_.norm_prog_, st_.partials_buf_, st_.cells_);
-        const double norm_sq = np.sum * st_.grid_.cell_volume();  // ||raw (u/r)Ylm||^2_grid
-        const double inv = (norm_sq > 0.0) ? 1.0 / std::sqrt(norm_sq) : 0.0;
-        run_scale(gl, st_.scale_prog_, st_.cells_, static_cast<float>(inv));
-        if (out_peak != nullptr) {
-            *out_peak = (norm_sq > 0.0) ? np.peak / norm_sq : 0.0;
-        }
-        // The pre-normalization grid norm: the projection normalizes populations
-        // by this (|<n|psi>|^2 = |raw dot|^2 / norm2_grid) to stay value-identical
-        // to the retired inner_with_psi(grid-normalized orbital) path.
-        if (out_norm2 != nullptr) {
-            *out_norm2 = norm_sq;
-        }
-        return buf;
+        return orbital_.synthesize_state(gl, st_, u, l, m, h_radial, rmax, n_radial,
+                                         out_peak, out_norm2);
     }
 
     // psi <- contents of another state buffer (e.g. the quantum-jump
@@ -996,19 +911,15 @@ private:
     GLuint force_partials_buf_ = 0;    // vec4 partials for mean_force
     GLuint dipole_partials_buf_ = 0;   // 6-float partials for dipole_between
     GLuint grad_v_buf_ = 0;            // grad V field (vec4 per cell)
-    GLuint radial_u_buf_ = 0;          // radial u_nl(r) table for synthesis
-    std::size_t radial_u_count_ = 0;   // current radial table length
     GLuint inner_prog_ = 0;
     GLuint axpy_prog_ = 0;
     GLuint kick_prog_ = 0;
     GLuint shear_prog_ = 0;
     GLuint force_prog_ = 0;
     GLuint dipole_prog_ = 0;
-    GLuint synth_prog_ = 0;
-    GLuint pack_prog_ = 0;
-    GLuint unpack_prog_ = 0;
     GLuint scratch_a_ = 0;  // fp32 unpack scratch for fp16 consumers
     GLuint scratch_b_ = 0;  // second scratch (dipole needs two operands)
+    OrbitalSynth orbital_;      // orbital synthesis + fp16 codec (gpu_orbital.hpp)
     Projector projector_;       // orbital-free angular projection (gpu_projection.hpp)
 };
 
