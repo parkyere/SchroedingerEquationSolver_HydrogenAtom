@@ -221,6 +221,57 @@ TEST(RadialAngularProjection, DeterministicRepro) {
     }
 }
 
+// Phase 2: the static counting-sort geometry that lets the GPU deposit run one
+// deterministic gather per radial bin (no atomics). Structural invariants: a
+// valid CSR; every in-sphere cell appears EXACTLY once and is stored in the bin
+// equal to its fp32 key; and the build is bit-for-bit reproducible.
+TEST(RadialAngularProjection, StaticRadialBinIndex) {
+    const Grid1D ax{-8.0, 8.0, 40};
+    const Grid3D g{ax, ax, ax};
+    const ses::RadialGrid rg{8.0, 90};
+    const ses::RadialBinIndex idx = ses::build_radial_bin_index(g, rg);
+
+    ASSERT_EQ(idx.bin_off.size(), static_cast<std::size_t>(rg.n + 1));
+    EXPECT_EQ(idx.bin_off.front(), 0u);
+    EXPECT_EQ(idx.bin_off.back(), static_cast<std::uint32_t>(idx.sorted_cell.size()));
+    for (int b = 0; b < rg.n; ++b) {
+        EXPECT_LE(idx.bin_off[static_cast<std::size_t>(b)],
+                  idx.bin_off[static_cast<std::size_t>(b + 1)]);
+    }
+
+    const int ncells = g.x.n * g.y.n * g.z.n;
+    std::size_t expected_in = 0;
+    for (int k = 0; k < g.z.n; ++k) {
+        for (int j = 0; j < g.y.n; ++j) {
+            for (int i = 0; i < g.x.n; ++i) {
+                if (ses::radial_bin_key(g, rg, i, j, k) >= 0) {
+                    ++expected_in;
+                }
+            }
+        }
+    }
+    EXPECT_EQ(idx.sorted_cell.size(), expected_in);
+
+    std::vector<int> seen(static_cast<std::size_t>(ncells), 0);
+    for (int b = 0; b < rg.n; ++b) {
+        for (std::uint32_t p = idx.bin_off[static_cast<std::size_t>(b)];
+             p < idx.bin_off[static_cast<std::size_t>(b + 1)]; ++p) {
+            const std::uint32_t flat = idx.sorted_cell[p];
+            ASSERT_LT(flat, static_cast<std::uint32_t>(ncells));
+            const int ci = static_cast<int>(flat) % g.x.n;
+            const int cj = (static_cast<int>(flat) / g.x.n) % g.y.n;
+            const int ck = static_cast<int>(flat) / (g.x.n * g.y.n);
+            EXPECT_EQ(ses::radial_bin_key(g, rg, ci, cj, ck), b);  // stored in its own bin
+            EXPECT_EQ(seen[flat], 0);                              // exactly once
+            seen[flat] = 1;
+        }
+    }
+
+    const ses::RadialBinIndex idx2 = ses::build_radial_bin_index(g, rg);
+    EXPECT_EQ(idx.sorted_cell, idx2.sorted_cell);
+    EXPECT_EQ(idx.bin_off, idx2.bin_off);
+}
+
 // GO/NO-GO for the GPU deposit (scoping Phase 3, risk 6.2): the GPU accumulates
 // each radial bin's g_lm in fp32 (one workgroup per bin), strictly less precise
 // than this double CPU oracle. Will fp32-per-bin accumulation stay within the

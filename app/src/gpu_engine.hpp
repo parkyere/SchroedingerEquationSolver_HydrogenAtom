@@ -15,12 +15,14 @@
 #include <core/drive.hpp>
 #include <core/field.hpp>
 #include <core/grid.hpp>
+#include <core/projection.hpp>
 
 #include <QOpenGLFunctions_4_3_Core>
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -556,6 +558,165 @@ void main() {
 }
 )";
 
+// Orbital-free projection deposit (docs/ANGULAR_PROJECTION_SCOPING.md, Phase 3).
+// ONE workgroup per radial bin gathers the cells that deposit to it -- from the
+// static counting-sort (core/projection.hpp build_radial_bin_index): its own
+// segment (primary, weight (1-frac)/r or 1/h at the origin) and the previous
+// segment (secondary, weight frac/r; their i0+1 == this bin). Each thread
+// grid-strides its slice, recomputes coords/r/frac and all 36 real Y_lm (the
+// SAME formulas as kSynthSrc), and accumulates Y_lm * psi * dV * w into 36
+// complex partials in shared; a fixed-order tree reduction (kNormPeak pattern,
+// NO atomics -> deterministic) writes g_lm[c*nr + bin]. State-count independent.
+inline const char* kProjectDepositSrc = R"(#version 430 core
+layout(local_size_x = 128) in;
+layout(std430, binding = 0) readonly buffer PsiBuf { vec2 psi[]; };
+layout(std430, binding = 6) readonly buffer SortedBuf { uint sorted_cell[]; };
+layout(std430, binding = 7) readonly buffer OffBuf { uint bin_off[]; };
+layout(std430, binding = 8) writeonly buffer GlmBuf { vec2 g_lm[]; };
+uniform int nx;
+uniform int ny;
+uniform vec3 box_min;
+uniform vec3 cell_h;
+uniform float h_radial;
+uniform float dv;
+uniform int nr;
+
+const float PI = 3.14159265358979323846;
+
+// Parameterized real spherical harmonic (l,m): identical formulas to kSynthSrc
+// (there l,m are uniforms; here args, so one dispatch can fill all 36).
+float real_Ylm(int l, int m, float x, float y, float z) {
+    float r2 = x * x + y * y + z * z;
+    if (l == 0) return 1.0 / (2.0 * sqrt(PI));
+    if (r2 == 0.0) return 0.0;
+    if (l == 1) {
+        float c = sqrt(3.0 / (4.0 * PI)) / sqrt(r2);
+        if (m == -1) return c * y;
+        if (m == 0) return c * z;
+        return c * x;
+    }
+    if (l == 2) {
+        float c = sqrt(15.0 / PI) / r2;
+        if (m == -2) return 0.5 * c * x * y;
+        if (m == -1) return 0.5 * c * y * z;
+        if (m == 0) return 0.25 * sqrt(5.0 / PI) * (3.0 * z * z - r2) / r2;
+        if (m == 1) return 0.5 * c * z * x;
+        return 0.25 * c * (x * x - y * y);
+    }
+    if (l == 3) {
+        float r3 = r2 * sqrt(r2);
+        if (m == -3) return 0.25 * sqrt(35.0 / (2.0 * PI)) * y * (3.0 * x * x - y * y) / r3;
+        if (m == -2) return 0.5 * sqrt(105.0 / PI) * x * y * z / r3;
+        if (m == -1) return 0.25 * sqrt(21.0 / (2.0 * PI)) * y * (5.0 * z * z - r2) / r3;
+        if (m == 0) return 0.25 * sqrt(7.0 / PI) * z * (5.0 * z * z - 3.0 * r2) / r3;
+        if (m == 1) return 0.25 * sqrt(21.0 / (2.0 * PI)) * x * (5.0 * z * z - r2) / r3;
+        if (m == 2) return 0.25 * sqrt(105.0 / PI) * z * (x * x - y * y) / r3;
+        return 0.25 * sqrt(35.0 / (2.0 * PI)) * x * (x * x - 3.0 * y * y) / r3;
+    }
+    if (l == 4) {
+        float r4 = r2 * r2;
+        if (m == -4) return 0.75 * sqrt(35.0 / PI) * x * y * (x * x - y * y) / r4;
+        if (m == -3) return 0.75 * sqrt(35.0 / (2.0 * PI)) * y * z * (3.0 * x * x - y * y) / r4;
+        if (m == -2) return 0.75 * sqrt(5.0 / PI) * x * y * (7.0 * z * z - r2) / r4;
+        if (m == -1) return 0.75 * sqrt(5.0 / (2.0 * PI)) * y * z * (7.0 * z * z - 3.0 * r2) / r4;
+        if (m == 0) return (3.0 / 16.0) * sqrt(1.0 / PI) *
+                           (35.0 * z * z * z * z - 30.0 * z * z * r2 + 3.0 * r2 * r2) / r4;
+        if (m == 1) return 0.75 * sqrt(5.0 / (2.0 * PI)) * x * z * (7.0 * z * z - 3.0 * r2) / r4;
+        if (m == 2) return 0.375 * sqrt(5.0 / PI) * (x * x - y * y) * (7.0 * z * z - r2) / r4;
+        if (m == 3) return 0.75 * sqrt(35.0 / (2.0 * PI)) * x * z * (x * x - 3.0 * y * y) / r4;
+        return (3.0 / 16.0) * sqrt(35.0 / PI) *
+               (x * x * x * x - 6.0 * x * x * y * y + y * y * y * y) / r4;
+    }
+    float r5 = r2 * r2 * sqrt(r2);
+    float x2 = x * x;
+    float y2 = y * y;
+    float z2 = z * z;
+    float zpoly = 21.0 * z2 * z2 - 14.0 * z2 * r2 + r2 * r2;
+    if (m == -5) return (1.0 / 32.0) * sqrt(1386.0 / PI) *
+                        y * (5.0 * x2 * x2 - 10.0 * x2 * y2 + y2 * y2) / r5;
+    if (m == -4) return (1.0 / 16.0) * sqrt(3465.0 / PI) * 4.0 * x * y * (x2 - y2) * z / r5;
+    if (m == -3) return (1.0 / 32.0) * sqrt(770.0 / PI) * y * (3.0 * x2 - y2) * (9.0 * z2 - r2) / r5;
+    if (m == -2) return (1.0 / 8.0) * sqrt(1155.0 / PI) * 2.0 * x * y * z * (3.0 * z2 - r2) / r5;
+    if (m == -1) return (1.0 / 16.0) * sqrt(165.0 / PI) * y * zpoly / r5;
+    if (m == 0) return (1.0 / 16.0) * sqrt(11.0 / PI) *
+                       z * (63.0 * z2 * z2 - 70.0 * z2 * r2 + 15.0 * r2 * r2) / r5;
+    if (m == 1) return (1.0 / 16.0) * sqrt(165.0 / PI) * x * zpoly / r5;
+    if (m == 2) return (1.0 / 8.0) * sqrt(1155.0 / PI) * (x2 - y2) * z * (3.0 * z2 - r2) / r5;
+    if (m == 3) return (1.0 / 32.0) * sqrt(770.0 / PI) * x * (x2 - 3.0 * y2) * (9.0 * z2 - r2) / r5;
+    if (m == 4) return (1.0 / 16.0) * sqrt(3465.0 / PI) *
+                       (x2 * x2 - 6.0 * x2 * y2 + y2 * y2) * z / r5;
+    return (1.0 / 32.0) * sqrt(1386.0 / PI) * x * (x2 * x2 - 10.0 * x2 * y2 + 5.0 * y2 * y2) / r5;
+}
+
+shared vec2 acc[128 * 36];
+
+void main() {
+    int bin = int(gl_WorkGroupID.x);
+    if (bin >= nr) {
+        return;
+    }
+    uint tid = gl_LocalInvocationID.x;
+    for (int c = 0; c < 36; ++c) {
+        acc[tid * 36u + uint(c)] = vec2(0.0);
+    }
+    uint p_beg = bin_off[bin];
+    uint p_end = bin_off[bin + 1];
+    uint s_beg = (bin > 0) ? bin_off[bin - 1] : 0u;
+    uint nP = p_end - p_beg;
+    uint nS = (bin > 0) ? (bin_off[bin] - s_beg) : 0u;
+    uint total = nP + nS;
+    for (uint e = tid; e < total; e += 128u) {
+        bool primary = (e < nP);
+        uint cell = primary ? sorted_cell[p_beg + e] : sorted_cell[s_beg + (e - nP)];
+        int i = int(cell) % nx;
+        int j = (int(cell) / nx) % ny;
+        int k = int(cell) / (nx * ny);
+        float x = box_min.x + float(i) * cell_h.x;
+        float y = box_min.y + float(j) * cell_h.y;
+        float z = box_min.z + float(k) * cell_h.z;
+        float r = sqrt(x * x + y * y + z * z);
+        float w;
+        if (primary) {
+            if (r < h_radial) {
+                w = 1.0 / h_radial;  // origin: constant u[0]/h (bin 0 only)
+            } else {
+                float t = r / h_radial - 1.0;
+                float frac = t - float(int(t));
+                w = (1.0 - frac) / r;
+            }
+        } else {
+            if (r < h_radial) {
+                continue;  // origin has no secondary (i0+1) contribution
+            }
+            float t = r / h_radial - 1.0;
+            float frac = t - float(int(t));
+            w = frac / r;
+        }
+        vec2 pv = psi[cell] * (w * dv);
+        for (int l = 0; l <= 5; ++l) {
+            for (int m = -l; m <= l; ++m) {
+                float Y = real_Ylm(l, m, x, y, z);
+                acc[tid * 36u + uint(l * l + (l + m))] += Y * pv;
+            }
+        }
+    }
+    barrier();
+    for (uint half_len = 64u; half_len > 0u; half_len >>= 1u) {
+        if (tid < half_len) {
+            for (int c = 0; c < 36; ++c) {
+                acc[tid * 36u + uint(c)] += acc[(tid + half_len) * 36u + uint(c)];
+            }
+        }
+        barrier();
+    }
+    if (tid == 0u) {
+        for (int c = 0; c < 36; ++c) {
+            g_lm[uint(c) * uint(nr) + uint(bin)] = acc[uint(c)];
+        }
+    }
+}
+)";
+
 // ---- helpers ---------------------------------------------------------------
 
 inline std::string instantiate(std::string tmpl, const char* token, int value) {
@@ -762,11 +923,12 @@ public:
         synth_prog_ = build_program(gl, kSynthSrc, "orbital synthesis");
         pack_prog_ = build_program(gl, kPackHalfSrc, "pack half");
         unpack_prog_ = build_program(gl, kUnpackHalfSrc, "unpack half");
+        proj_prog_ = build_program(gl, kProjectDepositSrc, "projection deposit");
         fft_progs_ = build_fft_programs(gl, grid);
         if (mul_prog_ == 0 || conj_prog_ == 0 || bridge_prog_ == 0 || norm_prog_ == 0 ||
             scale_prog_ == 0 || inner_prog_ == 0 || axpy_prog_ == 0 || kick_prog_ == 0 ||
             shear_prog_ == 0 || force_prog_ == 0 || dipole_prog_ == 0 || synth_prog_ == 0 ||
-            pack_prog_ == 0 || unpack_prog_ == 0 ||
+            pack_prog_ == 0 || unpack_prog_ == 0 || proj_prog_ == 0 ||
             fft_progs_.axis[0] == 0 || fft_progs_.axis[1] == 0 ||
             fft_progs_.axis[2] == 0) {
             return false;
@@ -1101,6 +1263,77 @@ public:
         return dipole_between(gl, tb, fb);
     }
 
+    // ---- orbital-free angular-decomposition projection (Phase 3) --------
+    // Upload the static counting-sort geometry (ses::build_radial_bin_index) and
+    // allocate g_lm. Call once after the radial grid is fixed.
+    void set_projection_index(Gl& gl, const std::vector<std::uint32_t>& sorted_cell,
+                              const std::vector<std::uint32_t>& bin_off, int n_radial,
+                              double h_radial, int l_max) {
+        proj_nr_ = n_radial;
+        proj_ncomp_ = (l_max + 1) * (l_max + 1);
+        proj_h_radial_ = h_radial;
+        sorted_buf_ = make_u32_buffer(gl, sorted_cell);
+        binoff_buf_ = make_u32_buffer(gl, bin_off);
+        glm_buf_ = make_buffer(gl, std::vector<float>(
+            static_cast<std::size_t>(2 * proj_ncomp_ * proj_nr_), 0.0f));
+    }
+
+    // Deposit psi -> g_lm (read back to host as double). ONE grid pass over psi,
+    // INDEPENDENT of the number of states; then call project_amplitude per state.
+    void project_psi(Gl& gl) {
+        gl.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, psi_buf_);
+        gl.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, sorted_buf_);
+        gl.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, binoff_buf_);
+        gl.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 8, glm_buf_);
+        gl.glUseProgram(proj_prog_);
+        gl.glUniform1i(gl.glGetUniformLocation(proj_prog_, "nx"), grid_.x.n);
+        gl.glUniform1i(gl.glGetUniformLocation(proj_prog_, "ny"), grid_.y.n);
+        gl.glUniform3f(gl.glGetUniformLocation(proj_prog_, "box_min"),
+                       static_cast<float>(grid_.x.xmin), static_cast<float>(grid_.y.xmin),
+                       static_cast<float>(grid_.z.xmin));
+        gl.glUniform3f(gl.glGetUniformLocation(proj_prog_, "cell_h"),
+                       static_cast<float>(grid_.x.spacing()),
+                       static_cast<float>(grid_.y.spacing()),
+                       static_cast<float>(grid_.z.spacing()));
+        gl.glUniform1f(gl.glGetUniformLocation(proj_prog_, "h_radial"),
+                       static_cast<float>(proj_h_radial_));
+        gl.glUniform1f(gl.glGetUniformLocation(proj_prog_, "dv"),
+                       static_cast<float>(grid_.cell_volume()));
+        gl.glUniform1i(gl.glGetUniformLocation(proj_prog_, "nr"), proj_nr_);
+        gl.glDispatchCompute(static_cast<GLuint>(proj_nr_), 1, 1);
+        gl.glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+
+        std::vector<float> raw(static_cast<std::size_t>(2 * proj_ncomp_ * proj_nr_));
+        gl.glBindBuffer(GL_SHADER_STORAGE_BUFFER, glm_buf_);
+        gl.glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
+                              static_cast<GLsizeiptr>(raw.size() * sizeof(float)),
+                              raw.data());
+        glm_host_.assign(static_cast<std::size_t>(proj_ncomp_),
+                         std::vector<ses::Complex<double>>(static_cast<std::size_t>(proj_nr_)));
+        for (int c = 0; c < proj_ncomp_; ++c) {
+            for (int j = 0; j < proj_nr_; ++j) {
+                const std::size_t o = 2 * (static_cast<std::size_t>(c) * proj_nr_ +
+                                           static_cast<std::size_t>(j));
+                glm_host_[static_cast<std::size_t>(c)][static_cast<std::size_t>(j)] =
+                    ses::Complex<double>{raw[o], raw[o + 1]};
+            }
+        }
+    }
+
+    // <n|psi> raw amplitude = sum_j u_nl[j] g_lm[lm(l,m)][j] (double CPU finish).
+    // Population = norm_sq(raw) / (sum_j u^2 h). Needs a prior project_psi.
+    ses::Complex<double> project_amplitude(const std::vector<double>& u, int l,
+                                           int m) const {
+        const std::vector<ses::Complex<double>>& gc =
+            glm_host_[static_cast<std::size_t>(l * l + (l + m))];
+        ses::Complex<double> raw{};
+        const int n = std::min(static_cast<int>(u.size()), proj_nr_);
+        for (int j = 0; j < n; ++j) {
+            raw += u[static_cast<std::size_t>(j)] * gc[static_cast<std::size_t>(j)];
+        }
+        return raw;
+    }
+
     // Upload the radial u_nl(r) table (fp32) that kSynthSrc interpolates.
     void upload_radial(Gl& gl, const std::vector<double>& u) {
         std::vector<float> f(u.size());
@@ -1407,6 +1640,17 @@ private:
         return buf;
     }
 
+    // Write-once uint32 SSBO (the static counting-sort index tables).
+    static GLuint make_u32_buffer(Gl& gl, const std::vector<std::uint32_t>& data) {
+        GLuint buf = 0;
+        gl.glGenBuffers(1, &buf);
+        gl.glBindBuffer(GL_SHADER_STORAGE_BUFFER, buf);
+        gl.glBufferData(GL_SHADER_STORAGE_BUFFER,
+                        static_cast<GLsizeiptr>(data.size() * sizeof(std::uint32_t)),
+                        data.data(), GL_STATIC_COPY);
+        return buf;
+    }
+
     // Write-once GPU buffer (GL_STATIC_COPY): for data uploaded once and only
     // read by shaders afterwards (the cached eigenstates / absorber mask).
     // Signals the driver it need not keep a host staging copy for re-uploads.
@@ -1472,6 +1716,14 @@ private:
     GLuint unpack_prog_ = 0;
     GLuint scratch_a_ = 0;  // fp32 unpack scratch for fp16 consumers
     GLuint scratch_b_ = 0;  // second scratch (dipole needs two operands)
+    GLuint proj_prog_ = 0;      // orbital-free projection deposit
+    GLuint sorted_buf_ = 0;     // static counting-sort: cells grouped by radial bin
+    GLuint binoff_buf_ = 0;     // static CSR offsets
+    GLuint glm_buf_ = 0;        // g_lm[ncomp*nr] deposit output (fp32)
+    int proj_nr_ = 0;           // radial bins
+    int proj_ncomp_ = 0;        // (l_max+1)^2
+    double proj_h_radial_ = 0.0;
+    std::vector<std::vector<ses::Complex<double>>> glm_host_;  // last project_psi readback
     FftPrograms fft_progs_;
 };
 

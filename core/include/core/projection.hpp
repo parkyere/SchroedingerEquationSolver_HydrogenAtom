@@ -31,6 +31,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
 namespace ses {
@@ -54,6 +55,85 @@ struct RadialAngularProjection {
     // amp[n] = (sum_j u[j] g_lm[lm(n)][j]) / sqrt(N_n);
     // the RAW amplitude (== the direct grid inner product) = amp[n] * sqrt(N_n).
 };
+
+// Static geometry for the GPU deposit (scoping Phase 2): the map cell -> radial
+// bin depends ONLY on the grid, never on psi, so it is built ONCE. Cells are
+// counting-sorted by their primary bin i0 into sorted_cell[] with CSR offsets
+// bin_off[] -- the GPU then runs one workgroup per bin (a deterministic gather,
+// no atomics). The bin key i0 is computed in the IDENTICAL fp32 arithmetic the
+// shader uses (float coords box_min + i*cell_h, float r, float t = r/h - 1,
+// int(t)) so the build and the shader agree on the bin for every cell,
+// including the ~fp32-eps boundary straddlers (scoping risk 6.1).
+struct RadialBinIndex {
+    std::vector<std::uint32_t> sorted_cell;  // in-sphere cell flat indices, grouped by i0
+    std::vector<std::uint32_t> bin_off;      // CSR offsets, length n_radial+1
+};
+
+// The fp32-identical bin key for a cell: -1 if r >= rmax (outside the sphere),
+// 0 if r < h (origin segment), else i0 = int(r/h - 1). Free function so the
+// GLSL kernel and the CPU sort provably share it.
+inline int radial_bin_key(const Grid3D& g, const RadialGrid& rgrid, int i, int j,
+                          int k) {
+    const float hf = static_cast<float>(rgrid.h());
+    const float rmaxf = static_cast<float>(rgrid.rmax);
+    const float x = static_cast<float>(g.x.xmin) +
+                    static_cast<float>(i) * static_cast<float>(g.x.spacing());
+    const float y = static_cast<float>(g.y.xmin) +
+                    static_cast<float>(j) * static_cast<float>(g.y.spacing());
+    const float z = static_cast<float>(g.z.xmin) +
+                    static_cast<float>(k) * static_cast<float>(g.z.spacing());
+    const float r = std::sqrt(x * x + y * y + z * z);
+    if (r >= rmaxf) {
+        return -1;
+    }
+    if (r < hf) {
+        return 0;
+    }
+    int i0 = static_cast<int>(r / hf - 1.0f);
+    if (i0 >= rgrid.n) {
+        i0 = rgrid.n - 1;  // guard: r < rmax should already keep i0 <= n-1
+    }
+    return i0;
+}
+
+inline RadialBinIndex build_radial_bin_index(const Grid3D& g, const RadialGrid& rgrid) {
+    const int nx = g.x.n;
+    const int ny = g.y.n;
+    const int nz = g.z.n;
+    const int nr = rgrid.n;
+    std::vector<std::uint32_t> counts(static_cast<std::size_t>(nr), 0);
+    for (int k = 0; k < nz; ++k) {
+        for (int j = 0; j < ny; ++j) {
+            for (int i = 0; i < nx; ++i) {
+                const int key = radial_bin_key(g, rgrid, i, j, k);
+                if (key >= 0) {
+                    ++counts[static_cast<std::size_t>(key)];
+                }
+            }
+        }
+    }
+    RadialBinIndex out;
+    out.bin_off.assign(static_cast<std::size_t>(nr + 1), 0);
+    for (int b = 0; b < nr; ++b) {
+        out.bin_off[static_cast<std::size_t>(b + 1)] =
+            out.bin_off[static_cast<std::size_t>(b)] + counts[static_cast<std::size_t>(b)];
+    }
+    out.sorted_cell.resize(out.bin_off[static_cast<std::size_t>(nr)]);
+    std::vector<std::uint32_t> pos(out.bin_off.begin(), out.bin_off.end() - 1);
+    for (int k = 0; k < nz; ++k) {
+        for (int j = 0; j < ny; ++j) {
+            for (int i = 0; i < nx; ++i) {
+                const int key = radial_bin_key(g, rgrid, i, j, k);
+                if (key >= 0) {
+                    const std::uint32_t idx =
+                        static_cast<std::uint32_t>(i + nx * (j + ny * k));
+                    out.sorted_cell[pos[static_cast<std::size_t>(key)]++] = idx;
+                }
+            }
+        }
+    }
+    return out;
+}
 
 // One grid pass over psi -> g_lm; then a 1-D radial dot per state -> amplitudes.
 inline RadialAngularProjection project_radial_angular(

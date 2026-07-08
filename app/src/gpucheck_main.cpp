@@ -36,6 +36,7 @@
 #include <core/magnetic.hpp>
 #include <core/radial.hpp>
 #include <core/potential.hpp>
+#include <core/projection.hpp>
 #include <core/propagator.hpp>
 #include <core/sampling.hpp>
 #include <core/vec.hpp>
@@ -688,6 +689,70 @@ bool check_fp16_consumers(Gl& gl) {
     return ok;
 }
 
+// Orbital-free angular-decomposition projection: the GPU deposit (sorted-gather
+// per radial bin, fp32) + CPU-double 1-D radial dot vs the CPU oracle
+// project_radial_angular (which equals the direct grid inner product to 1e-11).
+// The gap is the fp32 deposit + fp32 bin-key rounding vs the double oracle.
+bool check_project(Gl& gl) {
+    const ses::Grid1D axis{-8.0, 8.0, 32};
+    const ses::Grid3D g{axis, axis, axis};
+    const std::vector<double> v = ses::soft_coulomb_potential(g, 1.0, 1.0, ses::Vec3d{});
+    const ses::SplitOperator3D prop{g, v, 0.02};
+    const ses::Field3D seed = ses::gaussian_wavepacket(
+        g, ses::Vec3d{}, ses::Vec3d{1.5, 1.5, 1.5}, ses::Vec3d{});
+    ses_gpu::GpuEngine eng;
+    if (!eng.initialize(gl, g, prop.half_potential_phase(), prop.kinetic_phase(), seed)) {
+        std::printf("engine init: FAIL\n");
+        return false;
+    }
+    const ses::RadialGrid rg{8.0, 200};
+    std::vector<std::vector<double>> u_by_level(2);
+    for (int lev = 0; lev < 2; ++lev) {
+        u_by_level[static_cast<std::size_t>(lev)].resize(static_cast<std::size_t>(rg.n));
+        for (int i = 0; i < rg.n; ++i) {
+            const double r = rg.r(i);
+            u_by_level[static_cast<std::size_t>(lev)][static_cast<std::size_t>(i)] =
+                (lev == 0) ? r * std::exp(-r) : r * r * std::exp(-0.5 * r);
+        }
+    }
+    const int l_max = 5;
+    const ses::RadialBinIndex idx = ses::build_radial_bin_index(g, rg);
+    eng.set_projection_index(gl, idx.sorted_cell, idx.bin_off, rg.n, rg.h(), l_max);
+
+    const ses::Field3D psi = ses::gaussian_wavepacket(
+        g, ses::Vec3d{1.0, 0.5, -0.4}, ses::Vec3d{1.7, 1.7, 1.7}, ses::Vec3d{0.3, -0.2, 0.1});
+    eng.upload_state(gl, psi);
+    eng.project_psi(gl);
+
+    const std::vector<ses::ProjectorState> states = {
+        {0, 0, 0}, {1, 1, 0}, {1, 1, 1}, {0, 2, -1}, {1, 4, 2}, {0, 5, 3}};
+    const ses::RadialAngularProjection cpu =
+        ses::project_radial_angular(psi, rg, u_by_level, states, l_max);
+    double worst = 0.0;
+    for (std::size_t s = 0; s < states.size(); ++s) {
+        const ses::ProjectorState& st = states[s];
+        const ses::Complex<double> gpu = eng.project_amplitude(
+            u_by_level[static_cast<std::size_t>(st.level)], st.l, st.m);
+        const ses::Complex<double> ref =
+            cpu.amp[s] * std::sqrt(cpu.norm2[static_cast<std::size_t>(s)]);
+        const double e = std::max(std::abs(gpu.real() - ref.real()),
+                                  std::abs(gpu.imag() - ref.imag())) /
+                         (1.0 + std::abs(ref));
+        worst = std::max(worst, e);
+    }
+    // Determinism: a second deposit reproduces the amplitude bit-for-bit (no
+    // atomics; fixed-order tree reduction + deterministic double finish).
+    const ses::Complex<double> a1 = eng.project_amplitude(u_by_level[1], 1, 0);
+    eng.project_psi(gl);
+    const ses::Complex<double> a2 = eng.project_amplitude(u_by_level[1], 1, 0);
+    const bool deterministic = (a1 == a2);
+    const bool ok = worst < 1e-3 && deterministic;
+    std::printf("orbital-free projection <n|psi>: max rel |gpu - cpu| = %.3e, "
+                "deterministic = %d  [%s]\n",
+                worst, deterministic ? 1 : 0, ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -739,6 +804,7 @@ int main(int argc, char** argv) {
     ok = check_synth(gl) && ok;
     ok = check_fp16(gl) && ok;
     ok = check_fp16_consumers(gl) && ok;
+    ok = check_project(gl) && ok;
 
     return ok ? 0 : 1;
 }
