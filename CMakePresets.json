@@ -8,44 +8,24 @@
             "binaryDir": "${sourceDir}/out/build/${presetName}",
             "cacheVariables": {
                 "SES_ENABLE_AVX2": "ON",
-                "CMAKE_PREFIX_PATH": "C:/Qt/6.8.1/msvc2022_64"
+                "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/external/vcpkg/scripts/buildsystems/vcpkg.cmake",
+                "VCPKG_TARGET_TRIPLET": "x64-windows-static"
             },
             "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
         },
         {
-            "name": "msvc",
-            "displayName": "MSVC RelWithDebInfo (AVX2, Qt msvc2022_64)",
-            "description": "Default for development: optimized enough for the 3D physics, still debuggable.",
-            "inherits": "msvc-base",
-            "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
-        },
-        {
             "name": "msvc-release",
-            "displayName": "MSVC Release (AVX2, Qt msvc2022_64)",
-            "description": "Full optimization, no debug info.",
+            "displayName": "Windows MSVC Release (static)",
+            "description": "Windows Release build. All deps static via vcpkg x64-windows-static (static libraries + static CRT). FIRST configure builds Qt from source (slow once, then binary-cached). Bootstrap external/vcpkg/bootstrap-vcpkg.bat and configure from an MSVC vcvarsall x64 environment.",
             "inherits": "msvc-base",
             "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
         },
         {
             "name": "msvc-debug",
-            "displayName": "MSVC Debug (AVX2, Qt msvc2022_64)",
-            "description": "WARNING: unoptimized -- the 3D physics tests take minutes. Use for stepping through code only.",
+            "displayName": "Windows MSVC Debug (static)",
+            "description": "Windows Debug build (static via vcpkg x64-windows-static). WARNING: unoptimized -- the 3D physics/FFT tests take minutes; use for stepping through code.",
             "inherits": "msvc-base",
             "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
-        },
-        {
-            "name": "msvc-vcpkg",
-            "displayName": "MSVC + vcpkg (hermetic: Qt/gtest/vulkan-headers all from vcpkg)",
-            "description": "Full vcpkg unification (x64-windows). FIRST configure builds Qt from source via vcpkg -- slow once, then binary-cached. Bootstrap first (external/vcpkg/bootstrap-vcpkg.bat) and configure from an MSVC vcvarsall x64 environment.",
-            "generator": "Ninja",
-            "binaryDir": "${sourceDir}/out/build/${presetName}",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-                "SES_ENABLE_AVX2": "ON",
-                "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/external/vcpkg/scripts/buildsystems/vcpkg.cmake",
-                "VCPKG_TARGET_TRIPLET": "x64-windows"
-            },
-            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
         },
         {
             "name": "linux-base",
@@ -53,73 +33,37 @@
             "generator": "Ninja",
             "binaryDir": "${sourceDir}/out/build/${presetName}",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-                "SES_ENABLE_AVX2": "ON"
+                "SES_ENABLE_AVX2": "ON",
+                "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/external/vcpkg/scripts/buildsystems/vcpkg.cmake",
+                "VCPKG_TARGET_TRIPLET": "x64-linux"
             },
             "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
         },
         {
-            "name": "linux",
-            "displayName": "Linux RelWithDebInfo (AVX2, system Qt6)",
-            "description": "Safe default: portable AVX2 (bitwise-reproducible tests); compiler = system default.",
-            "inherits": "linux-base"
+            "name": "linux-release",
+            "displayName": "Linux Release (static)",
+            "description": "Linux Release build. Deps static via vcpkg x64-linux (static libraries; glibc stays dynamic, as is standard on Linux). Portable AVX2 (bitwise-reproducible oracles). First configure builds Qt from source (slow once, then cached). Bootstrap external/vcpkg/bootstrap-vcpkg.sh first.",
+            "inherits": "linux-base",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
         },
         {
-            "name": "linux-native",
-            "displayName": "Linux RelWithDebInfo (-march=native, newest clang/gcc)",
-            "description": "Host-tuned (-march=native, pinned to 256-bit vectors) + newest clang++/g++. Stays bitwise-reproducible with the AVX2 oracles even on AVX-512, so it works for the app AND the test suite.",
+            "name": "linux-debug",
+            "displayName": "Linux Debug (static)",
+            "description": "Linux Debug build (static via vcpkg x64-linux). WARNING: unoptimized -- the 3D physics/FFT tests take minutes.",
             "inherits": "linux-base",
-            "cacheVariables": {
-                "SES_NATIVE": "ON",
-                "SES_AUTODETECT_COMPILER": "ON"
-            }
-        },
-        {
-            "name": "linux-clang",
-            "displayName": "Linux Clang (AVX2)",
-            "inherits": "linux-base",
-            "cacheVariables": {
-                "CMAKE_C_COMPILER": "clang",
-                "CMAKE_CXX_COMPILER": "clang++"
-            }
-        },
-        {
-            "name": "linux-gcc",
-            "displayName": "Linux GCC (AVX2)",
-            "inherits": "linux-base",
-            "cacheVariables": {
-                "CMAKE_C_COMPILER": "gcc",
-                "CMAKE_CXX_COMPILER": "g++"
-            }
-        },
-        {
-            "name": "linux-vcpkg",
-            "displayName": "Linux static Qt via vcpkg",
-            "description": "Self-contained: Qt built statically by the external/vcpkg submodule (x64-linux triplet). First configure builds Qt from source -- slow once, then cached. Bootstrap the submodule first: external/vcpkg/bootstrap-vcpkg.sh.",
-            "inherits": "linux-base",
-            "cacheVariables": {
-                "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/external/vcpkg/scripts/buildsystems/vcpkg.cmake",
-                "VCPKG_TARGET_TRIPLET": "x64-linux"
-            }
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
         }
     ],
     "buildPresets": [
-        { "name": "msvc", "configurePreset": "msvc" },
         { "name": "msvc-release", "configurePreset": "msvc-release" },
         { "name": "msvc-debug", "configurePreset": "msvc-debug" },
-        { "name": "msvc-vcpkg", "configurePreset": "msvc-vcpkg" },
-        { "name": "linux", "configurePreset": "linux" },
-        { "name": "linux-native", "configurePreset": "linux-native" },
-        { "name": "linux-clang", "configurePreset": "linux-clang" },
-        { "name": "linux-gcc", "configurePreset": "linux-gcc" },
-        { "name": "linux-vcpkg", "configurePreset": "linux-vcpkg" }
+        { "name": "linux-release", "configurePreset": "linux-release" },
+        { "name": "linux-debug", "configurePreset": "linux-debug" }
     ],
     "testPresets": [
-        { "name": "msvc", "configurePreset": "msvc", "output": { "outputOnFailure": true } },
         { "name": "msvc-release", "configurePreset": "msvc-release", "output": { "outputOnFailure": true } },
-        { "name": "msvc-vcpkg", "configurePreset": "msvc-vcpkg", "output": { "outputOnFailure": true } },
-        { "name": "linux", "configurePreset": "linux", "output": { "outputOnFailure": true } },
-        { "name": "linux-native", "configurePreset": "linux-native", "output": { "outputOnFailure": true } },
-        { "name": "linux-vcpkg", "configurePreset": "linux-vcpkg", "output": { "outputOnFailure": true } }
+        { "name": "msvc-debug", "configurePreset": "msvc-debug", "output": { "outputOnFailure": true } },
+        { "name": "linux-release", "configurePreset": "linux-release", "output": { "outputOnFailure": true } },
+        { "name": "linux-debug", "configurePreset": "linux-debug", "output": { "outputOnFailure": true } }
     ]
 }
