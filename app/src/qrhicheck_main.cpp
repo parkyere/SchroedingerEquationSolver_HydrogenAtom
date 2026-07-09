@@ -9,10 +9,16 @@
 // Exit 77 = SKIP (ctest SKIP_RETURN_CODE) when no Vulkan device is available,
 // mirroring sesolver_gpucheck's no-context convention.
 
+#include "qrhi_engine.hpp"
+
 #include <core/complex.hpp>
 #include <core/fft.hpp>
 #include <core/field.hpp>
 #include <core/grid.hpp>
+#include <core/potential.hpp>
+#include <core/propagator.hpp>
+#include <core/vec.hpp>
+#include <core/wavepacket.hpp>
 
 #include <rhi/qrhi.h>
 
@@ -974,6 +980,48 @@ bool check_fft3(QRhi* rhi) {
     return pass;
 }
 
+// The production Strang step through the QrhiEngine (qrhi_engine.hpp), 20 steps
+// on an 8x8x8 soft-Coulomb grid vs SplitOperator3D::step -- the QRhi analog of
+// sesolver_gpucheck's G4. This is the whole engine chain (halfV, fft3, kinetic,
+// IFFT, halfV) orchestrated on QRhi, not a single kernel.
+bool check_engine_step(QRhi* rhi) {
+    const ses::Grid1D axis{-4.0, 4.0, 8};
+    const ses::Grid3D g{axis, axis, axis};
+    const std::vector<double> v = ses::soft_coulomb_potential(g, 1.0, 1.0, ses::Vec3d{});
+    const double dt = 0.02;
+    const ses::SplitOperator3D cpu_prop{g, v, dt};
+    ses::Field3D psi0 = ses::gaussian_wavepacket(g, ses::Vec3d{1.0, 0.0, 0.0},
+                                                 ses::Vec3d{1.2, 1.2, 1.2},
+                                                 ses::Vec3d{0.0, 0.5, 0.0});
+
+    ses_qrhi::QrhiEngine engine;
+    if (!engine.initialize(rhi, g, cpu_prop.half_potential_phase(), cpu_prop.kinetic_phase(),
+                           psi0.data())) {
+        std::printf("engine 20 steps (QRhi/Vulkan): engine init FAIL\n");
+        return false;
+    }
+    engine.step(20);
+    std::vector<float> gpu_out;
+    engine.readback(gpu_out);
+
+    ses::Field3D cpu = psi0;
+    cpu_prop.step(cpu, 20);
+
+    double max_err = 0.0;
+    double max_mag = 0.0;
+    for (std::size_t i = 0; i < cpu.data().size(); ++i) {
+        max_err = std::max(max_err, std::abs(gpu_out[2 * i] - cpu.data()[i].real()));
+        max_err = std::max(max_err, std::abs(gpu_out[2 * i + 1] - cpu.data()[i].imag()));
+        max_mag = std::max(max_mag, std::abs(cpu.data()[i].real()));
+        max_mag = std::max(max_mag, std::abs(cpu.data()[i].imag()));
+    }
+    const double tol = 1e-4 + 1e-5 * max_mag;
+    const bool pass = max_err < tol;
+    std::printf("engine 20 steps (QRhi/Vulkan): max |gpu - cpu| = %.3e (tol %.3e)  [%s]\n",
+                max_err, tol, pass ? "PASS" : "FAIL");
+    return pass;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1011,6 +1059,7 @@ int main(int argc, char** argv) {
     ok = check_fft(rhi.data()) && ok;
     ok = check_fp16_roundtrip(rhi.data()) && ok;
     ok = check_fft3(rhi.data()) && ok;
+    ok = check_engine_step(rhi.data()) && ok;
     std::printf("%s\n", ok ? "QRhi kernel checks PASS" : "QRhi kernel checks FAILED");
     return ok ? 0 : 1;
 }
