@@ -58,6 +58,7 @@ public:
         grid_ = grid;
         n_ = grid.x.n;
         cells_ = static_cast<std::size_t>(grid.size());
+        cell_volume_ = grid.cell_volume();  // base resource: norm reduction needs dV
         if (grid.y.n != n_ || grid.z.n != n_) {
             std::fprintf(stderr, "QrhiEngine: only cubic grids supported\n");
             return false;
@@ -68,7 +69,10 @@ public:
         const QShader fftcs =
             load_qsb(QStringLiteral(":/shaders/fft_line%1.comp.qsb").arg(n_));
         const QShader kickcs = load_qsb(QStringLiteral(":/shaders/dipole_kick.comp.qsb"));
-        if (!mulcs.isValid() || !conjcs.isValid() || !fftcs.isValid() || !kickcs.isValid()) {
+        const QShader normcs = load_qsb(QStringLiteral(":/shaders/norm_peak.comp.qsb"));
+        const QShader scalecs = load_qsb(QStringLiteral(":/shaders/scale.comp.qsb"));
+        if (!mulcs.isValid() || !conjcs.isValid() || !fftcs.isValid() || !kickcs.isValid() ||
+            !normcs.isValid() || !scalecs.isValid()) {
             return false;
         }
 
@@ -160,6 +164,30 @@ public:
             return false;
         }
 
+        // Norm/peak reduction + scale are BASE resources (used by relax,
+        // deflation, and orbital synthesis), so they live here, not in
+        // set_relax_tables. partials_ holds one (sum,peak) per workgroup.
+        partials_.reset(rhi_->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer,
+                                        static_cast<quint32>(2 * kGroups * sizeof(float))));
+        scale_ubo_.reset(rhi_->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer,
+                                         sizeof(ConjParams)));
+        if (!partials_->create() || !scale_ubo_->create()) { return false; }
+        norm_srb_.reset(rhi_->newShaderResourceBindings());
+        norm_srb_->setBindings({ B::bufferLoad(0, cs, psi_.data()),
+                                 B::uniformBuffer(1, cs, muln_ubo_.data()),
+                                 B::bufferLoadStore(2, cs, partials_.data()) });
+        scale_srb_.reset(rhi_->newShaderResourceBindings());
+        scale_srb_->setBindings({ B::bufferLoadStore(0, cs, psi_.data()),
+                                  B::uniformBuffer(1, cs, scale_ubo_.data()) });
+        if (!norm_srb_->create() || !scale_srb_->create()) { return false; }
+        norm_pipe_.reset(rhi_->newComputePipeline());
+        norm_pipe_->setShaderStage(QRhiShaderStage(QRhiShaderStage::Compute, normcs));
+        norm_pipe_->setShaderResourceBindings(norm_srb_.data());
+        scale_pipe_.reset(rhi_->newComputePipeline());
+        scale_pipe_->setShaderStage(QRhiShaderStage(QRhiShaderStage::Compute, scalecs));
+        scale_pipe_->setShaderResourceBindings(scale_srb_.data());
+        if (!norm_pipe_->create() || !scale_pipe_->create()) { return false; }
+
         // Upload the static buffers (psi/half/kin) once.
         QRhiCommandBuffer* cb = nullptr;
         if (rhi_->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess) { return false; }
@@ -226,18 +254,9 @@ public:
             hf[2 * i] = static_cast<float>(half_w[i]);
             kf[2 * i] = static_cast<float>(kin_w[i]);
         }
-        const QShader normcs = load_qsb(QStringLiteral(":/shaders/norm_peak.comp.qsb"));
-        const QShader scalecs = load_qsb(QStringLiteral(":/shaders/scale.comp.qsb"));
-        if (!normcs.isValid() || !scalecs.isValid()) { return false; }
-
         relax_half_.reset(rhi_->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer, bytes));
         relax_kin_.reset(rhi_->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer, bytes));
-        partials_.reset(rhi_->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer,
-                                        static_cast<quint32>(2 * kGroups * sizeof(float))));
-        scale_ubo_.reset(rhi_->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer,
-                                         sizeof(ConjParams)));
-        if (!relax_half_->create() || !relax_kin_->create() || !partials_->create() ||
-            !scale_ubo_->create()) { return false; }
+        if (!relax_half_->create() || !relax_kin_->create()) { return false; }
 
         using B = QRhiShaderResourceBinding;
         const auto cs = B::ComputeStage;
@@ -249,23 +268,7 @@ public:
         relax_kin_srb_->setBindings({ B::bufferLoadStore(0, cs, psi_.data()),
                                       B::bufferLoad(1, cs, relax_kin_.data()),
                                       B::uniformBuffer(2, cs, muln_ubo_.data()) });
-        norm_srb_.reset(rhi_->newShaderResourceBindings());
-        norm_srb_->setBindings({ B::bufferLoad(0, cs, psi_.data()),
-                                 B::uniformBuffer(1, cs, muln_ubo_.data()),
-                                 B::bufferLoadStore(2, cs, partials_.data()) });
-        scale_srb_.reset(rhi_->newShaderResourceBindings());
-        scale_srb_->setBindings({ B::bufferLoadStore(0, cs, psi_.data()),
-                                  B::uniformBuffer(1, cs, scale_ubo_.data()) });
-        if (!relax_half_srb_->create() || !relax_kin_srb_->create() || !norm_srb_->create() ||
-            !scale_srb_->create()) { return false; }
-
-        norm_pipe_.reset(rhi_->newComputePipeline());
-        norm_pipe_->setShaderStage(QRhiShaderStage(QRhiShaderStage::Compute, normcs));
-        norm_pipe_->setShaderResourceBindings(norm_srb_.data());
-        scale_pipe_.reset(rhi_->newComputePipeline());
-        scale_pipe_->setShaderStage(QRhiShaderStage(QRhiShaderStage::Compute, scalecs));
-        scale_pipe_->setShaderResourceBindings(scale_srb_.data());
-        if (!norm_pipe_->create() || !scale_pipe_->create()) { return false; }
+        if (!relax_half_srb_->create() || !relax_kin_srb_->create()) { return false; }
 
         QRhiCommandBuffer* cb = nullptr;
         if (rhi_->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess) { return false; }
@@ -330,10 +333,6 @@ public:
     // (index) for relax_deflated_step / inner_with_psi / copy_into_psi, or -1 on
     // failure. Call after set_relax_tables (reuses the norm partials buffer).
     int create_state_buffer(const std::vector<ses::Complex<double>>& state) {
-        if (partials_.isNull()) {
-            std::fprintf(stderr, "QrhiEngine: create_state_buffer needs set_relax_tables\n");
-            return -1;
-        }
         // The projection-coefficient UBO is shared across aux states; create it
         // once, BEFORE the axpy SRB names it (a null binding would crash create).
         if (axpy_ubo_.isNull()) {
@@ -451,6 +450,59 @@ public:
         rhi_->endOffscreenFrame();
     }
 
+    // ---- orbital synthesis ---------------------------------------------
+    // psi <- normalized (u(|r|)/|r|) Y_lm, synthesized on the GPU from the radial
+    // table u_nl(r) (kSynthSrc). Writes psi in place then normalizes (the atlas
+    // version that keeps a resident buffer is deferred to M3). h_radial =
+    // rmax/(n_radial+1). Returns false if a resource fails to build.
+    bool synthesize_into_psi(const std::vector<double>& u, int l, int m, double h_radial,
+                             double rmax, int n_radial) {
+        std::vector<float> uf(u.size());
+        for (std::size_t i = 0; i < u.size(); ++i) { uf[i] = static_cast<float>(u[i]); }
+        const quint32 rbytes = static_cast<quint32>(uf.size() * sizeof(float));
+        bool rebuilt = false;
+        if (radial_buf_.isNull() || radial_bytes_ != rbytes) {
+            radial_buf_.reset(rhi_->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer,
+                                              rbytes));
+            if (!radial_buf_->create()) { return false; }
+            radial_bytes_ = rbytes;
+            rebuilt = true;
+        }
+        if (!ensure_synth(rebuilt)) { return false; }
+
+        SynthParams sp{};
+        sp.n = static_cast<quint32>(cells_);
+        sp.nx = grid_.x.n;
+        sp.ny = grid_.y.n;
+        sp.l = l;
+        sp.m = m;
+        sp.n_radial = n_radial;
+        sp.h_radial = static_cast<float>(h_radial);
+        sp.rmax = static_cast<float>(rmax);
+        sp.box_min[0] = static_cast<float>(grid_.x.xmin);
+        sp.box_min[1] = static_cast<float>(grid_.y.xmin);
+        sp.box_min[2] = static_cast<float>(grid_.z.xmin);
+        sp.cell_h[0] = static_cast<float>(grid_.x.spacing());
+        sp.cell_h[1] = static_cast<float>(grid_.y.spacing());
+        sp.cell_h[2] = static_cast<float>(grid_.z.spacing());
+
+        const int groups = static_cast<int>((cells_ + 255) / 256);
+        QRhiCommandBuffer* cb = nullptr;
+        if (rhi_->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess) { return false; }
+        QRhiResourceUpdateBatch* uu = rhi_->nextResourceUpdateBatch();
+        uu->uploadStaticBuffer(radial_buf_.data(), uf.data());
+        uu->updateDynamicBuffer(synth_ubo_.data(), 0, sizeof(SynthParams), &sp);
+        cb->beginComputePass(uu);
+        cb->setComputePipeline(synth_pipe_.data());
+        cb->setShaderResources(synth_srb_.data());
+        cb->dispatch(groups, 1, 1);
+        cb->endComputePass();
+        rhi_->endOffscreenFrame();
+
+        renormalize_and_estimate(groups);  // norm + scale on psi_ (energy unused)
+        return true;
+    }
+
     // ---- magnetic minimal coupling (real-time B field) -----------------
     // Replace the resident half-potential table (half_) with a new one -- the
     // caller swaps in the diamagnetic-augmented V + (B^2/8) rho_perp^2 before a
@@ -513,6 +565,15 @@ private:
         qint32 nx, ny, nz;
         qint32 freq_axis, coord_axis, nf;
         float kscale, cmin, ch, coeff;
+    };
+    // std140: vec4-padded box_min/cell_h at 16/32, matches synth.comp order.
+    struct alignas(16) SynthParams {
+        quint32 n;
+        qint32 nx, ny, l;
+        float box_min[4];
+        float cell_h[4];
+        qint32 m, n_radial;
+        float h_radial, rmax;
     };
 
     // An auxiliary (lower) eigenstate resident on the GPU plus its bindings for
@@ -624,7 +685,7 @@ private:
         for (int gi = 0; gi < kGroups; ++gi) { sum += p[2 * gi]; }
         const double norm_sq = sum * cell_volume_;
         const double inv = (norm_sq > 0.0) ? 1.0 / std::sqrt(norm_sq) : 0.0;
-        stats.energy = (norm_sq > 0.0) ? -std::log(norm_sq) / (2.0 * dtau_) : 0.0;
+        stats.energy = (norm_sq > 0.0 && dtau_ > 0.0) ? -std::log(norm_sq) / (2.0 * dtau_) : 0.0;
 
         const ConjParams sp{ static_cast<quint32>(cells_), static_cast<float>(inv), 0.0f, 0.0f };
         QRhiCommandBuffer* cb2 = nullptr;
@@ -677,6 +738,35 @@ private:
         copy_pipe_->setShaderStage(QRhiShaderStage(QRhiShaderStage::Compute, copycs));
         copy_pipe_->setShaderResourceBindings(first->copy_srb.data());
         return inner_pipe_->create() && axpy_pipe_->create() && copy_pipe_->create();
+    }
+
+    // Lazily build the synth UBO/SRB/pipeline. rebuild_srb re-points the SRB at a
+    // freshly (re)sized radial buffer; the pipeline layout is unchanged so it is
+    // kept. Call after radial_buf_ exists.
+    bool ensure_synth(bool rebuild_srb) {
+        using B = QRhiShaderResourceBinding;
+        const auto cs = B::ComputeStage;
+        if (synth_ubo_.isNull()) {
+            synth_ubo_.reset(rhi_->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer,
+                                             sizeof(SynthParams)));
+            if (!synth_ubo_->create()) { return false; }
+        }
+        if (rebuild_srb || synth_srb_.isNull()) {
+            synth_srb_.reset(rhi_->newShaderResourceBindings());
+            synth_srb_->setBindings({ B::bufferLoadStore(0, cs, psi_.data()),
+                                      B::uniformBuffer(1, cs, synth_ubo_.data()),
+                                      B::bufferLoad(5, cs, radial_buf_.data()) });
+            if (!synth_srb_->create()) { return false; }
+        }
+        if (synth_pipe_.isNull()) {
+            const QShader synthcs = load_qsb(QStringLiteral(":/shaders/synth.comp.qsb"));
+            if (!synthcs.isValid()) { return false; }
+            synth_pipe_.reset(rhi_->newComputePipeline());
+            synth_pipe_->setShaderStage(QRhiShaderStage(QRhiShaderStage::Compute, synthcs));
+            synth_pipe_->setShaderResourceBindings(synth_srb_.data());
+            if (!synth_pipe_->create()) { return false; }
+        }
+        return true;
     }
 
     // Lazily build the shear pipeline + its UBO/SRB and the per-axis inverse-FFT
@@ -794,6 +884,13 @@ private:
     QScopedPointer<QRhiBuffer> shear_ubo_, conjA_ubo_;
     QScopedPointer<QRhiShaderResourceBindings> shear_srb_, conjA_srb_;
     QScopedPointer<QRhiComputePipeline> shear_pipe_;
+
+    // Orbital synthesis (synthesize_into_psi): the radial u_nl(r) table plus the
+    // synth kernel writing (u/r)Ylm into psi.
+    quint32 radial_bytes_ = 0;
+    QScopedPointer<QRhiBuffer> radial_buf_, synth_ubo_;
+    QScopedPointer<QRhiShaderResourceBindings> synth_srb_;
+    QScopedPointer<QRhiComputePipeline> synth_pipe_;
 };
 
 }  // namespace ses_qrhi

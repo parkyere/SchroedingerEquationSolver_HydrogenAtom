@@ -16,8 +16,10 @@
 #include <core/fft.hpp>
 #include <core/field.hpp>
 #include <core/grid.hpp>
+#include <core/harmonics.hpp>
 #include <core/imaginary_time.hpp>
 #include <core/magnetic.hpp>
+#include <core/radial.hpp>
 #include <core/rotation.hpp>
 #include <core/potential.hpp>
 #include <core/propagator.hpp>
@@ -1280,6 +1282,56 @@ bool check_magnetic(QRhi* rhi) {
     return pass;
 }
 
+// Orbital synthesis: psi = (u(|r|)/|r|) Y_lm built on the GPU from a radial
+// table, vs core synthesize_orbital, across l = 0..5 and several m. Exercises
+// the real-spherical-harmonic evaluation + radial interpolation + in-place
+// normalization. Same grid on both sides, so this is a kernel-parity check.
+bool check_synth(QRhi* rhi) {
+    const ses::Grid1D axis{-4.0, 4.0, 8};
+    const ses::Grid3D g{axis, axis, axis};
+    const std::vector<double> v = ses::soft_coulomb_potential(g, 1.0, 1.0, ses::Vec3d{});
+    const ses::SplitOperator3D prop{g, v, 0.02};
+    ses::Field3D seed = ses::gaussian_wavepacket(g, ses::Vec3d{}, ses::Vec3d{1.5, 1.5, 1.5},
+                                                 ses::Vec3d{});
+    ses_qrhi::QrhiEngine engine;
+    if (!engine.initialize(rhi, g, prop.half_potential_phase(), prop.kinetic_phase(),
+                           seed.data())) {
+        std::printf("orbital synthesis (QRhi/Vulkan): engine init FAIL\n");
+        return false;
+    }
+
+    const ses::RadialGrid rg{8.0, 1599};
+    std::vector<double> vr(static_cast<std::size_t>(rg.n));
+    for (int i = 0; i < rg.n; ++i) {
+        vr[static_cast<std::size_t>(i)] = 0.5 * rg.r(i) * rg.r(i);
+    }
+    struct SynCase { int l, k, m; };
+    const SynCase cases[] = {{0, 0, 0}, {1, 0, -1}, {2, 0, 1},
+                             {3, 0, -2}, {4, 0, 3}, {5, 0, 5}, {5, 0, 0}};
+    double worst = 0.0;
+    for (const SynCase& c : cases) {
+        const ses::RadialState st =
+            ses::radial_eigenstate(rg, ses::radial_hamiltonian(rg, vr, c.l), c.k);
+        const ses::Field3D cpu = ses::synthesize_orbital(g, rg, st.u, c.l, c.m);
+        if (!engine.synthesize_into_psi(st.u, c.l, c.m, rg.h(), rg.rmax, rg.n)) {
+            std::printf("orbital synthesis (QRhi/Vulkan): synthesize FAIL\n");
+            return false;
+        }
+        std::vector<float> gpu;
+        engine.readback(gpu);
+        for (std::size_t i = 0; i < cpu.data().size(); ++i) {
+            worst = std::max(worst, std::abs(static_cast<double>(gpu[2 * i]) -
+                                             cpu.data()[i].real()));
+            worst = std::max(worst, std::abs(static_cast<double>(gpu[2 * i + 1]) -
+                                             cpu.data()[i].imag()));
+        }
+    }
+    const bool ok = worst < 1e-4;
+    std::printf("orbital synthesis (u/r)Ylm (QRhi/Vulkan): max |gpu - cpu| = %.3e  [%s]\n",
+                worst, ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1325,6 +1377,7 @@ int main(int argc, char** argv) {
     ok = check_driven(rhi.data()) && ok;
     ok = check_deflation(rhi.data()) && ok;
     ok = check_magnetic(rhi.data()) && ok;
+    ok = check_synth(rhi.data()) && ok;
     std::printf("%s\n", ok ? "QRhi kernel checks PASS" : "QRhi kernel checks FAILED");
     return ok ? 0 : 1;
 }
