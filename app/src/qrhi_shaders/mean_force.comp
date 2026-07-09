@@ -1,0 +1,39 @@
+#version 450
+
+// Decorated Vulkan-GLSL form of kMeanForceSrc (gpu_shaders.hpp): the Ehrenfest
+// force <grad V> = sum |psi|^2 grad V, a vec4 reduction folding psi (binding 0)
+// against a per-cell grad V field (binding 4, vec4 gx/gy/gz/0) into one vec4
+// partial per workgroup (binding 2); the host sums. Body byte-for-byte the GL
+// kernel's; std140 UBO for n (binding 1).
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer PsiBuf { vec2 psi[]; };
+layout(std430, binding = 4) readonly buffer GradBuf { vec4 grad_v[]; };
+layout(std430, binding = 2) writeonly buffer PartialsBuf { vec4 partials[]; };
+
+layout(std140, binding = 1) uniform Params {
+    uint n;
+};
+
+shared vec4 s_acc[256];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint stride = gl_NumWorkGroups.x * 256u;
+    vec4 acc = vec4(0.0);
+    for (uint i = gl_GlobalInvocationID.x; i < n; i += stride) {
+        vec2 p = psi[i];
+        acc += dot(p, p) * grad_v[i];  // |psi|^2 * (gx,gy,gz,0)
+    }
+    s_acc[tid] = acc;
+    barrier();
+    for (uint half_len = 128u; half_len > 0u; half_len >>= 1u) {
+        if (tid < half_len) {
+            s_acc[tid] += s_acc[tid + half_len];
+        }
+        barrier();
+    }
+    if (tid == 0u) {
+        partials[gl_WorkGroupID.x] = s_acc[0];
+    }
+}

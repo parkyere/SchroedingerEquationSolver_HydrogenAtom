@@ -120,12 +120,14 @@ if(TARGET Qt6::GuiPrivate AND TARGET Qt6::ShaderTools AND TARGET Vulkan::Headers
             src/qrhi_shaders/norm_peak.comp
             src/qrhi_shaders/inner_product.comp
             src/qrhi_shaders/dipole_kick.comp
+            src/qrhi_shaders/mean_force.comp
         OUTPUTS
             phase_multiply.comp.qsb
             scale.comp.qsb
             norm_peak.comp.qsb
             inner_product.comp.qsb
-            dipole_kick.comp.qsb)
+            dipole_kick.comp.qsb
+            mean_force.comp.qsb)
     if(_ses_qt_platform_plugins)
         qt6_import_plugins(sesolver_qrhicheck INCLUDE ${_ses_qt_platform_plugins})
     endif()

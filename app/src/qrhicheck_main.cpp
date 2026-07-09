@@ -484,6 +484,102 @@ bool check_dipole_kick(QRhi* rhi) {
     return pass;
 }
 
+// <grad V> = sum |psi|^2 grad V, exactly kMeanForceSrc -- a vec4 reduction that
+// folds psi (0) against a per-cell grad V field (4, vec4) into vec4 partials
+// (2). Verifies the field-input reduction pattern on QRhi.
+bool check_mean_force(QRhi* rhi) {
+    const std::size_t n = 20000;
+    std::vector<ses::Complex<double>> psi_d(n);
+    std::vector<float> grad_f(4 * n);
+    double cpu[3] = {0.0, 0.0, 0.0};
+    for (std::size_t i = 0; i < n; ++i) {
+        const double x = static_cast<double>(i);
+        psi_d[i] = ses::Complex<double>{0.4 * std::sin(0.011 * x), 0.3 * std::cos(0.013 * x) + 0.05};
+        const double gx = std::sin(0.007 * x);
+        const double gy = std::cos(0.005 * x) - 0.3;
+        const double gz = 0.2 * std::sin(0.017 * x);
+        grad_f[4 * i + 0] = static_cast<float>(gx);
+        grad_f[4 * i + 1] = static_cast<float>(gy);
+        grad_f[4 * i + 2] = static_cast<float>(gz);
+        grad_f[4 * i + 3] = 0.0f;
+        const double d = psi_d[i].real() * psi_d[i].real() + psi_d[i].imag() * psi_d[i].imag();
+        cpu[0] += d * gx;
+        cpu[1] += d * gy;
+        cpu[2] += d * gz;
+    }
+    const std::vector<float> psi_f = to_rg32f(psi_d);
+    const quint32 psi_bytes = static_cast<quint32>(psi_f.size() * sizeof(float));
+    const quint32 grad_bytes = static_cast<quint32>(grad_f.size() * sizeof(float));
+    const int groups = 256;
+    const quint32 part_bytes = static_cast<quint32>(4 * groups * sizeof(float));
+
+    QShader cs = load_qsb(QStringLiteral(":/shaders/mean_force.comp.qsb"));
+    if (!cs.isValid()) { std::fprintf(stderr, "mean_force.comp.qsb missing\n"); return false; }
+
+    QScopedPointer<QRhiBuffer> psi(
+        rhi->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer, psi_bytes));
+    QScopedPointer<QRhiBuffer> grad(
+        rhi->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer, grad_bytes));
+    QScopedPointer<QRhiBuffer> partials(
+        rhi->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer, part_bytes));
+    struct alignas(16) Params { quint32 n; quint32 pad0, pad1, pad2; };
+    Params params{ static_cast<quint32>(n), 0, 0, 0 };
+    QScopedPointer<QRhiBuffer> ubo(
+        rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, sizeof(Params)));
+    if (!psi->create() || !grad->create() || !partials->create() || !ubo->create()) { return false; }
+
+    QScopedPointer<QRhiShaderResourceBindings> srb(rhi->newShaderResourceBindings());
+    srb->setBindings({
+        QRhiShaderResourceBinding::bufferLoad(0, QRhiShaderResourceBinding::ComputeStage,
+                                              psi.data()),
+        QRhiShaderResourceBinding::uniformBuffer(1, QRhiShaderResourceBinding::ComputeStage,
+                                                 ubo.data()),
+        QRhiShaderResourceBinding::bufferLoadStore(2, QRhiShaderResourceBinding::ComputeStage,
+                                                   partials.data()),
+        QRhiShaderResourceBinding::bufferLoad(4, QRhiShaderResourceBinding::ComputeStage,
+                                              grad.data()),
+    });
+    if (!srb->create()) { return false; }
+
+    QScopedPointer<QRhiComputePipeline> pipe(rhi->newComputePipeline());
+    pipe->setShaderStage(QRhiShaderStage(QRhiShaderStage::Compute, cs));
+    pipe->setShaderResourceBindings(srb.data());
+    if (!pipe->create()) { return false; }
+
+    QRhiCommandBuffer* cb = nullptr;
+    if (rhi->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess) { return false; }
+    QRhiResourceUpdateBatch* up = rhi->nextResourceUpdateBatch();
+    up->uploadStaticBuffer(psi.data(), psi_f.data());
+    up->uploadStaticBuffer(grad.data(), grad_f.data());
+    up->updateDynamicBuffer(ubo.data(), 0, sizeof(Params), &params);
+    cb->beginComputePass(up);
+    cb->setComputePipeline(pipe.data());
+    cb->setShaderResources(srb.data());
+    cb->dispatch(groups, 1, 1);
+    QRhiReadbackResult rb;
+    QRhiResourceUpdateBatch* down = rhi->nextResourceUpdateBatch();
+    down->readBackBuffer(partials.data(), 0, part_bytes, &rb);
+    cb->endComputePass(down);
+    rhi->endOffscreenFrame();
+
+    const float* p = reinterpret_cast<const float*>(rb.data.constData());
+    double gpu[3] = {0.0, 0.0, 0.0};
+    for (int g = 0; g < groups; ++g) {
+        gpu[0] += p[4 * g + 0];
+        gpu[1] += p[4 * g + 1];
+        gpu[2] += p[4 * g + 2];
+    }
+    const double mag = std::sqrt(cpu[0] * cpu[0] + cpu[1] * cpu[1] + cpu[2] * cpu[2]);
+    const double err = std::sqrt((gpu[0] - cpu[0]) * (gpu[0] - cpu[0]) +
+                                 (gpu[1] - cpu[1]) * (gpu[1] - cpu[1]) +
+                                 (gpu[2] - cpu[2]) * (gpu[2] - cpu[2]));
+    const double rel = (mag > 0.0) ? err / mag : err;
+    const bool pass = rel < 1e-4;
+    std::printf("mean-force <grad V> (QRhi/Vulkan): rel err = %.3e  [%s]\n",
+                rel, pass ? "PASS" : "FAIL");
+    return pass;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -516,6 +612,7 @@ int main(int argc, char** argv) {
     ok = check_norm_peak(rhi.data()) && ok;
     ok = check_inner_product(rhi.data()) && ok;
     ok = check_dipole_kick(rhi.data()) && ok;
+    ok = check_mean_force(rhi.data()) && ok;
     std::printf("%s\n", ok ? "QRhi kernel checks PASS" : "QRhi kernel checks FAILED");
     return ok ? 0 : 1;
 }
