@@ -719,12 +719,11 @@ bool check_dipole(QRhi* rhi) {
     return pass;
 }
 
-// Radix-2 shared-memory line FFT at N=64, exactly kLineFftTemplate: a forward
+// Radix-2 shared-memory line FFT at a baked N (kLineFftTemplate): a forward
 // unnormalized DFT of one contiguous line (n_lines=1, stride=1, base=0),
-// compared against ses::fft. The FIRST FFT kernel on the Vulkan backend --
-// bit-reversed load, log2(N)=6 barrier-separated butterfly stages.
-bool check_fft(QRhi* rhi) {
-    const int N = 64;
+// compared against ses::fft. Drives whichever fft_line<N> qsb is passed --
+// N=64 was the first Vulkan FFT kernel; N=256 is the production app grid (M3).
+bool check_line_fft(QRhi* rhi, int N, const QString& qsb) {
     std::vector<ses::Complex<double>> line(static_cast<std::size_t>(N));
     for (int i = 0; i < N; ++i) {
         line[static_cast<std::size_t>(i)] =
@@ -736,8 +735,8 @@ bool check_fft(QRhi* rhi) {
     const std::vector<float> in = to_rg32f(line);
     const quint32 bytes = static_cast<quint32>(in.size() * sizeof(float));
 
-    QShader cs = load_qsb(QStringLiteral(":/shaders/fft_line64.comp.qsb"));
-    if (!cs.isValid()) { std::fprintf(stderr, "fft_line64.comp.qsb missing\n"); return false; }
+    QShader cs = load_qsb(qsb);
+    if (!cs.isValid()) { std::fprintf(stderr, "%s missing\n", qPrintable(qsb)); return false; }
 
     QScopedPointer<QRhiBuffer> data(
         rhi->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer, bytes));
@@ -791,8 +790,8 @@ bool check_fft(QRhi* rhi) {
                            std::abs(out[2 * i + 1] - cpu[static_cast<std::size_t>(i)].imag()));
     }
     const bool pass = max_err < 1e-3;
-    std::printf("line FFT N=64 (QRhi/Vulkan): max |gpu - cpu| = %.3e  [%s]\n",
-                max_err, pass ? "PASS" : "FAIL");
+    std::printf("line FFT N=%d (QRhi/Vulkan): max |gpu - cpu| = %.3e  [%s]\n",
+                N, max_err, pass ? "PASS" : "FAIL");
     return pass;
 }
 
@@ -1534,7 +1533,8 @@ int main(int argc, char** argv) {
     ok = check_dipole_kick(rhi.data()) && ok;
     ok = check_mean_force(rhi.data()) && ok;
     ok = check_dipole(rhi.data()) && ok;
-    ok = check_fft(rhi.data()) && ok;
+    ok = check_line_fft(rhi.data(), 64, QStringLiteral(":/shaders/fft_line64.comp.qsb")) && ok;
+    ok = check_line_fft(rhi.data(), 256, QStringLiteral(":/shaders/fft_line256.comp.qsb")) && ok;
     ok = check_fp16_roundtrip(rhi.data()) && ok;
     ok = check_fft3(rhi.data()) && ok;
     ok = check_engine_step(rhi.data()) && ok;
