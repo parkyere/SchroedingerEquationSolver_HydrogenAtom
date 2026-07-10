@@ -68,8 +68,7 @@
 #include <core/volume.hpp>
 #include <core/vram_budget.hpp>
 
-#include "gpu_engine.hpp"
-#include "render_shaders.hpp"
+#include "qrhi_engine.hpp"
 #include "manifold_spec.hpp"
 
 #include <cstring>  // std::strcmp for the VRAM extension probe
@@ -77,17 +76,19 @@
 #include <QApplication>
 #include <QKeyEvent>
 #include <QMainWindow>
+#include <QMatrix4x4>
 #include <QMessageBox>
 #include <QMouseEvent>
-#include <QOpenGLFunctions_4_3_Core>
-#include <QOpenGLWidget>
+#include <QRhiWidget>
 #include <QString>
-#include <QSurfaceFormat>
 #include <QTimer>
 #include <QLabel>
 #include <QSlider>
 #include <QToolBar>
+#include <QVulkanInstance>
 #include <QWheelEvent>
+
+#include <rhi/qrhi_platform.h>  // QRhiVulkanNativeHandles (VRAM budget probe)
 
 #include <algorithm>
 #include <array>
@@ -102,9 +103,9 @@
 
 namespace {
 
-[[noreturn]] void fatal_gl_error(const char* stage, const QString& detail) {
+[[noreturn]] void fatal_rhi_error(const char* stage, const QString& detail) {
     qCritical("%s: %s", stage, qPrintable(detail));
-    QMessageBox::critical(nullptr, QStringLiteral("OpenGL error"),
+    QMessageBox::critical(nullptr, QStringLiteral("Graphics error"),
                           QStringLiteral("%1\n\n%2").arg(QLatin1String(stage), detail));
     std::exit(EXIT_FAILURE);
 }
@@ -189,10 +190,11 @@ enum class LaserPol { Off, Z, X };
 constexpr int kAtlasMontageFrames = 3;  // frames each synthesized orbital shows
 constexpr int kAtlasPairsPerFrame = 4;  // dipole pairs evaluated per paint
 
-class Viewport : public QOpenGLWidget, protected QOpenGLFunctions_4_3_Core {
+class Viewport : public QRhiWidget {
 public:
     explicit Viewport(QWidget* parent = nullptr)
-        : QOpenGLWidget(parent), sim_(make_simulation()) {
+        : QRhiWidget(parent), sim_(make_simulation()) {
+        setApi(QRhiWidget::Api::Vulkan);  // before the widget is first backed
         setFocusPolicy(Qt::StrongFocus);
         remesh();
         stage_volume();
@@ -206,45 +208,82 @@ protected:
     // synced through the single cpu_is_truth_ invariant.
     bool use_gpu_path() const { return gpu_ok_ && mode_ == ViewMode::Cloud; }
 
-    void initializeGL() override {
-        if (!initializeOpenGLFunctions()) {
-            const QSurfaceFormat got = context()->format();
-            fatal_gl_error("OpenGL 4.3 core profile is required",
-                           QStringLiteral("The driver provided only %1.%2. Update the GPU "
-                                          "driver or run on hardware with OpenGL 4.3 support.")
-                               .arg(got.majorVersion())
-                               .arg(got.minorVersion()));
+    // The compute half of a frame runs BEFORE the widget's own QRhi frame is
+    // recorded: the engine drives its own offscreen frames (beginOffscreenFrame
+    // is illegal while the widget frame is active). This override is the QRhi
+    // analog of "GPU stepping happens in paintGL where the context is current"
+    // -- once per paint, even while paused (Key E works paused).
+    void paintEvent(QPaintEvent* e) override {
+        if (rhi_ready_) {
+            run_gpu_frame();
         }
-        glClearColor(0.04f, 0.05f, 0.09f, 1.0f);
+        QRhiWidget::paintEvent(e);
+    }
 
-        // -- mesh pipeline --
-        mesh_program_ = link_program(kMeshVertexShader, kMeshFragmentShader);
-        mesh_mvp_loc_ = glGetUniformLocation(mesh_program_, "mvp");
-        mesh_eye_loc_ = glGetUniformLocation(mesh_program_, "eye");
-        glGenVertexArrays(1, &mesh_vao_);
-        glBindVertexArray(mesh_vao_);
-        glGenBuffers(1, &mesh_vbo_);
-        glBindBuffer(GL_ARRAY_BUFFER, mesh_vbo_);
-        constexpr GLsizei kStride = 9 * sizeof(float);
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, kStride, reinterpret_cast<void*>(0));
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, kStride,
-                              reinterpret_cast<void*>(3 * sizeof(float)));
-        glEnableVertexAttribArray(1);
-        glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, kStride,
-                              reinterpret_cast<void*>(6 * sizeof(float)));
-        glEnableVertexAttribArray(2);
-        glBindVertexArray(0);
+    // Build the RENDER resources (pipelines, samplers, UBOs, static vertex
+    // buffers, the phase LUT). Called by QRhiWidget once the backing QRhi
+    // exists, and again on every resize -- the guard makes re-entry a no-op
+    // (nothing here depends on the surface size; the projection is per-frame).
+    // COMPUTE setup (the engine) is deferred to init_compute(): the widget
+    // frame is ACTIVE during initialize(), and the engine drives its own
+    // offscreen frames, which are illegal while a frame is being recorded.
+    void initialize(QRhiCommandBuffer* cb) override {
+        if (rhi_ready_) {
+            if (rhi() != rhi_) {
+                fatal_rhi_error("QRhi changed",
+                                QStringLiteral("The widget was moved to another window; "
+                                               "GPU state cannot be migrated."));
+            }
+            return;
+        }
+        rhi_ = rhi();
 
-        upload_proton_marker();
-        upload_axes_gizmo();
+        QRhiResourceUpdateBatch* u = rhi_->nextResourceUpdateBatch();
 
-        // -- GPU propagation engine (fp32 transcription of the tested CPU
-        //    tables; verified by sesolver_gpucheck). Falls back to CPU
-        //    stepping when compute programs fail to build. --
-        gpu_ok_ = engine_.initialize(*this, sim_.grid(),
+        // -- shared samplers + per-pass uniform buffers --
+        sampler_3d_.reset(rhi_->newSampler(QRhiSampler::Linear, QRhiSampler::Linear,
+                                           QRhiSampler::None, QRhiSampler::ClampToEdge,
+                                           QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge));
+        sampler_1d_.reset(rhi_->newSampler(QRhiSampler::Linear, QRhiSampler::Linear,
+                                           QRhiSampler::None, QRhiSampler::Repeat,
+                                           QRhiSampler::Repeat, QRhiSampler::Repeat));
+        scene_ubuf_.reset(rhi_->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer,
+                                          sizeof(MeshUbo)));
+        gizmo_ubuf_.reset(rhi_->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer,
+                                          sizeof(MeshUbo)));
+        volume_ubuf_.reset(rhi_->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer,
+                                           sizeof(VolumeUbo)));
+        if (!sampler_3d_->create() || !sampler_1d_->create() || !scene_ubuf_->create() ||
+            !gizmo_ubuf_->create() || !volume_ubuf_->create()) {
+            fatal_rhi_error("render resources", QStringLiteral("sampler/UBO create failed"));
+        }
+
+        // -- mesh pipeline (isosurface + proton + gizmo + z label) --
+        create_mesh_resources(u);
+
+        upload_proton_marker(u);
+        upload_axes_gizmo(u);
+
+        // -- volume pipeline + proxy cube + phase LUT --
+        upload_box_cube(u);
+        create_textures(u);
+        create_volume_pipeline();
+
+        cb->resourceUpdate(u);
+
+        mesh_dirty_ = true;
+        volume_dirty_ = true;
+        rhi_ready_ = true;
+    }
+
+    // COMPUTE setup, deferred to the first run_gpu_frame() (outside any widget
+    // frame): the GPU propagation engine (fp32 transcription of the tested CPU
+    // tables; verified by sesolver_qrhicheck), atlas precision, atom solve,
+    // projection index, absorber mask. Falls back to CPU stepping on failure.
+    void init_compute() {
+        gpu_ok_ = engine_.initialize(rhi_, sim_.grid(),
                                      sim_.propagator().half_potential_phase(),
-                                     sim_.propagator().kinetic_phase(), sim_.psi());
+                                     sim_.propagator().kinetic_phase(), sim_.psi().data());
         if (gpu_ok_) {
             // Pick the atlas storage precision from free VRAM. The fp32 n<=6
             // manifold (91 x 256^3 complex-fp32 ~= 12 GB) oversubscribes a small
@@ -269,11 +308,12 @@ protected:
             // Imaginary-time weights from the tested CPU relaxer (G7).
             const ses::ImaginaryTimePropagator3D relaxer{sim_.grid(), sim_.potential(),
                                                          kRelaxDtau};
-            engine_.set_relax_tables(*this, relaxer.half_potential_weight(),
-                                     relaxer.kinetic_weight(), kRelaxDtau);
+            engine_.set_relax_tables(relaxer.half_potential_weight(),
+                                     relaxer.kinetic_weight(), kRelaxDtau,
+                                     sim_.grid().cell_volume());
             // Radiation: the atomic potential gradient (for the live
             // semiclassical radiated power <grad V> reduction).
-            engine_.set_potential_gradient(*this, sim_.potential());
+            engine_.set_potential_gradient(sim_.potential());
             // T6/T7: solve the atom up front. The radial engine gets every
             // bound level to n = 10 (the full lifetime table, printed
             // below); the 3D tracked manifold (n <= 6, what the box holds)
@@ -287,7 +327,7 @@ protected:
             {
                 const ses::RadialBinIndex bin_idx =
                     ses::build_radial_bin_index(sim_.grid(), radial_grid_);
-                engine_.set_projection_index(*this, bin_idx.sorted_cell, bin_idx.bin_off,
+                engine_.set_projection_index(bin_idx.sorted_cell, bin_idx.bin_off,
                                              radial_grid_.n, radial_grid_.h(), 5);
                 proj_ready_ = true;
             }
@@ -305,69 +345,22 @@ protected:
                 for (std::size_t i = 0; i < mf.data().size(); ++i) {
                     mf.data()[i] = ses::Complex<double>{mask[i], 0.0};
                 }
-                mask_buf_ = engine_.create_state_buffer(*this, mf);
+                mask_buf_ = engine_.create_state_buffer(mf.data());
             }
         } else {
             decay_on_ = false;  // jump trials are GPU-only
             atlas_done_ = true;
         }
-
-        // -- volume pipeline --
-        volume_program_ = link_program(kVolumeVertexShader, kVolumeFragmentShader);
-        vol_mvp_loc_ = glGetUniformLocation(volume_program_, "mvp");
-        vol_eye_loc_ = glGetUniformLocation(volume_program_, "eye");
-        vol_boxmin_loc_ = glGetUniformLocation(volume_program_, "box_min");
-        vol_boxmax_loc_ = glGetUniformLocation(volume_program_, "box_max");
-        vol_invpeak_loc_ = glGetUniformLocation(volume_program_, "inv_peak");
-        vol_absorb_loc_ = glGetUniformLocation(volume_program_, "absorbance");
-        vol_pcenter_loc_ = glGetUniformLocation(volume_program_, "proton_center");
-        vol_pradius_loc_ = glGetUniformLocation(volume_program_, "proton_radius");
-        vol_pcolor_loc_ = glGetUniformLocation(volume_program_, "proton_color");
-        glUseProgram(volume_program_);
-        glUniform1i(glGetUniformLocation(volume_program_, "psi_tex"), 0);
-        glUniform1i(glGetUniformLocation(volume_program_, "phase_tex"), 1);
-
-        upload_box_cube();
-        create_textures();
-
-        mesh_dirty_ = true;
-        volume_dirty_ = true;
     }
 
-    void paintGL() override {
-        // Photon flash: a brief warm background right after a quantum jump.
-        if (flash_ticks_ > 0) {
-            const float w = static_cast<float>(flash_ticks_) / 25.0f;
-            glClearColor(0.04f + 0.55f * w, 0.05f + 0.42f * w, 0.09f + 0.18f * w, 1.0f);
-            --flash_ticks_;
-        } else {
-            glClearColor(0.04f, 0.05f, 0.09f, 1.0f);
+    // The COMPUTE half of the old paintGL: engine stepping, atlas build,
+    // measurement service, decay/laser trials. Runs once per paint, BEFORE the
+    // widget frame (engine offscreen frames are illegal mid-frame).
+    void run_gpu_frame() {
+        if (!compute_init_done_) {
+            init_compute();
+            compute_init_done_ = true;
         }
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-        const double aspect = static_cast<double>(width()) / std::max(1, height());
-        // The far plane must always enclose the whole box BEHIND the target, or
-        // the volume's back-face proxy geometry (we cull front faces) gets
-        // clipped and leaves dark triangular holes when zoomed out. Track the
-        // camera distance plus the box's center-to-corner reach -- the farthest
-        // any box point can sit from the eye at any orientation.
-        const ses::Grid3D& gbox = sim_.grid();
-        const double bx = std::max(std::abs(gbox.x.xmin), std::abs(gbox.x.xmax));
-        const double by = std::max(std::abs(gbox.y.xmin), std::abs(gbox.y.xmax));
-        const double bz = std::max(std::abs(gbox.z.xmin), std::abs(gbox.z.xmax));
-        const double box_reach = std::sqrt(bx * bx + by * by + bz * bz);
-        const double zfar = distance_ + box_reach + 1.0;
-        const ses::Mat4 proj =
-            ses::perspective(45.0 * 3.14159265358979323846 / 180.0, aspect, 0.1, zfar);
-        const ses::Vec3d eye = ses::orbit_eye(azimuth_, elevation_, distance_, ses::Vec3d{});
-        const ses::Mat4 view = ses::look_at(eye, ses::Vec3d{}, ses::Vec3d{0.0, 1.0, 0.0});
-        const ses::Mat4 mvp = proj * view;
-        float mvp_f[16];
-        for (int i = 0; i < 16; ++i) {
-            mvp_f[i] = static_cast<float>(mvp.m[i]);
-        }
-
-        // GPU stepping happens here, where the context is guaranteed current.
         if (use_gpu_path()) {
             if (!atlas_done_) {
                 // T6/T7: startup atlas build owns the psi buffer this
@@ -391,7 +384,7 @@ protected:
                 if (pk > 0.0) {
                     peak_ = pk;
                 }
-                engine_.upload_state(*this, sim_.psi());
+                engine_.upload_state(sim_.psi().data());
                 cpu_is_truth_ = false;
                 volume_dirty_ = false;  // texture comes from the bridge now
                 // Bridge immediately: with an empty step queue (paused R/M,
@@ -407,7 +400,7 @@ protected:
             // even while paused (it writes psi_tex_ itself).
             if (pending_energy_measure_) {
                 pending_energy_measure_ = false;
-                engine_.project_psi(*this);
+                engine_.project_psi();
                 std::vector<double> pop(static_cast<std::size_t>(kNumStates));
                 for (int s = 0; s < kNumStates; ++s) {
                     pop[static_cast<std::size_t>(s)] = project_population(s);
@@ -434,7 +427,7 @@ protected:
                         // GPU-reduced norm+peak (2 KB readback), taken BEFORE
                         // enqueueing new steps so the implicit sync waits
                         // only on long-finished work.
-                        const ses_gpu::NormPeak np = engine_.norm_and_peak(*this);
+                        const ses_qrhi::QrhiEngine::NormPeak np = engine_.norm_and_peak();
                         norm_display_ = np.sum;
                         if (np.peak > 0.0) {
                             peak_ = np.peak;  // brightness tracks the cloud
@@ -443,22 +436,21 @@ protected:
                         // unitary in exact arithmetic; pinning the norm back
                         // to 1 removes pure numerical decay.
                         if (np.sum > 0.0 && std::abs(np.sum - 1.0) > 1e-4) {
-                            engine_.scale(*this,
-                                          static_cast<float>(1.0 / std::sqrt(np.sum)));
+                            engine_.scale(static_cast<float>(1.0 / std::sqrt(np.sum)));
                         }
                         // Radiation: the semiclassical radiated power from the
                         // oscillating dipole, P = (2/3)alpha^3|<grad V>|^2, via
                         // the GPU mean-force reduction (a 4 KB readback). ~0 for
                         // a stationary eigenstate, nonzero for a superposition.
-                        radiated_power_ = ses::larmor_power(engine_.mean_force(*this));
+                        radiated_power_ = ses::larmor_power(engine_.mean_force());
                     }
                     if (laser_pol_ != LaserPol::Off) {
                         // T3: resonant dipole drive. t0 is the same clock
                         // that credits gpu_time_, so the carrier phase
                         // cos(w t) stays continuous across batches/pauses.
                         const ses::DipoleDrive d{laser_axis(), laser_e0_, laser_omega_};
-                        engine_.driven_step(*this, d, sim_.time() + gpu_time_,
-                                            sim_.dt(), pending_gpu_steps_);
+                        engine_.driven_step(d, sim_.time() + gpu_time_, sim_.dt(),
+                                            pending_gpu_steps_);
                     } else if (bfield_b_ > 0.0) {
                         // Magnetic field along bfield_axis_: the PROPER minimal-
                         // coupling solve. psi evolves under H = H0 + (E z) +
@@ -467,7 +459,7 @@ protected:
                         // half-potential (upload_field_tables), the paramagnetic
                         // L_axis is the exact three-shear rotation. Because it is
                         // the combined solve, crossed E(z)-B(x/y) is genuine.
-                        engine_.magnetic_step(*this, bfield_axis_,
+                        engine_.magnetic_step(bfield_axis_,
                                               0.5 * bfield_b_ * (0.5 * sim_.dt()),
                                               pending_gpu_steps_);
                     } else {
@@ -475,7 +467,7 @@ protected:
                         // half-potential -- exact, and equal to the old omega=0
                         // dipole kick -- so a plain step polarizes / field-
                         // ionizes correctly.
-                        engine_.step(*this, pending_gpu_steps_);
+                        engine_.step(pending_gpu_steps_);
                     }
                     // Time is credited where steps EXECUTE, so a stalled or
                     // occluded paint cannot desync the clock from the state.
@@ -485,8 +477,8 @@ protected:
                     // flux at the walls so it leaves instead of wrapping around
                     // the periodic FFT box. Interior mask = 1, so the bound atom
                     // is untouched; imaginary-time relaxation never runs this.
-                    if (mask_buf_ != 0) {
-                        engine_.apply_mask(*this, mask_buf_);
+                    if (mask_buf_ >= 0) {
+                        engine_.apply_mask(mask_buf_);
                     }
 
                     // Orbital-free populations (Phase 5): ONE deposit pass on the
@@ -496,7 +488,7 @@ protected:
                     if (gpu_title_due_ && proj_ready_ &&
                         ((decay_on_ && !channels_.empty()) ||
                          laser_pol_ != LaserPol::Off)) {
-                        engine_.project_psi(*this);
+                        engine_.project_psi();
                     }
 
                     // T4/T5/T7: competing-channels Poisson trials over the
@@ -550,12 +542,12 @@ protected:
                     // GPU imaginary time (G7/T1): renormalized every step;
                     // the ITP estimator gives the convergence readout free.
                     // The excited flavor deflates the cached ground state.
-                    const ses_gpu::GpuEngine::RelaxStats stats =
+                    const ses_qrhi::QrhiEngine::RelaxStats stats =
                         (stepping_ == Stepping::RelaxingExcited &&
                          !relax_deflate_.empty())
-                            ? engine_.relax_deflated_step(*this, relax_deflate_,
+                            ? engine_.relax_deflated_step(relax_deflate_,
                                                           pending_gpu_steps_)
-                            : engine_.relax_step(*this, pending_gpu_steps_);
+                            : engine_.relax_step(pending_gpu_steps_);
                     relax_energy_display_ = stats.energy;
                     if (stats.peak > 0.0) {
                         peak_ = stats.peak;
@@ -590,119 +582,187 @@ protected:
             }
             }  // end of the non-building (normal stepping) branch
         }
-
-        if (mode_ == ViewMode::Cloud) {
-            if (volume_dirty_) {
-                upload_volume();
-                volume_dirty_ = false;
-            }
-            glDisable(GL_DEPTH_TEST);
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);  // premultiplied over clear color
-            glEnable(GL_CULL_FACE);
-            glCullFace(GL_FRONT);  // raster the BACK faces: works from inside too
-
-            glUseProgram(volume_program_);
-            glUniformMatrix4fv(vol_mvp_loc_, 1, GL_FALSE, mvp_f);
-            glUniform3f(vol_eye_loc_, static_cast<float>(eye.x), static_cast<float>(eye.y),
-                        static_cast<float>(eye.z));
-            const ses::Grid3D& g = sim_.grid();
-            glUniform3f(vol_boxmin_loc_, static_cast<float>(g.x.xmin),
-                        static_cast<float>(g.y.xmin), static_cast<float>(g.z.xmin));
-            glUniform3f(vol_boxmax_loc_, static_cast<float>(g.x.xmax),
-                        static_cast<float>(g.y.xmax), static_cast<float>(g.z.xmax));
-            glUniform1f(vol_invpeak_loc_, static_cast<float>(peak_ > 0.0 ? 1.0 / peak_ : 0.0));
-            glUniform1f(vol_absorb_loc_, static_cast<float>(absorbance_));
-            // The nucleus lives INSIDE the ray marcher now (analytic sphere):
-            // fogged by cloud in front, occluding cloud behind.
-            glUniform3f(vol_pcenter_loc_, 0.0f, 0.0f, 0.0f);
-            glUniform1f(vol_pradius_loc_, static_cast<float>(kProtonMarkerRadius));
-            glUniform3f(vol_pcolor_loc_, 1.0f, 0.45f, 0.2f);
-
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_3D, psi_tex_);
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_1D, phase_tex_);
-
-            glBindVertexArray(cube_vao_);
-            glDrawArrays(GL_TRIANGLES, 0, 36);
-            glBindVertexArray(0);
-
-            glDisable(GL_CULL_FACE);
-            glDisable(GL_BLEND);
-        } else {
-            if (mesh_dirty_) {
-                upload_mesh();
-                mesh_dirty_ = false;
-            }
-            // Surface mode keeps the mesh proton (depth-tested against the
-            // opaque isosurface, so occlusion is already correct there).
-            draw_proton(mvp_f, eye);
-            glEnable(GL_DEPTH_TEST);
-            glUseProgram(mesh_program_);
-            glUniformMatrix4fv(mesh_mvp_loc_, 1, GL_FALSE, mvp_f);
-            glUniform3f(mesh_eye_loc_, static_cast<float>(eye.x), static_cast<float>(eye.y),
-                        static_cast<float>(eye.z));
-            glBindVertexArray(mesh_vao_);
-            glDrawArrays(GL_TRIANGLES, 0, vertex_count_);
-            glBindVertexArray(0);
-        }
-
-        // Orientation gizmo overlays both views (its own corner viewport).
-        draw_axes_gizmo();
     }
 
-    // XYZ orientation gizmo in the bottom-left corner: the same orbit
-    // orientation as the scene but at a FIXED distance (constant screen size),
-    // in a square viewport whose depth is cleared so it neither occludes nor is
-    // occluded by the scene. Lets the user read field / axis directions.
-    void draw_axes_gizmo() {
-        if (gizmo_vertex_count_ == 0) {
-            return;
+    // The DRAW half of a frame: records resource updates + one render pass on
+    // the widget's command buffer (the frame is owned by QRhiWidget).
+    void render(QRhiCommandBuffer* cb) override {
+        // Photon flash: a brief warm background right after a quantum jump.
+        QColor clear_color = QColor::fromRgbF(0.04f, 0.05f, 0.09f, 1.0f);
+        if (flash_ticks_ > 0) {
+            const float w = static_cast<float>(flash_ticks_) / 25.0f;
+            clear_color = QColor::fromRgbF(0.04f + 0.55f * w, 0.05f + 0.42f * w,
+                                           0.09f + 0.18f * w, 1.0f);
+            --flash_ticks_;
         }
-        GLint vp[4];
-        glGetIntegerv(GL_VIEWPORT, vp);  // full framebuffer viewport (device px)
-        const GLint side = std::clamp(std::min(vp[2], vp[3]) / 6, 96, 180);
-        const GLint margin = side / 8;
 
-        const double d_g = 3.2;  // frames the length-1 arrows in the corner box
-        const ses::Vec3d eye = ses::orbit_eye(azimuth_, elevation_, d_g, ses::Vec3d{});
+        const QSize out_px = renderTarget()->pixelSize();
+        const double aspect =
+            static_cast<double>(out_px.width()) / std::max(1, out_px.height());
+        // The far plane must always enclose the whole box BEHIND the target, or
+        // the volume's back-face proxy geometry (we cull front faces) gets
+        // clipped and leaves dark triangular holes when zoomed out. Track the
+        // camera distance plus the box's center-to-corner reach -- the farthest
+        // any box point can sit from the eye at any orientation.
+        const ses::Grid3D& gbox = sim_.grid();
+        const double bx = std::max(std::abs(gbox.x.xmin), std::abs(gbox.x.xmax));
+        const double by = std::max(std::abs(gbox.y.xmin), std::abs(gbox.y.xmax));
+        const double bz = std::max(std::abs(gbox.z.xmin), std::abs(gbox.z.xmax));
+        const double box_reach = std::sqrt(bx * bx + by * by + bz * bz);
+        const double zfar = distance_ + box_reach + 1.0;
         const ses::Mat4 proj =
-            ses::perspective(45.0 * 3.14159265358979323846 / 180.0, 1.0, 0.1, 50.0);
-        const ses::Mat4 view =
-            ses::look_at(eye, ses::Vec3d{}, ses::Vec3d{0.0, 1.0, 0.0});
+            ses::perspective(45.0 * 3.14159265358979323846 / 180.0, aspect, 0.1, zfar);
+        const ses::Vec3d eye = ses::orbit_eye(azimuth_, elevation_, distance_, ses::Vec3d{});
+        const ses::Mat4 view = ses::look_at(eye, ses::Vec3d{}, ses::Vec3d{0.0, 1.0, 0.0});
         const ses::Mat4 mvp = proj * view;
-        float mvp_f[16];
-        for (int i = 0; i < 16; ++i) {
-            mvp_f[i] = static_cast<float>(mvp.m[i]);
+
+        QRhiResourceUpdateBatch* u = rhi_->nextResourceUpdateBatch();
+
+        // Scene camera UBO (mesh pass): clip-space corrected for the backend.
+        MeshUbo scene_u{};
+        store_corrected_mvp(mvp, scene_u.mvp);
+        scene_u.eye[0] = static_cast<float>(eye.x);
+        scene_u.eye[1] = static_cast<float>(eye.y);
+        scene_u.eye[2] = static_cast<float>(eye.z);
+        scene_u.eye[3] = 0.0f;
+        u->updateDynamicBuffer(scene_ubuf_.data(), 0, sizeof(MeshUbo), &scene_u);
+
+        // Gizmo camera: the same orbit orientation at a FIXED distance so the
+        // corner overlay keeps a constant screen size.
+        const double d_g = 3.2;  // frames the length-1 arrows in the corner box
+        const ses::Vec3d geye = ses::orbit_eye(azimuth_, elevation_, d_g, ses::Vec3d{});
+        const ses::Mat4 gproj =
+            ses::perspective(45.0 * 3.14159265358979323846 / 180.0, 1.0, 0.1, 50.0);
+        const ses::Mat4 gview = ses::look_at(geye, ses::Vec3d{}, ses::Vec3d{0.0, 1.0, 0.0});
+        const ses::Mat4 gmvp = gproj * gview;
+        MeshUbo gizmo_u{};
+        store_corrected_mvp(gmvp, gizmo_u.mvp);
+        gizmo_u.eye[0] = static_cast<float>(geye.x);
+        gizmo_u.eye[1] = static_cast<float>(geye.y);
+        gizmo_u.eye[2] = static_cast<float>(geye.z);
+        gizmo_u.eye[3] = 0.0f;
+        u->updateDynamicBuffer(gizmo_ubuf_.data(), 0, sizeof(MeshUbo), &gizmo_u);
+
+        // Billboarded "z" glyph verts (rebuilt per frame, dynamic buffer).
+        const std::vector<float> zdata = build_z_label_verts(gview, geye);
+        u->updateDynamicBuffer(zlabel_vbuf_.data(), 0,
+                               static_cast<quint32>(zdata.size() * sizeof(float)),
+                               zdata.data());
+
+        // Volume UBO (Cloud pass).
+        VolumeUbo vol_u{};
+        store_corrected_mvp(mvp, vol_u.mvp);
+        vol_u.eye[0] = static_cast<float>(eye.x);
+        vol_u.eye[1] = static_cast<float>(eye.y);
+        vol_u.eye[2] = static_cast<float>(eye.z);
+        const ses::Grid3D& g = sim_.grid();
+        vol_u.box_min[0] = static_cast<float>(g.x.xmin);
+        vol_u.box_min[1] = static_cast<float>(g.y.xmin);
+        vol_u.box_min[2] = static_cast<float>(g.z.xmin);
+        vol_u.box_max[0] = static_cast<float>(g.x.xmax);
+        vol_u.box_max[1] = static_cast<float>(g.y.xmax);
+        vol_u.box_max[2] = static_cast<float>(g.z.xmax);
+        // The nucleus lives INSIDE the ray marcher (analytic sphere): fogged by
+        // cloud in front, occluding cloud behind.
+        vol_u.proton_center[0] = 0.0f;
+        vol_u.proton_center[1] = 0.0f;
+        vol_u.proton_center[2] = 0.0f;
+        vol_u.proton_color[0] = 1.0f;
+        vol_u.proton_color[1] = 0.45f;
+        vol_u.proton_color[2] = 0.2f;
+        vol_u.inv_peak = static_cast<float>(peak_ > 0.0 ? 1.0 / peak_ : 0.0);
+        vol_u.absorbance = static_cast<float>(absorbance_);
+        vol_u.proton_radius = static_cast<float>(kProtonMarkerRadius);
+        u->updateDynamicBuffer(volume_ubuf_.data(), 0, sizeof(VolumeUbo), &vol_u);
+
+        // Staged uploads for the active view.
+        if (mode_ == ViewMode::Cloud) {
+            if (volume_dirty_) {
+                upload_volume(u);  // CPU-staging path only (fallback texture)
+                volume_dirty_ = false;
+            }
+            ensure_volume_srb();
+        } else if (mesh_dirty_) {
+            upload_mesh(u);
+            mesh_dirty_ = false;
         }
 
-        glViewport(vp[0] + margin, vp[1] + margin, side, side);
-        glEnable(GL_SCISSOR_TEST);
-        glScissor(vp[0] + margin, vp[1] + margin, side, side);
-        glDisable(GL_BLEND);
-        glEnable(GL_DEPTH_TEST);
-        glDepthMask(GL_TRUE);
-        glClear(GL_DEPTH_BUFFER_BIT);  // own depth region; no scene occlusion
+        const QRhiDepthStencilClearValue ds_clear{1.0f, 0};
+        cb->beginPass(renderTarget(), clear_color, ds_clear, u);
+        const QRhiViewport full_vp(0.0f, 0.0f, static_cast<float>(out_px.width()),
+                                   static_cast<float>(out_px.height()));
+        const QRhiScissor full_sc(0, 0, out_px.width(), out_px.height());
 
-        glUseProgram(mesh_program_);
-        glUniformMatrix4fv(mesh_mvp_loc_, 1, GL_FALSE, mvp_f);
-        glUniform3f(mesh_eye_loc_, static_cast<float>(eye.x), static_cast<float>(eye.y),
-                    static_cast<float>(eye.z));
-        glBindVertexArray(gizmo_vao_);
-        glDrawArrays(GL_TRIANGLES, 0, gizmo_vertex_count_);
-        glBindVertexArray(0);
+        if (mode_ == ViewMode::Cloud) {
+            if (!volume_srb_.isNull()) {
+                cb->setGraphicsPipeline(volume_pipe_.data());
+                cb->setViewport(full_vp);
+                cb->setShaderResources(volume_srb_.data());
+                const QRhiCommandBuffer::VertexInput cube_in(cube_vbuf_.data(), 0);
+                cb->setVertexInput(0, 1, &cube_in);
+                cb->draw(36);
+            }
+        } else {
+            // Surface mode keeps the mesh proton (depth-tested against the
+            // opaque isosurface, so occlusion is already correct there).
+            cb->setGraphicsPipeline(mesh_pipe_.data());
+            cb->setViewport(full_vp);
+            cb->setScissor(full_sc);
+            cb->setShaderResources(scene_srb_.data());
+            const QRhiCommandBuffer::VertexInput proton_in(proton_vbuf_.data(), 0);
+            cb->setVertexInput(0, 1, &proton_in);
+            cb->draw(static_cast<quint32>(proton_vertex_count_));
+            if (!mesh_vbuf_.isNull() && vertex_count_ > 0) {
+                const QRhiCommandBuffer::VertexInput mesh_in(mesh_vbuf_.data(), 0);
+                cb->setVertexInput(0, 1, &mesh_in);
+                cb->draw(static_cast<quint32>(vertex_count_));
+            }
+        }
 
-        draw_z_label(view, eye);  // label only Z; X, Y follow by the RH rule
+        // XYZ orientation gizmo in the bottom-left corner, over both views.
+        // GL cleared a scissored depth region; mid-pass clears do not exist in
+        // QRhi, so the corner viewport maps to depth range [0, 0.01] instead:
+        // always in front of the scene, self-occlusion within the gizmo intact.
+        if (gizmo_vertex_count_ > 0) {
+            const int side =
+                std::clamp(std::min(out_px.width(), out_px.height()) / 6, 96, 180);
+            const int margin = side / 8;
+            cb->setGraphicsPipeline(mesh_pipe_.data());
+            cb->setViewport(QRhiViewport(static_cast<float>(margin),
+                                         static_cast<float>(margin),
+                                         static_cast<float>(side),
+                                         static_cast<float>(side), 0.0f, 0.01f));
+            cb->setScissor(QRhiScissor(margin, margin, side, side));
+            cb->setShaderResources(gizmo_srb_.data());
+            const QRhiCommandBuffer::VertexInput gizmo_in(gizmo_vbuf_.data(), 0);
+            cb->setVertexInput(0, 1, &gizmo_in);
+            cb->draw(static_cast<quint32>(gizmo_vertex_count_));
+            // Label only Z; X, Y follow by the right-hand rule.
+            const QRhiCommandBuffer::VertexInput z_in(zlabel_vbuf_.data(), 0);
+            cb->setVertexInput(0, 1, &z_in);
+            cb->draw(18);
+        }
 
-        glDisable(GL_SCISSOR_TEST);
-        glViewport(vp[0], vp[1], vp[2], vp[3]);  // restore the full viewport
+        cb->endPass();
+    }
+
+    // mvp (ses column-major doubles) -> backend-corrected floats. QRhi's
+    // clipSpaceCorrMatrix maps the GL clip conventions the ses camera produces
+    // to the backend's (Vulkan: inverted Y, 0..1 depth).
+    void store_corrected_mvp(const ses::Mat4& mvp, float* out16) const {
+        QMatrix4x4 m;
+        float* d = m.data();  // column-major storage, matches ses::Mat4::m
+        for (int i = 0; i < 16; ++i) {
+            d[i] = static_cast<float>(mvp.m[i]);
+        }
+        const QMatrix4x4 corrected = rhi_->clipSpaceCorrMatrix() * m;
+        std::memcpy(out16, corrected.constData(), 16 * sizeof(float));
     }
 
     // A small billboarded "z" glyph just past the +Z arrow tip, always facing
-    // the gizmo camera. Built each frame (18 verts) into z_label_vbo_; drawn
-    // with the mesh program / gizmo MVP already bound by draw_axes_gizmo.
-    void draw_z_label(const ses::Mat4& view, const ses::Vec3d& eye) {
+    // the gizmo camera: 18 verts in the mesh vertex format, rebuilt per frame.
+    std::vector<float> build_z_label_verts(const ses::Mat4& view,
+                                           const ses::Vec3d& eye) const {
         const ses::Vec3d right{view.m[0], view.m[4], view.m[8]};
         const ses::Vec3d up{view.m[1], view.m[5], view.m[9]};
         const ses::Vec3d center{0.0, 0.0, 1.18};  // just past the length-1 tip
@@ -744,24 +804,40 @@ protected:
             data.push_back(0.85f);
             data.push_back(1.0f);
         }
-        glBindVertexArray(z_label_vao_);
-        glBindBuffer(GL_ARRAY_BUFFER, z_label_vbo_);
-        glBufferData(GL_ARRAY_BUFFER,
-                     static_cast<GLsizeiptr>(data.size() * sizeof(float)),
-                     data.data(), GL_DYNAMIC_DRAW);
-        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(pts.size()));
-        glBindVertexArray(0);
+        return data;
     }
 
-    void draw_proton(const float* mvp_f, const ses::Vec3d& eye) {
-        glEnable(GL_DEPTH_TEST);
-        glUseProgram(mesh_program_);
-        glUniformMatrix4fv(mesh_mvp_loc_, 1, GL_FALSE, mvp_f);
-        glUniform3f(mesh_eye_loc_, static_cast<float>(eye.x), static_cast<float>(eye.y),
-                    static_cast<float>(eye.z));
-        glBindVertexArray(proton_vao_);
-        glDrawArrays(GL_TRIANGLES, 0, proton_vertex_count_);
-        glBindVertexArray(0);
+    // (Re)build the volume SRB against the live psi volume texture: the
+    // engine's bridge texture on the GPU path, the widget's fallback texture on
+    // the CPU path. Lazy because the engine texture exists only after
+    // init_compute + the first write; a null texture skips the volume draw.
+    void ensure_volume_srb() {
+        QRhiTexture* tex = nullptr;
+        if (gpu_ok_) {
+            tex = engine_.volume_texture();
+        } else if (!fallback_tex_.isNull()) {
+            tex = fallback_tex_.data();
+        }
+        if (tex == nullptr) {
+            volume_srb_.reset();
+            volume_tex_bound_ = nullptr;
+            return;
+        }
+        if (!volume_srb_.isNull() && volume_tex_bound_ == tex) {
+            return;
+        }
+        using B = QRhiShaderResourceBinding;
+        const auto stages = B::VertexStage | B::FragmentStage;
+        volume_srb_.reset(rhi_->newShaderResourceBindings());
+        volume_srb_->setBindings({
+            B::uniformBuffer(0, stages, volume_ubuf_.data()),
+            B::sampledTexture(1, B::FragmentStage, tex, sampler_3d_.data()),
+            B::sampledTexture(2, B::FragmentStage, phase_tex_.data(), sampler_1d_.data()),
+        });
+        if (!volume_srb_->create()) {
+            fatal_rhi_error("volume bindings", QStringLiteral("SRB create failed"));
+        }
+        volume_tex_bound_ = tex;
     }
 
     void mousePressEvent(QMouseEvent* e) override { last_pos_ = e->position(); }
@@ -1054,9 +1130,9 @@ public:
                 v = mprop.effective_potential();
             }
             const ses::SplitOperator3D aug{g, v, sim_.dt()};
-            engine_.set_half_potential(*this, aug.half_potential_phase());
+            engine_.set_half_potential(aug.half_potential_phase());
         } else {
-            engine_.set_half_potential(*this, sim_.propagator().half_potential_phase());
+            engine_.set_half_potential(sim_.propagator().half_potential_phase());
         }
         doneCurrent();
     }
@@ -1093,7 +1169,7 @@ public:
             return 0.0;
         }
         makeCurrent();
-        engine_.project_psi(*this);
+        engine_.project_psi();
         const double p = project_population(idx);
         doneCurrent();
         return p;
@@ -1219,46 +1295,59 @@ protected:
     // orbital + normalizes it on-device -- no CPU field, no host copy. Caches
     // the energy; *out_peak (if given) receives the normalized peak density.
     // Needs a current GL context.
-    // Free VRAM in bytes via a vendor GL extension (NVIDIA NVX / AMD ATI), or
-    // ses::kVramUnknown when neither is present (Mesa, remote GL). Core GL has
-    // no such query and these enums are absent from the Qt headers.
+    // Free VRAM in bytes via Vulkan's VK_EXT_memory_budget (heap budget minus
+    // current usage, summed over device-local heaps), or ses::kVramUnknown when
+    // the extension / entry points are absent. Physical-device property queries
+    // only need the extension SUPPORTED, not enabled on the logical device.
     std::int64_t query_free_vram_bytes() {
-        constexpr GLenum kAvailNvx = 0x9049;    // CURRENT_AVAILABLE_VIDMEM_NVX (KiB)
-        constexpr GLenum kTexFreeAti = 0x87FC;  // TEXTURE_FREE_MEMORY_ATI (KB; [0]=free)
-        GLint n_ext = 0;
-        glGetIntegerv(GL_NUM_EXTENSIONS, &n_ext);
-        bool nvx = false;
-        bool ati = false;
-        for (GLint i = 0; i < n_ext; ++i) {
-            const char* e = reinterpret_cast<const char*>(
-                glGetStringi(GL_EXTENSIONS, static_cast<GLuint>(i)));
-            if (e == nullptr) {
+        const QRhiVulkanNativeHandles* h =
+            static_cast<const QRhiVulkanNativeHandles*>(rhi()->nativeHandles());
+        if (h == nullptr || h->inst == nullptr || h->physDev == VK_NULL_HANDLE) {
+            return ses::kVramUnknown;
+        }
+        QVulkanFunctions* f = h->inst->functions();
+        uint32_t n_ext = 0;
+        f->vkEnumerateDeviceExtensionProperties(h->physDev, nullptr, &n_ext, nullptr);
+        std::vector<VkExtensionProperties> exts(n_ext);
+        f->vkEnumerateDeviceExtensionProperties(h->physDev, nullptr, &n_ext, exts.data());
+        bool budget = false;
+        for (const VkExtensionProperties& e : exts) {
+            if (std::strcmp(e.extensionName, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME) == 0) {
+                budget = true;
+                break;
+            }
+        }
+        if (!budget) {
+            return ses::kVramUnknown;
+        }
+        auto get_props2 = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties2>(
+            h->inst->getInstanceProcAddr("vkGetPhysicalDeviceMemoryProperties2"));
+        if (get_props2 == nullptr) {
+            get_props2 = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties2>(
+                h->inst->getInstanceProcAddr("vkGetPhysicalDeviceMemoryProperties2KHR"));
+        }
+        if (get_props2 == nullptr) {
+            return ses::kVramUnknown;
+        }
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT bud{};
+        bud.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
+        VkPhysicalDeviceMemoryProperties2 props{};
+        props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
+        props.pNext = &bud;
+        get_props2(h->physDev, &props);
+        std::int64_t free_total = 0;
+        bool any = false;
+        for (uint32_t i = 0; i < props.memoryProperties.memoryHeapCount; ++i) {
+            if ((props.memoryProperties.memoryHeaps[i].flags &
+                 VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) == 0) {
                 continue;
             }
-            if (std::strcmp(e, "GL_NVX_gpu_memory_info") == 0) {
-                nvx = true;
+            if (bud.heapBudget[i] > bud.heapUsage[i]) {
+                free_total += static_cast<std::int64_t>(bud.heapBudget[i] - bud.heapUsage[i]);
             }
-            if (std::strcmp(e, "GL_ATI_meminfo") == 0) {
-                ati = true;
-            }
+            any = true;
         }
-        while (glGetError() != GL_NO_ERROR) {
-        }
-        if (nvx) {
-            GLint kib = 0;
-            glGetIntegerv(kAvailNvx, &kib);
-            if (glGetError() == GL_NO_ERROR && kib > 0) {
-                return static_cast<std::int64_t>(kib) * 1024;
-            }
-        }
-        if (ati) {
-            GLint info[4] = {0, 0, 0, 0};
-            glGetIntegerv(kTexFreeAti, info);
-            if (glGetError() == GL_NO_ERROR && info[0] > 0) {
-                return static_cast<std::int64_t>(info[0]) * 1024;
-            }
-        }
-        return ses::kVramUnknown;
+        return any ? free_total : ses::kVramUnknown;
     }
 
     // Whether atlas state `idx` is stored fp16. Fp32 is kept for the h-audit
@@ -1282,23 +1371,22 @@ protected:
         }
     }
 
-    // The GPU handle for atlas state `idx`: its buffer plus its stored precision.
-    ses_gpu::StateHandle handle(int idx) const {
-        return {state_buf_[static_cast<std::size_t>(idx)], state_is_fp16(idx)};
-    }
+    // The engine handle for atlas state `idx` (precision lives inside the
+    // engine's state record, so an int handle carries both).
+    int handle(int idx) const { return state_buf_[static_cast<std::size_t>(idx)]; }
 
-    GLuint gpu_synthesize(int idx, double* out_peak = nullptr) {
+    int gpu_synthesize(int idx, double* out_peak = nullptr) {
         const std::size_t s = static_cast<std::size_t>(idx);
         const StateSpec& sp = kStateSpec[s];
         state_energy_[s] = radial_energy_[static_cast<std::size_t>(sp.level)];
         if (state_is_fp16(idx)) {
             return engine_.synthesize_state_half(
-                *this, radial_u_[static_cast<std::size_t>(sp.level)], sp.l, sp.m,
+                radial_u_[static_cast<std::size_t>(sp.level)], sp.l, sp.m,
                 radial_grid_.h(), radial_grid_.rmax, radial_grid_.n, out_peak,
                 &state_norm2_[s]);
         }
         return engine_.synthesize_state(
-            *this, radial_u_[static_cast<std::size_t>(sp.level)], sp.l, sp.m,
+            radial_u_[static_cast<std::size_t>(sp.level)], sp.l, sp.m,
             radial_grid_.h(), radial_grid_.rmax, radial_grid_.n, out_peak,
             &state_norm2_[s]);
     }
@@ -1321,7 +1409,7 @@ protected:
     // resident atlas): psi_buf_ is overwritten with the normalized orbital.
     void collapse_onto(int idx) {
         const StateSpec& sp = kStateSpec[static_cast<std::size_t>(idx)];
-        engine_.synthesize_into_psi(*this, radial_u_[static_cast<std::size_t>(sp.level)],
+        engine_.synthesize_into_psi(radial_u_[static_cast<std::size_t>(sp.level)],
                                     sp.l, sp.m, radial_grid_.h(), radial_grid_.rmax,
                                     radial_grid_.n);
     }
@@ -1332,23 +1420,19 @@ protected:
     // orbital at a time (not all 91) and 512^3, where a resident atlas is
     // physically impossible, becomes feasible. (fp16 is kept dormant for a future
     // big-box preset; it only ever mattered for a RESIDENT atlas.)
-    GLuint synth_transient(int idx, double* out_norm2 = nullptr, double* out_peak = nullptr) {
+    int synth_transient(int idx, double* out_norm2 = nullptr, double* out_peak = nullptr) {
         const StateSpec& sp = kStateSpec[static_cast<std::size_t>(idx)];
         state_energy_[static_cast<std::size_t>(idx)] =
             radial_energy_[static_cast<std::size_t>(sp.level)];
-        return engine_.synthesize_state(*this, radial_u_[static_cast<std::size_t>(sp.level)],
+        return engine_.synthesize_state(radial_u_[static_cast<std::size_t>(sp.level)],
                                         sp.l, sp.m, radial_grid_.h(), radial_grid_.rmax,
                                         radial_grid_.n, out_peak, out_norm2);
     }
 
     // Free the OWNED transient deflation buffers (synthesized at relax-start).
-    // Caller must hold a current GL context.
     void free_deflation_buffers() {
-        for (GLuint b : relax_deflate_owned_) {
-            if (b != 0) {
-                GLuint x = b;
-                glDeleteBuffers(1, &x);
-            }
+        for (int b : relax_deflate_owned_) {
+            engine_.release_state(b);
         }
         relax_deflate_owned_.clear();
         relax_deflate_.clear();
@@ -1357,14 +1441,14 @@ protected:
     // Ensure state `idx` has a resident GPU buffer, synthesized on the GPU.
     bool ensure_state(int idx) {
         const std::size_t s = static_cast<std::size_t>(idx);
-        if (state_buf_[s] != 0) {
+        if (state_buf_[s] >= 0) {
             return true;
         }
         if (!radial_ready_) {
             return false;
         }
         state_buf_[s] = gpu_synthesize(idx);
-        return state_buf_[s] != 0;
+        return state_buf_[s] >= 0;
     }
 
     // T7: advance the startup atlas build by one chunk (current context:
@@ -1389,17 +1473,17 @@ protected:
             // projection keeps no atlas, so the montage holds ONE orbital at a
             // time instead of accumulating all 91 (the old startup VRAM ramp).
             double pk = 0.0;
-            GLuint buf = synth_transient(idx, &state_norm2_[s], &pk);
-            if (buf == 0) {
+            const int buf = synth_transient(idx, &state_norm2_[s], &pk);
+            if (buf < 0) {
                 atlas_done_ = true;  // GPU buffer alloc failed: give up gracefully
                 return;
             }
-            engine_.copy_into_psi(*this, buf);  // show (fp32)
+            engine_.copy_into_psi(buf);  // show (fp32)
             // The h-audit: cross-check the 1D radial energy against the full 3D
             // spectral <H> for the resolution-critical 1s and the box-critical
             // 4s/5s/6s -- the ONLY states read back to the CPU (4 of 91).
             if (idx == kS1 || idx == k4S || idx == k5S || idx == k6S) {
-                engine_.readback(*this, readback_buf_);
+                engine_.readback(readback_buf_);
                 ses::Field3D f{sim_.grid()};
                 for (std::size_t i = 0; i < f.data().size(); ++i) {
                     f.data()[i] = ses::Complex<double>{readback_buf_[2 * i],
@@ -1416,7 +1500,7 @@ protected:
                 std::fprintf(stderr, "atlas: %-8s E_radial = %.6f Ha\n",
                              kStateSpec[s].name, state_energy_[s]);
             }
-            glDeleteBuffers(1, &buf);  // TRANSIENT: freed after show + audit
+            engine_.release_state(buf);  // TRANSIENT: freed after show + audit
             if (pk > 0.0) {
                 peak_ = pk;
             }
@@ -1439,9 +1523,9 @@ protected:
                 // (montage + pairs were transient). Populations come from the
                 // projection and collapse/deflation re-synthesize on demand -- NO
                 // resident atlas -> ~1.2 GB runtime, and 512^3 is feasible.
-                if (pair_from_buf_ != 0) {
-                    glDeleteBuffers(1, &pair_from_buf_);
-                    pair_from_buf_ = 0;
+                if (pair_from_buf_ >= 0) {
+                    engine_.release_state(pair_from_buf_);
+                    pair_from_buf_ = -1;
                 }
                 pair_from_idx_ = -1;
                 atlas_done_ = true;
@@ -1698,7 +1782,7 @@ private:
             return;
         }
         makeCurrent();
-        engine_.readback(*this, readback_buf_);
+        engine_.readback(readback_buf_);
         doneCurrent();
         ses::Field3D f{sim_.grid()};
         for (std::size_t i = 0; i < f.data().size(); ++i) {
@@ -1828,7 +1912,7 @@ private:
     // exact three-shear paramagnetic rotation), so the display is just the
     // real wavefunction -- no display-only rotation trick.
     void write_display_texture() {
-        engine_.write_psi_texture(*this, psi_tex_);
+        engine_.write_psi_to_volume();
     }
 
     // XYZ orientation gizmo: three arrows from the origin -- X red, Y green,
