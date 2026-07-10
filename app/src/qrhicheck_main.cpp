@@ -1405,8 +1405,8 @@ bool check_fp16_consumers(QRhi* rhi) {
                                                     ses::Vec3d{1.7, 1.7, 1.7}, ses::Vec3d{});
     engine.upload_state(testpsi.data());
 
-    const ses::Complex<double> ip32 = engine.inner_state_with_psi(s32);
-    const ses::Complex<double> ip16 = engine.inner_state_with_psi(s16);
+    const ses::Complex<double> ip32 = engine.inner_with_psi(s32);
+    const ses::Complex<double> ip16 = engine.inner_with_psi(s16);
     const double inner_err = std::max(std::abs(ip32.real() - ip16.real()),
                                       std::abs(ip32.imag() - ip16.imag()));
 

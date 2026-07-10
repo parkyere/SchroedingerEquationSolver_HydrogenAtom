@@ -240,7 +240,11 @@ public:
         }
     }
 
-    struct RelaxStats { double energy = 0.0; };
+    // Free-energy estimate + normalized peak density from the per-step
+    // renormalization (GL RelaxStats parity: peak drives cloud brightness).
+    struct RelaxStats { double energy = 0.0; double peak = 0.0; };
+    // GPU-reduced norm (sum |psi|^2 dV) and raw peak density (GL NormPeak).
+    struct NormPeak { double sum = 0.0; double peak = 0.0; };
 
     // Upload the imaginary-time weight tables (ImaginaryTimePropagator3D's, packed
     // vec2(w,0) for the complex-multiply kernel) and build the norm + scale
@@ -329,80 +333,66 @@ public:
                    reinterpret_cast<const float*>(rb.data.constData()) + 2 * cells_);
     }
 
-    // ---- deflation (deflated imaginary-time relax) ---------------------
-    // Upload an auxiliary state (a lower eigenstate to project out) into its own
-    // Static buffer and build its inner/axpy/copy bindings. Returns a handle
-    // (index) for relax_deflated_step / inner_with_psi / copy_into_psi, or -1 on
-    // failure. Call after set_relax_tables (reuses the norm partials buffer).
+    // ---- resident states (ONE handle space, mirroring GL's GLuint space) ----
+    // Every resident state -- CPU-uploaded (absorber mask, deflation seeds) or
+    // GPU-synthesized (atlas eigenstates) -- lives in atlas_ and shares one int
+    // handle space, so deflation can run against GPU-synthesized states exactly
+    // like the GL engine. Per-state SRBs (inner/axpy/copy/mul) build lazily.
+
+    // Upload a CPU state into its own resident fp32 buffer; returns a handle
+    // usable with EVERY per-state op, or -1 on failure.
     int create_state_buffer(const std::vector<ses::Complex<double>>& state) {
-        // The projection-coefficient UBO is shared across aux states; create it
-        // once, BEFORE the axpy SRB names it (a null binding would crash create).
-        if (axpy_ubo_.isNull()) {
-            axpy_ubo_.reset(rhi_->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer,
-                                            sizeof(AxpyParams)));
-            if (!axpy_ubo_->create()) { return -1; }
-        }
         const std::vector<float> sf = to_rg32f(state);
-        const quint32 bytes = static_cast<quint32>(sf.size() * sizeof(float));
-        auto a = std::make_unique<AuxState>();
-        a->buf.reset(rhi_->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer, bytes));
+        auto a = std::make_unique<AtlasState>();
+        a->buf.reset(rhi_->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer,
+                                     static_cast<quint32>(sf.size() * sizeof(float))));
         if (!a->buf->create()) { return -1; }
-
-        using B = QRhiShaderResourceBinding;
-        const auto cs = B::ComputeStage;
-        a->inner_srb.reset(rhi_->newShaderResourceBindings());
-        a->inner_srb->setBindings({ B::bufferLoad(0, cs, psi_.data()),
-                                    B::uniformBuffer(1, cs, muln_ubo_.data()),
-                                    B::bufferLoadStore(2, cs, partials_.data()),
-                                    B::bufferLoad(3, cs, a->buf.data()) });
-        a->axpy_srb.reset(rhi_->newShaderResourceBindings());
-        a->axpy_srb->setBindings({ B::bufferLoadStore(0, cs, psi_.data()),
-                                   B::uniformBuffer(1, cs, axpy_ubo_.data()),
-                                   B::bufferLoad(3, cs, a->buf.data()) });
-        a->copy_srb.reset(rhi_->newShaderResourceBindings());
-        a->copy_srb->setBindings({ B::bufferLoadStore(0, cs, psi_.data()),
-                                   B::uniformBuffer(1, cs, muln_ubo_.data()),
-                                   B::bufferLoad(3, cs, a->buf.data()) });
-        if (!a->inner_srb->create() || !a->axpy_srb->create() || !a->copy_srb->create()) {
-            return -1;
-        }
-        if (!ensure_deflation_pipelines(a.get())) { return -1; }
-
-        // Upload the (write-once) state.
         QRhiCommandBuffer* cb = nullptr;
         if (rhi_->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess) { return -1; }
         QRhiResourceUpdateBatch* u = rhi_->nextResourceUpdateBatch();
         u->uploadStaticBuffer(a->buf.data(), sf.data());
         cb->resourceUpdate(u);
         rhi_->endOffscreenFrame();
-
-        aux_.push_back(std::move(a));
-        return static_cast<int>(aux_.size()) - 1;
+        atlas_.push_back(std::move(a));
+        return static_cast<int>(atlas_.size()) - 1;
     }
 
-    // <phi|psi> = sum conj(phi)*psi * dV, the physical inner product of the live
-    // psi with aux state `handle` (the QRhi analog of GpuEngine::inner_with_psi).
+    // Free a resident state's GPU buffer (transient deflation/pair states). The
+    // slot stays so other handles remain stable; per-state ops on a released
+    // handle are no-ops / zeros.
+    void release_state(int handle) {
+        if (handle < 0 || handle >= static_cast<int>(atlas_.size())) { return; }
+        AtlasState* a = atlas_[static_cast<std::size_t>(handle)].get();
+        a->inner_srb.reset();
+        a->axpy_srb.reset();
+        a->copy_srb.reset();
+        a->mul_srb.reset();
+        a->buf.reset();
+    }
+
+    // <state|psi> = sum conj(state)*psi * dV, live psi vs resident state
+    // `handle` (fp16 states are unpacked to scratch first, decode-on-use).
     ses::Complex<double> inner_with_psi(int handle) {
-        AuxState* a = aux_.at(static_cast<std::size_t>(handle)).get();
-        QRhiCommandBuffer* cb = nullptr;
-        if (rhi_->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess) { return {}; }
-        QRhiResourceUpdateBatch* u = rhi_->nextResourceUpdateBatch();
-        u->updateDynamicBuffer(muln_ubo_.data(), 0, sizeof(MulParams), &muln_);
-        cb->beginComputePass(u);
-        cb->setComputePipeline(inner_pipe_.data());
-        cb->setShaderResources(a->inner_srb.data());
-        cb->dispatch(kGroups, 1, 1);
-        QRhiReadbackResult rb;
-        QRhiResourceUpdateBatch* d = rhi_->nextResourceUpdateBatch();
-        d->readBackBuffer(partials_.data(), 0,
-                          static_cast<quint32>(2 * kGroups * sizeof(float)), &rb);
-        cb->endComputePass(d);
-        rhi_->endOffscreenFrame();
-        const float* p = reinterpret_cast<const float*>(rb.data.constData());
-        double re = 0.0;
-        double im = 0.0;
-        for (int gi = 0; gi < kGroups; ++gi) { re += p[2 * gi]; im += p[2 * gi + 1]; }
-        return ses::Complex<double>{ re * cell_volume_, im * cell_volume_ };
+        AtlasState* a = state_at(handle);
+        if (a == nullptr || !ensure_inner()) { return {}; }
+        QRhiShaderResourceBindings* srb = nullptr;
+        if (a->is_half) {
+            // Rare path: decode to scratch, bind transiently.
+            QRhiBuffer* sbuf = decode(handle, 0);
+            if (sbuf == nullptr) { return {}; }
+            using B = QRhiShaderResourceBinding;
+            const auto cs = B::ComputeStage;
+            QScopedPointer<QRhiShaderResourceBindings> isrb(rhi_->newShaderResourceBindings());
+            isrb->setBindings({ B::bufferLoad(0, cs, psi_.data()),
+                                B::uniformBuffer(1, cs, muln_ubo_.data()),
+                                B::bufferLoadStore(2, cs, partials_.data()),
+                                B::bufferLoad(3, cs, sbuf) });
+            if (!isrb->create()) { return {}; }
+            return finish_inner(isrb.data());
+        }
+        if (!ensure_state_ops(a)) { return {}; }
+        srb = a->inner_srb.data();
+        return finish_inner(srb);
     }
 
     // Deflated imaginary-time relax: each step runs the imaginary Strang body,
@@ -435,11 +425,12 @@ public:
         return stats;
     }
 
-    // psi <- src, the auxiliary state `handle` copied bitwise into psi (the
+    // psi <- src, the resident state `handle` copied bitwise into psi (the
     // quantum-jump collapse path; GpuEngine::copy_into_psi via glCopyBufferSubData).
     void copy_into_psi(int handle) {
+        AtlasState* a = state_at(handle);
+        if (a == nullptr || a->is_half || !ensure_state_ops(a)) { return; }
         const int groups = static_cast<int>((cells_ + 255) / 256);
-        AuxState* a = aux_.at(static_cast<std::size_t>(handle)).get();
         QRhiCommandBuffer* cb = nullptr;
         if (rhi_->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess) { return; }
         QRhiResourceUpdateBatch* u = rhi_->nextResourceUpdateBatch();
@@ -452,6 +443,107 @@ public:
         rhi_->endOffscreenFrame();
     }
 
+    // psi <- psi * state (elementwise complex multiply): the absorbing boundary
+    // damp with the mask uploaded as a (mask, 0) state. GL apply_mask parity.
+    void apply_mask(int handle) {
+        AtlasState* a = state_at(handle);
+        if (a == nullptr || a->is_half || !ensure_state_ops(a)) { return; }
+        const int groups = static_cast<int>((cells_ + 255) / 256);
+        QRhiCommandBuffer* cb = nullptr;
+        if (rhi_->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess) { return; }
+        QRhiResourceUpdateBatch* u = rhi_->nextResourceUpdateBatch();
+        u->updateDynamicBuffer(muln_ubo_.data(), 0, sizeof(MulParams), &muln_);
+        cb->beginComputePass(u);
+        multiply(cb, a->mul_srb.data(), groups);
+        cb->endComputePass();
+        rhi_->endOffscreenFrame();
+    }
+
+    // GPU-reduced norm (sum |psi|^2 dV) and raw peak density -- a 2 KB readback
+    // instead of the full field. GL norm_and_peak parity.
+    NormPeak norm_and_peak() {
+        const NormPeak raw = reduce_norm_peak();
+        return NormPeak{ raw.sum * cell_volume_, raw.peak };
+    }
+
+    // psi <- s * psi (fp32 drift renormalization). GL scale parity.
+    void scale(float s) {
+        const int groups = static_cast<int>((cells_ + 255) / 256);
+        const ConjParams sp{ static_cast<quint32>(cells_), s, 0.0f, 0.0f };
+        QRhiCommandBuffer* cb = nullptr;
+        if (rhi_->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess) { return; }
+        QRhiResourceUpdateBatch* u = rhi_->nextResourceUpdateBatch();
+        u->updateDynamicBuffer(scale_ubo_.data(), 0, sizeof(ConjParams), &sp);
+        cb->beginComputePass(u);
+        cb->setComputePipeline(scale_pipe_.data());
+        cb->setShaderResources(scale_srb_.data());
+        cb->dispatch(groups, 1, 1);
+        cb->endComputePass();
+        rhi_->endOffscreenFrame();
+    }
+
+    // ---- semiclassical radiation (Ehrenfest mean force) -----------------
+    // Upload grad V (central differences on the periodic grid, packed vec4) so
+    // mean_force can reduce against it. Rebuild when the potential changes.
+    bool set_potential_gradient(const std::vector<double>& v) {
+        const int nx = grid_.x.n;
+        const int ny = grid_.y.n;
+        const int nz = grid_.z.n;
+        const double i2hx = 1.0 / (2.0 * grid_.x.spacing());
+        const double i2hy = 1.0 / (2.0 * grid_.y.spacing());
+        const double i2hz = 1.0 / (2.0 * grid_.z.spacing());
+        std::vector<float> packed(4 * cells_, 0.0f);
+        for (int k = 0; k < nz; ++k) {
+            const int kp = (k + 1) % nz;
+            const int km = (k - 1 + nz) % nz;
+            for (int j = 0; j < ny; ++j) {
+                const int jp = (j + 1) % ny;
+                const int jm = (j - 1 + ny) % ny;
+                for (int i = 0; i < nx; ++i) {
+                    const int ip = (i + 1) % nx;
+                    const int im = (i - 1 + nx) % nx;
+                    const std::size_t idx = static_cast<std::size_t>(grid_.flat(i, j, k));
+                    packed[4 * idx + 0] = static_cast<float>(
+                        (v[static_cast<std::size_t>(grid_.flat(ip, j, k))] -
+                         v[static_cast<std::size_t>(grid_.flat(im, j, k))]) * i2hx);
+                    packed[4 * idx + 1] = static_cast<float>(
+                        (v[static_cast<std::size_t>(grid_.flat(i, jp, k))] -
+                         v[static_cast<std::size_t>(grid_.flat(i, jm, k))]) * i2hy);
+                    packed[4 * idx + 2] = static_cast<float>(
+                        (v[static_cast<std::size_t>(grid_.flat(i, j, kp))] -
+                         v[static_cast<std::size_t>(grid_.flat(i, j, km))]) * i2hz);
+                }
+            }
+        }
+        if (!ensure_force()) { return false; }
+        QRhiCommandBuffer* cb = nullptr;
+        if (rhi_->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess) { return false; }
+        QRhiResourceUpdateBatch* u = rhi_->nextResourceUpdateBatch();
+        u->uploadStaticBuffer(grad_v_buf_.data(), packed.data());
+        cb->resourceUpdate(u);
+        rhi_->endOffscreenFrame();
+        return true;
+    }
+
+    // <grad V> = sum |psi|^2 grad V * dV -- the Ehrenfest dipole acceleration
+    // for the semiclassical radiated power. Zero if no gradient was uploaded.
+    ses::Vec3d mean_force() {
+        if (grad_v_buf_.isNull()) { return ses::Vec3d{}; }
+        QRhiReadbackResult rb;
+        run_reduce(force_pipe_.data(), force_srb_.data(), force_partials_.data(),
+                   static_cast<quint32>(4 * kGroups * sizeof(float)), &rb);
+        const float* p = reinterpret_cast<const float*>(rb.data.constData());
+        double gx = 0.0;
+        double gy = 0.0;
+        double gz = 0.0;
+        for (int gi = 0; gi < kGroups; ++gi) {
+            gx += p[4 * gi + 0];
+            gy += p[4 * gi + 1];
+            gz += p[4 * gi + 2];
+        }
+        return ses::Vec3d{ gx * cell_volume_, gy * cell_volume_, gz * cell_volume_ };
+    }
+
     // ---- orbital synthesis ---------------------------------------------
     // psi <- normalized (u(|r|)/|r|) Y_lm, synthesized on the GPU from the radial
     // table u_nl(r) (kSynthSrc). h_radial = rmax/(n_radial+1).
@@ -462,13 +554,17 @@ public:
 
     // Synthesize a normalized fp32 eigenstate into its OWN resident buffer (the
     // atlas builds each state on the GPU, no CPU field) and return a handle.
+    // *out_peak (if given) receives the normalized peak |psi|^2; *out_norm2 the
+    // PRE-normalization grid norm (the projection population normalizer).
     int synthesize_state(const std::vector<double>& u, int l, int m, double h_radial,
-                         double rmax, int n_radial) {
+                         double rmax, int n_radial, double* out_peak = nullptr,
+                         double* out_norm2 = nullptr) {
         auto a = std::make_unique<AtlasState>();
         a->buf.reset(rhi_->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer,
                                      static_cast<quint32>(2 * cells_ * sizeof(float))));
         if (!a->buf->create()) { return -1; }
-        if (!synthesize_into_buffer(a->buf.data(), u, l, m, h_radial, rmax, n_radial)) {
+        if (!synthesize_into_buffer(a->buf.data(), u, l, m, h_radial, rmax, n_radial,
+                                    out_peak, out_norm2)) {
             return -1;
         }
         atlas_.push_back(std::move(a));
@@ -479,13 +575,15 @@ public:
     // (cells uints, half the footprint) and return an fp16 handle. The fp32 temp
     // is freed. Consumers unpack fp16 to scratch on demand.
     int synthesize_state_half(const std::vector<double>& u, int l, int m, double h_radial,
-                              double rmax, int n_radial) {
+                              double rmax, int n_radial, double* out_peak = nullptr,
+                              double* out_norm2 = nullptr) {
         if (!ensure_fp16()) { return -1; }
         QScopedPointer<QRhiBuffer> tmp(rhi_->newBuffer(
             QRhiBuffer::Static, QRhiBuffer::StorageBuffer,
             static_cast<quint32>(2 * cells_ * sizeof(float))));
         if (!tmp->create()) { return -1; }
-        if (!synthesize_into_buffer(tmp.data(), u, l, m, h_radial, rmax, n_radial)) {
+        if (!synthesize_into_buffer(tmp.data(), u, l, m, h_radial, rmax, n_radial,
+                                    out_peak, out_norm2)) {
             return -1;
         }
         auto a = std::make_unique<AtlasState>();
@@ -504,30 +602,6 @@ public:
         run_single(pack_pipe_.data(), psrb.data());
         atlas_.push_back(std::move(a));
         return static_cast<int>(atlas_.size()) - 1;
-    }
-
-    // <state|psi> = sum conj(state)*psi * dV, the atlas overlap. If the state is
-    // fp16 it is unpacked to scratch first (decode-on-use).
-    ses::Complex<double> inner_state_with_psi(int handle) {
-        if (!ensure_inner()) { return {}; }
-        QRhiBuffer* sbuf = decode(handle, 0);
-        if (sbuf == nullptr) { return {}; }
-        using B = QRhiShaderResourceBinding;
-        const auto cs = B::ComputeStage;
-        QScopedPointer<QRhiShaderResourceBindings> isrb(rhi_->newShaderResourceBindings());
-        isrb->setBindings({ B::bufferLoad(0, cs, psi_.data()),
-                            B::uniformBuffer(1, cs, muln_ubo_.data()),
-                            B::bufferLoadStore(2, cs, partials_.data()),
-                            B::bufferLoad(3, cs, sbuf) });
-        if (!isrb->create()) { return {}; }
-        QRhiReadbackResult rb;
-        run_reduce(inner_pipe_.data(), isrb.data(), partials_.data(),
-                   static_cast<quint32>(2 * kGroups * sizeof(float)), &rb);
-        const float* p = reinterpret_cast<const float*>(rb.data.constData());
-        double re = 0.0;
-        double im = 0.0;
-        for (int gi = 0; gi < kGroups; ++gi) { re += p[2 * gi]; im += p[2 * gi + 1]; }
-        return ses::Complex<double>{ re * cell_volume_, im * cell_volume_ };
     }
 
     // <to| r |from> = sum conj(to)*(x,y,z)*from * dV, from two resident atlas
@@ -733,8 +807,16 @@ public:
     // the store; bridge_roundtrip additionally reads the texture back through an
     // SSBO (imageLoad) so the bridge is verifiable without a per-slice 3D
     // texture readback. Returns false if a resource fails to build.
+
+    // The RGBA32F volume the renderer samples (psi in .xy). Lazily created;
+    // nullptr only if creation failed.
+    QRhiTexture* volume_texture() {
+        if (!ensure_volume()) { return nullptr; }
+        return volume_tex_.data();
+    }
+
     bool write_psi_to_volume() {
-        if (!ensure_bridge()) { return false; }
+        if (!ensure_volume()) { return false; }
         const int groups = static_cast<int>((cells_ + 255) / 256);
         const BridgeParams bp{ grid_.x.n, grid_.y.n, grid_.z.n, 0 };
         QRhiCommandBuffer* cb = nullptr;
@@ -754,6 +836,7 @@ public:
     // iff imageStore/imageLoad round-trip the RGBA32F texel .xy losslessly.
     bool bridge_roundtrip(std::vector<float>& out) {
         if (!write_psi_to_volume()) { return false; }
+        if (!ensure_bridge_check()) { return false; }
         const int groups = static_cast<int>((cells_ + 255) / 256);
         const BridgeParams bp{ grid_.x.n, grid_.y.n, grid_.z.n, 0 };
         QRhiCommandBuffer* cb = nullptr;
@@ -816,12 +899,15 @@ private:
         float cell_h[4];
     };
 
-    // A resident atlas eigenstate: fp32 (2*cells floats) or fp16-packed (cells
-    // uints, half the footprint). The tested fp32 consumers read fp16 states by
-    // unpacking to a scratch buffer on demand (decode-on-use).
+    // A resident state: fp32 (2*cells floats) or fp16-packed (cells uints, half
+    // the footprint). The tested fp32 consumers read fp16 states by unpacking to
+    // a scratch buffer on demand (decode-on-use). Heap-owned (unique_ptr) so the
+    // QScopedPointer members never move; the per-state SRBs (this buffer as
+    // phi/src/table) build lazily on first use, fp32 states only.
     struct AtlasState {
         bool is_half = false;
         QScopedPointer<QRhiBuffer> buf;
+        QScopedPointer<QRhiShaderResourceBindings> inner_srb, axpy_srb, copy_srb, mul_srb;
     };
     // std140: nx@0, ny@4, nr@8, h_radial@12, box_min@16, cell_h@32, dv@48.
     struct alignas(16) ProjectParams {
@@ -830,14 +916,6 @@ private:
         float box_min[4];
         float cell_h[4];
         float dv, pad0, pad1, pad2;
-    };
-
-    // An auxiliary (lower) eigenstate resident on the GPU plus its bindings for
-    // the deflation kernels. Heap-owned (unique_ptr) so the QScopedPointer members
-    // never move; the SRBs are per-state (they name this buffer as phi/src).
-    struct AuxState {
-        QScopedPointer<QRhiBuffer> buf;
-        QScopedPointer<QRhiShaderResourceBindings> inner_srb, axpy_srb, copy_srb;
     };
 
     void multiply(QRhiCommandBuffer* cb, QRhiShaderResourceBindings* srb, int groups) {
@@ -916,32 +994,51 @@ private:
         rhi_->endOffscreenFrame();
     }
 
+    // A live-handle lookup that tolerates released slots (nullptr buf).
+    AtlasState* state_at(int handle) {
+        if (handle < 0 || handle >= static_cast<int>(atlas_.size())) { return nullptr; }
+        AtlasState* a = atlas_[static_cast<std::size_t>(handle)].get();
+        return a->buf.isNull() ? nullptr : a;
+    }
+
+    // Norm/peak reduction over psi + partials readback (one frame). Raw: the
+    // caller applies dV to sum; peak is the max cell density as-is.
+    NormPeak reduce_norm_peak() {
+        QRhiReadbackResult rb;
+        run_reduce(norm_pipe_.data(), norm_srb_.data(), partials_.data(),
+                   static_cast<quint32>(2 * kGroups * sizeof(float)), &rb);
+        const float* p = reinterpret_cast<const float*>(rb.data.constData());
+        NormPeak out;
+        for (int gi = 0; gi < kGroups; ++gi) {
+            out.sum += p[2 * gi];
+            out.peak = std::max(out.peak, static_cast<double>(p[2 * gi + 1]));
+        }
+        return out;
+    }
+
+    // Dispatch inner_pipe_ with `srb` + read the complex partials back (x dV).
+    ses::Complex<double> finish_inner(QRhiShaderResourceBindings* srb) {
+        QRhiReadbackResult rb;
+        run_reduce(inner_pipe_.data(), srb, partials_.data(),
+                   static_cast<quint32>(2 * kGroups * sizeof(float)), &rb);
+        const float* p = reinterpret_cast<const float*>(rb.data.constData());
+        double re = 0.0;
+        double im = 0.0;
+        for (int gi = 0; gi < kGroups; ++gi) { re += p[2 * gi]; im += p[2 * gi + 1]; }
+        return ses::Complex<double>{ re * cell_volume_, im * cell_volume_ };
+    }
+
     // Frame N: norm reduction (sum |psi|^2 dV) + partials readback -> host norm,
     // then Frame S: psi <- psi / sqrt(norm). Returns the free-energy estimate
-    // from the pre-renorm norm (e^{-2 E dtau}). Shared by relax / relax_deflated.
+    // from the pre-renorm norm (e^{-2 E dtau}) plus the normalized peak density.
+    // Shared by relax / relax_deflated.
     RelaxStats renormalize_and_estimate(int mul_groups) {
         RelaxStats stats;
-        QRhiCommandBuffer* cb = nullptr;
-        if (rhi_->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess) { return stats; }
-        QRhiResourceUpdateBatch* u = rhi_->nextResourceUpdateBatch();
-        u->updateDynamicBuffer(muln_ubo_.data(), 0, sizeof(MulParams), &muln_);
-        cb->beginComputePass(u);
-        cb->setComputePipeline(norm_pipe_.data());
-        cb->setShaderResources(norm_srb_.data());
-        cb->dispatch(kGroups, 1, 1);
-        QRhiReadbackResult rb;
-        QRhiResourceUpdateBatch* d = rhi_->nextResourceUpdateBatch();
-        d->readBackBuffer(partials_.data(), 0,
-                          static_cast<quint32>(2 * kGroups * sizeof(float)), &rb);
-        cb->endComputePass(d);
-        rhi_->endOffscreenFrame();
-
-        const float* p = reinterpret_cast<const float*>(rb.data.constData());
-        double sum = 0.0;
-        for (int gi = 0; gi < kGroups; ++gi) { sum += p[2 * gi]; }
-        const double norm_sq = sum * cell_volume_;
+        const NormPeak np = reduce_norm_peak();
+        const double norm_sq = np.sum * cell_volume_;
         const double inv = (norm_sq > 0.0) ? 1.0 / std::sqrt(norm_sq) : 0.0;
         stats.energy = (norm_sq > 0.0 && dtau_ > 0.0) ? -std::log(norm_sq) / (2.0 * dtau_) : 0.0;
+        stats.peak = (norm_sq > 0.0) ? np.peak / norm_sq : 0.0;
 
         const ConjParams sp{ static_cast<quint32>(cells_), static_cast<float>(inv), 0.0f, 0.0f };
         QRhiCommandBuffer* cb2 = nullptr;
@@ -957,9 +1054,10 @@ private:
         return stats;
     }
 
-    // psi <- psi - c*phi (aux `handle`), the Gram-Schmidt projection (own frame).
+    // psi <- psi - c*phi (state `handle`), the Gram-Schmidt projection (own frame).
     void subtract_projection(int handle, double cre, double cim, int groups) {
-        AuxState* a = aux_.at(static_cast<std::size_t>(handle)).get();
+        AtlasState* a = state_at(handle);
+        if (a == nullptr || a->is_half || !ensure_state_ops(a)) { return; }
         const AxpyParams ap{ static_cast<quint32>(cells_), 0, static_cast<float>(cre),
                              static_cast<float>(cim) };
         QRhiCommandBuffer* cb = nullptr;
@@ -974,26 +1072,84 @@ private:
         rhi_->endOffscreenFrame();
     }
 
-    // Build the inner/axpy/copy pipelines once, on the first create_state_buffer.
-    // The pipelines take `first`'s SRBs as their layout template; every later aux
-    // state's SRBs share that layout (same bindings, different buffer), so they
-    // dispatch against the same pipeline.
-    bool ensure_deflation_pipelines(AuxState* first) {
+    // Lazily build a state's per-op SRBs (inner/axpy/copy/mul) and, on first
+    // need, the shared axpy UBO and the inner/axpy/copy pipelines (the state's
+    // SRBs are the layout template; later states share the layout). fp32 only.
+    bool ensure_state_ops(AtlasState* a) {
+        if (!a->inner_srb.isNull()) { return true; }
+        // Shared projection-coefficient UBO BEFORE any SRB names it (a null
+        // binding would crash the SRB create).
+        if (axpy_ubo_.isNull()) {
+            axpy_ubo_.reset(rhi_->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer,
+                                            sizeof(AxpyParams)));
+            if (!axpy_ubo_->create()) { return false; }
+        }
+        using B = QRhiShaderResourceBinding;
+        const auto cs = B::ComputeStage;
+        a->inner_srb.reset(rhi_->newShaderResourceBindings());
+        a->inner_srb->setBindings({ B::bufferLoad(0, cs, psi_.data()),
+                                    B::uniformBuffer(1, cs, muln_ubo_.data()),
+                                    B::bufferLoadStore(2, cs, partials_.data()),
+                                    B::bufferLoad(3, cs, a->buf.data()) });
+        a->axpy_srb.reset(rhi_->newShaderResourceBindings());
+        a->axpy_srb->setBindings({ B::bufferLoadStore(0, cs, psi_.data()),
+                                   B::uniformBuffer(1, cs, axpy_ubo_.data()),
+                                   B::bufferLoad(3, cs, a->buf.data()) });
+        a->copy_srb.reset(rhi_->newShaderResourceBindings());
+        a->copy_srb->setBindings({ B::bufferLoadStore(0, cs, psi_.data()),
+                                   B::uniformBuffer(1, cs, muln_ubo_.data()),
+                                   B::bufferLoad(3, cs, a->buf.data()) });
+        // Elementwise multiply (absorber mask): phase_multiply layout, so it
+        // dispatches against the shared mul_pipe_.
+        a->mul_srb.reset(rhi_->newShaderResourceBindings());
+        a->mul_srb->setBindings({ B::bufferLoadStore(0, cs, psi_.data()),
+                                  B::bufferLoad(1, cs, a->buf.data()),
+                                  B::uniformBuffer(2, cs, muln_ubo_.data()) });
+        if (!a->inner_srb->create() || !a->axpy_srb->create() || !a->copy_srb->create() ||
+            !a->mul_srb->create()) {
+            return false;
+        }
+        return ensure_inner() && ensure_axpy_copy(a);
+    }
+
+    // Build the axpy/copy pipelines once from `tpl`'s SRBs as layout template.
+    bool ensure_axpy_copy(AtlasState* tpl) {
         if (!axpy_pipe_.isNull()) { return true; }
-        const QShader innercs = load_qsb(QStringLiteral(":/shaders/inner_product.comp.qsb"));
         const QShader axpycs = load_qsb(QStringLiteral(":/shaders/axpy.comp.qsb"));
         const QShader copycs = load_qsb(QStringLiteral(":/shaders/copy_state.comp.qsb"));
-        if (!innercs.isValid() || !axpycs.isValid() || !copycs.isValid()) { return false; }
-        inner_pipe_.reset(rhi_->newComputePipeline());
-        inner_pipe_->setShaderStage(QRhiShaderStage(QRhiShaderStage::Compute, innercs));
-        inner_pipe_->setShaderResourceBindings(first->inner_srb.data());
+        if (!axpycs.isValid() || !copycs.isValid()) { return false; }
         axpy_pipe_.reset(rhi_->newComputePipeline());
         axpy_pipe_->setShaderStage(QRhiShaderStage(QRhiShaderStage::Compute, axpycs));
-        axpy_pipe_->setShaderResourceBindings(first->axpy_srb.data());
+        axpy_pipe_->setShaderResourceBindings(tpl->axpy_srb.data());
         copy_pipe_.reset(rhi_->newComputePipeline());
         copy_pipe_->setShaderStage(QRhiShaderStage(QRhiShaderStage::Compute, copycs));
-        copy_pipe_->setShaderResourceBindings(first->copy_srb.data());
-        return inner_pipe_->create() && axpy_pipe_->create() && copy_pipe_->create();
+        copy_pipe_->setShaderResourceBindings(tpl->copy_srb.data());
+        return axpy_pipe_->create() && copy_pipe_->create();
+    }
+
+    // Lazily build the mean-force reduction (grad V buffer + vec4 partials +
+    // SRB + pipeline). Called by set_potential_gradient.
+    bool ensure_force() {
+        if (!force_pipe_.isNull()) { return true; }
+        const QShader forcecs = load_qsb(QStringLiteral(":/shaders/mean_force.comp.qsb"));
+        if (!forcecs.isValid()) { return false; }
+        grad_v_buf_.reset(rhi_->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer,
+                                          static_cast<quint32>(4 * cells_ * sizeof(float))));
+        force_partials_.reset(rhi_->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer,
+                                              static_cast<quint32>(4 * kGroups * sizeof(float))));
+        if (!grad_v_buf_->create() || !force_partials_->create()) { return false; }
+        using B = QRhiShaderResourceBinding;
+        const auto cs = B::ComputeStage;
+        force_srb_.reset(rhi_->newShaderResourceBindings());
+        force_srb_->setBindings({ B::bufferLoad(0, cs, psi_.data()),
+                                  B::uniformBuffer(1, cs, muln_ubo_.data()),
+                                  B::bufferLoadStore(2, cs, force_partials_.data()),
+                                  B::bufferLoad(4, cs, grad_v_buf_.data()) });
+        if (!force_srb_->create()) { return false; }
+        force_pipe_.reset(rhi_->newComputePipeline());
+        force_pipe_->setShaderStage(QRhiShaderStage(QRhiShaderStage::Compute, forcecs));
+        force_pipe_->setShaderResourceBindings(force_srb_.data());
+        return force_pipe_->create();
     }
 
     // Lazily build the synth UBO/SRB/pipeline. rebuild_srb re-points the SRB at a
@@ -1054,47 +1210,62 @@ private:
         return shear_pipe_->create();
     }
 
-    // Lazily build the RGBA32F volume texture, its scratch readback buffer, and
-    // the store/load bridge pipelines on the first bridge call.
-    bool ensure_bridge() {
+    // Lazily build the RGBA32F volume texture + the store side of the bridge
+    // (the production renderer feed). The load/scratch side is check-only and
+    // lives in ensure_bridge_check so the app never pays its 2*cells*4B scratch.
+    bool ensure_volume() {
         if (!store_pipe_.isNull()) { return true; }
         const QShader storecs = load_qsb(QStringLiteral(":/shaders/bridge_store.comp.qsb"));
-        const QShader loadcs = load_qsb(QStringLiteral(":/shaders/bridge_load.comp.qsb"));
-        if (!storecs.isValid() || !loadcs.isValid()) { return false; }
+        if (!storecs.isValid()) { return false; }
         volume_tex_.reset(rhi_->newTexture(
             QRhiTexture::RGBA32F, n_, n_, n_, 1,
             QRhiTexture::ThreeDimensional | QRhiTexture::UsedWithLoadStore));
         if (!volume_tex_->create()) { return false; }
-        scratch_bridge_buf_.reset(rhi_->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer,
-                                                  static_cast<quint32>(2 * cells_ * sizeof(float))));
         bridge_ubo_.reset(rhi_->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer,
                                           sizeof(BridgeParams)));
-        if (!scratch_bridge_buf_->create() || !bridge_ubo_->create()) { return false; }
+        if (!bridge_ubo_->create()) { return false; }
         using B = QRhiShaderResourceBinding;
         const auto cs = B::ComputeStage;
         store_srb_.reset(rhi_->newShaderResourceBindings());
         store_srb_->setBindings({ B::bufferLoad(0, cs, psi_.data()),
                                   B::imageStore(1, cs, volume_tex_.data(), 0),
                                   B::uniformBuffer(2, cs, bridge_ubo_.data()) });
+        if (!store_srb_->create()) { return false; }
+        store_pipe_.reset(rhi_->newComputePipeline());
+        store_pipe_->setShaderStage(QRhiShaderStage(QRhiShaderStage::Compute, storecs));
+        store_pipe_->setShaderResourceBindings(store_srb_.data());
+        return store_pipe_->create();
+    }
+
+    // Check-only extras: the imageLoad readback path of bridge_roundtrip.
+    bool ensure_bridge_check() {
+        if (!load_pipe_.isNull()) { return true; }
+        const QShader loadcs = load_qsb(QStringLiteral(":/shaders/bridge_load.comp.qsb"));
+        if (!loadcs.isValid()) { return false; }
+        scratch_bridge_buf_.reset(rhi_->newBuffer(QRhiBuffer::Static, QRhiBuffer::StorageBuffer,
+                                                  static_cast<quint32>(2 * cells_ * sizeof(float))));
+        if (!scratch_bridge_buf_->create()) { return false; }
+        using B = QRhiShaderResourceBinding;
+        const auto cs = B::ComputeStage;
         load_srb_.reset(rhi_->newShaderResourceBindings());
         load_srb_->setBindings({ B::bufferLoadStore(0, cs, scratch_bridge_buf_.data()),
                                  B::imageLoad(1, cs, volume_tex_.data(), 0),
                                  B::uniformBuffer(2, cs, bridge_ubo_.data()) });
-        if (!store_srb_->create() || !load_srb_->create()) { return false; }
-        store_pipe_.reset(rhi_->newComputePipeline());
-        store_pipe_->setShaderStage(QRhiShaderStage(QRhiShaderStage::Compute, storecs));
-        store_pipe_->setShaderResourceBindings(store_srb_.data());
+        if (!load_srb_->create()) { return false; }
         load_pipe_.reset(rhi_->newComputePipeline());
         load_pipe_->setShaderStage(QRhiShaderStage(QRhiShaderStage::Compute, loadcs));
         load_pipe_->setShaderResourceBindings(load_srb_.data());
-        return store_pipe_->create() && load_pipe_->create();
+        return load_pipe_->create();
     }
 
     // ---- atlas helpers (synthesize_state / fp16 / inner / dipole) ------
     // Synthesize a normalized fp32 eigenstate into `out` (binding-0 storage
     // buffer), dispatching synth_pipe_ with a per-buffer SRB then normalizing.
+    // *out_peak = normalized peak |psi|^2; *out_norm2 = pre-normalization grid
+    // norm (the orbital-free projection's population normalizer).
     bool synthesize_into_buffer(QRhiBuffer* out, const std::vector<double>& u, int l, int m,
-                                double h_radial, double rmax, int n_radial) {
+                                double h_radial, double rmax, int n_radial,
+                                double* out_peak = nullptr, double* out_norm2 = nullptr) {
         std::vector<float> uf(u.size());
         for (std::size_t i = 0; i < u.size(); ++i) { uf[i] = static_cast<float>(u[i]); }
         const quint32 rbytes = static_cast<quint32>(uf.size() * sizeof(float));
@@ -1145,13 +1316,16 @@ private:
         cb->endComputePass();
         rhi_->endOffscreenFrame();
 
-        normalize_buffer(out);
+        const NormPeak np = normalize_buffer(out);
+        if (out_norm2 != nullptr) { *out_norm2 = np.sum; }
+        if (out_peak != nullptr) { *out_peak = (np.sum > 0.0) ? np.peak / np.sum : 0.0; }
         return true;
     }
 
     // psi'-agnostic grid normalization of `buf` (norm reduction * dV -> scale by
     // 1/sqrt(norm)), via per-buffer SRBs layout-compatible with norm/scale_pipe_.
-    void normalize_buffer(QRhiBuffer* buf) {
+    // Returns {pre-normalization grid norm (x dV), raw peak density}.
+    NormPeak normalize_buffer(QRhiBuffer* buf) {
         const int groups = static_cast<int>((cells_ + 255) / 256);
         using B = QRhiShaderResourceBinding;
         const auto cs = B::ComputeStage;
@@ -1159,22 +1333,25 @@ private:
         nsrb->setBindings({ B::bufferLoad(0, cs, buf),
                             B::uniformBuffer(1, cs, muln_ubo_.data()),
                             B::bufferLoadStore(2, cs, partials_.data()) });
-        if (!nsrb->create()) { return; }
+        if (!nsrb->create()) { return {}; }
         QRhiReadbackResult rb;
         run_reduce(norm_pipe_.data(), nsrb.data(), partials_.data(),
                    static_cast<quint32>(2 * kGroups * sizeof(float)), &rb);
         const float* p = reinterpret_cast<const float*>(rb.data.constData());
-        double sum = 0.0;
-        for (int gi = 0; gi < kGroups; ++gi) { sum += p[2 * gi]; }
-        const double norm_sq = sum * cell_volume_;
-        const double inv = (norm_sq > 0.0) ? 1.0 / std::sqrt(norm_sq) : 0.0;
+        NormPeak np;
+        for (int gi = 0; gi < kGroups; ++gi) {
+            np.sum += p[2 * gi];
+            np.peak = std::max(np.peak, static_cast<double>(p[2 * gi + 1]));
+        }
+        np.sum *= cell_volume_;
+        const double inv = (np.sum > 0.0) ? 1.0 / std::sqrt(np.sum) : 0.0;
         const ConjParams sp{ static_cast<quint32>(cells_), static_cast<float>(inv), 0.0f, 0.0f };
         QScopedPointer<QRhiShaderResourceBindings> ssrb(rhi_->newShaderResourceBindings());
         ssrb->setBindings({ B::bufferLoadStore(0, cs, buf),
                             B::uniformBuffer(1, cs, scale_ubo_.data()) });
-        if (!ssrb->create()) { return; }
+        if (!ssrb->create()) { return np; }
         QRhiCommandBuffer* cb = nullptr;
-        if (rhi_->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess) { return; }
+        if (rhi_->beginOffscreenFrame(&cb) != QRhi::FrameOpSuccess) { return np; }
         QRhiResourceUpdateBatch* u = rhi_->nextResourceUpdateBatch();
         u->updateDynamicBuffer(scale_ubo_.data(), 0, sizeof(ConjParams), &sp);
         cb->beginComputePass(u);
@@ -1183,12 +1360,14 @@ private:
         cb->dispatch(groups, 1, 1);
         cb->endComputePass();
         rhi_->endOffscreenFrame();
+        return np;
     }
 
     // Return a readable fp32 buffer for atlas state `handle`: the buffer itself if
     // fp32, else the fp16 state unpacked into decode_scratch_[slot] (0 or 1).
     QRhiBuffer* decode(int handle, int slot) {
-        AtlasState* a = atlas_.at(static_cast<std::size_t>(handle)).get();
+        AtlasState* a = state_at(handle);
+        if (a == nullptr) { return nullptr; }
         if (!a->is_half) { return a->buf.data(); }
         if (!ensure_fp16()) { return nullptr; }
         using B = QRhiShaderResourceBinding;
@@ -1384,12 +1563,16 @@ private:
         scale_srb_;
     QScopedPointer<QRhiComputePipeline> norm_pipe_, scale_pipe_;
 
-    // Deflation (create_state_buffer / relax_deflated_step / copy_into_psi).
-    // The pipelines are built once from the first aux state's SRBs (shared
-    // layout); axpy_ubo_ carries the projection coefficient c = <phi|psi>.
-    std::vector<std::unique_ptr<AuxState>> aux_;
+    // Per-state ops (deflation / collapse / mask): pipelines built once from the
+    // first state's SRBs (shared layout); axpy_ubo_ carries c = <phi|psi>.
     QScopedPointer<QRhiBuffer> axpy_ubo_;
     QScopedPointer<QRhiComputePipeline> inner_pipe_, axpy_pipe_, copy_pipe_;
+
+    // Semiclassical radiation (set_potential_gradient / mean_force): grad V
+    // field (vec4 per cell) + vec4 partials, reduced by the mean-force kernel.
+    QScopedPointer<QRhiBuffer> grad_v_buf_, force_partials_;
+    QScopedPointer<QRhiShaderResourceBindings> force_srb_;
+    QScopedPointer<QRhiComputePipeline> force_pipe_;
 
     // Magnetic (ensure_magnetic / rotate_axis_shear / magnetic_step): the shear
     // kernel plus a per-axis inverse-FFT conj-scale (scale 1/n, not 1/cells).
