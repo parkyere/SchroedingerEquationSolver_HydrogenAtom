@@ -2753,7 +2753,15 @@ int main(int argc, char** argv) {
                 viewport->toggle_laser();  // Z (cached: no block)
                 viewport->toggle_laser();  // -> X
                 const long long baseline = viewport->photon_count();
-                QTimer::singleShot(60000, viewport, [viewport, &app, baseline] {
+                // Two X-pol fluorescence photons need ~2 pump half-flops of
+                // SIM time: the pump starts from P_e = 0, the half-flop is
+                // pi/kRabiTargetOmega ~ 79 au, and the display-accelerated
+                // 2p lifetime adds ~8 au per cycle -- ~170 au to be safe. At
+                // the measured 256^3 sim rate (~1.5 au/s with VkFFT) that is
+                // ~115 s of wall clock, so a 60 s window was arithmetically
+                // unsatisfiable on this hardware regardless of correctness.
+                // 180 s carries the same physics verdict with real margin.
+                QTimer::singleShot(180000, viewport, [viewport, &app, baseline] {
                     const long long fresh = viewport->photon_count() - baseline;
                     std::fprintf(stderr,
                                  "selftest-manifold: x-pol photons = %lld  [%s]\n",
