@@ -36,17 +36,31 @@ else()
     set(SES_VKFFT_AVAILABLE OFF)
     message(STATUS "VkFFT unavailable -- engine keeps the hand-rolled FFT.")
 endif()
-# One helper applies the flags to any target embedding the engine header.
+# One helper applies the flags to any target embedding an engine header.
+# Pass "volk" as the second argument for targets whose Vulkan world is volk
+# (ses_vk: VK_NO_PROTOTYPES + PFN globals): linking the vulkan-1 IMPORT
+# library there is not just redundant, it is fatal -- the import lib's code
+# thunks collide with volk's identically named function-pointer VARIABLES,
+# and whichever the linker binds first corrupts the other's callers
+# (volkInitialize crashes on startup). The loader flavor stays for the
+# prototype-world QrhiEngine harness.
 function(ses_enable_vkfft target)
     if(SES_VKFFT_AVAILABLE)
         target_compile_definitions(${target} PRIVATE SES_HAVE_VKFFT=1 VKFFT_BACKEND=0)
         target_include_directories(${target} SYSTEM PRIVATE
             "${SES_GLSLANG_C_INCLUDE_DIR}")
-        target_link_libraries(${target} PRIVATE
-            Vulkan::Vulkan
-            glslang::glslang
-            glslang::SPIRV
-            glslang::glslang-default-resource-limits)
+        if(ARGC GREATER 1 AND "${ARGV1}" STREQUAL "volk")
+            target_link_libraries(${target} PRIVATE
+                glslang::glslang
+                glslang::SPIRV
+                glslang::glslang-default-resource-limits)
+        else()
+            target_link_libraries(${target} PRIVATE
+                Vulkan::Vulkan
+                glslang::glslang
+                glslang::SPIRV
+                glslang::glslang-default-resource-limits)
+        endif()
     endif()
 endfunction()
 
@@ -71,7 +85,7 @@ target_link_libraries(sesolver_app
         ses_warnings
 )
 target_compile_features(sesolver_app PRIVATE cxx_std_20)
-ses_enable_vkfft(sesolver_app)
+ses_enable_vkfft(sesolver_app volk)
 
 # Bake every compute kernel the QrhiEngine loads at 256^3 plus the mesh +
 # volume render shaders into the app's resources (SPIR-V only: the app is
@@ -283,7 +297,19 @@ if(TARGET volk::volk AND TARGET GPUOpen::VulkanMemoryAllocator
             VERBATIM)
         list(APPEND _ses_vk_headers "${_hdr}")
     endforeach()
-    add_executable(sesolver_vkcheck src/vkcheck_main.cpp ${_ses_vk_headers})
+    # One generation rule shared by every ses_vk consumer (the app's engine
+    # and the vkcheck harness) -- targets depend on this, not on the files.
+    add_custom_target(ses_spv_headers DEPENDS ${_ses_vk_headers})
+
+    # The app's compute engine is ses_vk (M5 Stage 9): raw Vulkan on the
+    # QRhiWidget-adopted device, kernels from the offline-baked SPIR-V.
+    add_dependencies(sesolver_app ses_spv_headers)
+    target_include_directories(sesolver_app PRIVATE "${_ses_vk_spv_dir}")
+    target_link_libraries(sesolver_app PRIVATE
+        volk::volk GPUOpen::VulkanMemoryAllocator)
+
+    add_executable(sesolver_vkcheck src/vkcheck_main.cpp)
+    add_dependencies(sesolver_vkcheck ses_spv_headers)
     # A deliberately Qt-free binary: no moc/rcc/uic passes, and
     # _CRT_SECURE_NO_WARNINGS keeps MSVC quiet about std::getenv (the
     # SES_VK_VALIDATION toggle; reading it is race-free here).
@@ -301,16 +327,19 @@ if(TARGET volk::volk AND TARGET GPUOpen::VulkanMemoryAllocator
     target_compile_features(sesolver_vkcheck PRIVATE cxx_std_20)
     # Native VkFFT: the plan runs on the engine's own device/queue, recorded
     # straight into its primary command buffers (volk's canonical-name
-    # pointers satisfy header-only VkFFT; no QRhi external blocks).
-    ses_enable_vkfft(sesolver_vkcheck)
+    # pointers satisfy header-only VkFFT; no QRhi external blocks, and no
+    # vulkan-1 import lib -- see ses_enable_vkfft's volk flavor).
+    ses_enable_vkfft(sesolver_vkcheck volk)
     add_test(NAME VkCheck COMMAND sesolver_vkcheck)
     set_tests_properties(VkCheck PROPERTIES
         LABELS "gpu"
         SKIP_RETURN_CODE 77)
     message(STATUS "Framework-free harness 'sesolver_vkcheck' enabled.")
 else()
-    message(STATUS "sesolver_vkcheck skipped "
-        "(needs volk + vulkan-memory-allocator + glslangValidator).")
+    # The app's compute engine is ses_vk -- these are hard requirements now
+    # (the vcpkg manifest provides all three on every platform).
+    message(FATAL_ERROR "sesolver_app needs volk + vulkan-memory-allocator "
+        "+ glslangValidator (vcpkg manifest deps; is glslang[tools] on?).")
 endif()
 
 # Stage the Qt runtime next to the app after every build, so it launches

@@ -49,6 +49,10 @@
 // 3d -> 2p -> 1s, two photons). Relaxation demos auto-complete: when the
 // ITP energy plateaus, the app returns to real time so lifetimes act.
 
+// ses_vk first: volk (inside) defines VK_NO_PROTOTYPES and must own the
+// vulkan.h inclusion before any Qt header pulls its own Vulkan integration.
+#include "vk_blobs.hpp"
+
 #include <core/camera.hpp>
 #include <core/colormap.hpp>
 #include <core/decay.hpp>
@@ -69,7 +73,6 @@
 #include <core/volume.hpp>
 #include <core/vram_budget.hpp>
 
-#include "qrhi_engine.hpp"
 #include "atom_model.hpp"
 #include "scene_renderer.hpp"
 #include "selftest_arcs.hpp"
@@ -100,6 +103,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
@@ -235,7 +239,16 @@ protected:
     // the engine's RAW Vulkan objects (the VkFFT plan + pool/fence) while the
     // device is still known-alive. The engine's QRhi-object members are
     // handled by QRhi's own teardown accounting.
-    void releaseResources() override { engine_.release_native(); }
+    // The widget's QRhi (and thus the adopted VkDevice) is about to go away:
+    // the core must tear down EVERYTHING it created on that device first.
+    // Simulation state on the GPU dies with it -- the fatal-on-rhi-change
+    // guard in initialize() keeps the policy honest (no silent migration).
+    void releaseResources() override {
+        volume_wrap_.reset();
+        engine_.destroy();
+        vk_ctx_.destroy();
+        gpu_ok_ = false;
+    }
 
     // Build the RENDER resources (pipelines, samplers, UBOs, static vertex
     // buffers, the phase LUT). Called by QRhiWidget once the backing QRhi
@@ -272,14 +285,52 @@ protected:
         rhi_ready_ = true;
     }
 
+    // The core's raw volume VkImage wrapped as a QRhiTexture for the render
+    // pass (createFrom = non-owning import). The engine hands the image over
+    // in SHADER_READ_ONLY_OPTIMAL after every write, and the wrapper's
+    // tracked layout says READ, so QRhi records no barriers of its own.
+    QRhiTexture* volume_wrapper() {
+        if (!volume_wrap_.isNull()) {
+            return volume_wrap_.data();
+        }
+        const VkImage img = engine_.volume_image();
+        if (img == VK_NULL_HANDLE) {
+            return nullptr;
+        }
+        const int n = sim_.grid().x.n;
+        volume_wrap_.reset(rhi_->newTexture(QRhiTexture::RGBA32F, n, n, n, 1,
+                                            QRhiTexture::ThreeDimensional));
+        QRhiTexture::NativeTexture src;
+        src.object = quint64(reinterpret_cast<std::uintptr_t>(img));
+        src.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        if (!volume_wrap_->createFrom(src)) {
+            std::fprintf(stderr, "volume import: createFrom failed\n");
+            volume_wrap_.reset();
+            return nullptr;
+        }
+        return volume_wrap_.data();
+    }
+
     // COMPUTE setup, deferred to the first run_gpu_frame() (outside any widget
     // frame): the GPU propagation engine (fp32 transcription of the tested CPU
-    // tables; verified by sesolver_qrhicheck), atlas precision, atom solve,
+    // tables; verified by sesolver_vkcheck), atlas precision, atom solve,
     // projection index, absorber mask. Falls back to CPU stepping on failure.
     void init_compute() {
-        gpu_ok_ = engine_.initialize(rhi_, sim_.grid(),
-                                     sim_.propagator().half_potential_phase(),
-                                     sim_.propagator().kinetic_phase(), sim_.psi().data());
+        // Adopt the QRhiWidget's Vulkan device into the framework-free core:
+        // Khronos handles cross the boundary, nothing else. Qt stays the
+        // device provider + presentation layer; the physics runs in ses_vk.
+        const auto* h =
+            static_cast<const QRhiVulkanNativeHandles*>(rhi_->nativeHandles());
+        gpu_ok_ =
+            h != nullptr && h->inst != nullptr &&
+            vk_ctx_.adopt(h->inst->vkInstance(), h->physDev, h->dev,
+                          h->gfxQueueFamilyIdx, h->gfxQueue) ==
+                ses_vk::Boot::ok &&
+            engine_.initialize(vk_ctx_, sim_.grid(),
+                               ses_shell::app_engine_blobs(sim_.grid().x.n),
+                               sim_.propagator().half_potential_phase(),
+                               sim_.propagator().kinetic_phase(),
+                               sim_.psi().data());
         if (gpu_ok_) {
             // Pick the atlas storage precision from free VRAM. The fp32 n<=6
             // manifold (91 x 256^3 complex-fp32 ~= 12 GB) oversubscribes a small
@@ -444,7 +495,7 @@ protected:
                         // GPU-reduced norm+peak (2 KB readback), taken BEFORE
                         // enqueueing new steps so the implicit sync waits
                         // only on long-finished work.
-                        const ses_qrhi::QrhiEngine::NormPeak np = engine_.norm_and_peak();
+                        const ses_vk::Engine::NormPeak np = engine_.norm_and_peak();
                         norm_display_ = np.sum;
                         if (np.peak > 0.0) {
                             peak_ = np.peak;  // brightness tracks the cloud
@@ -559,7 +610,7 @@ protected:
                     // GPU imaginary time (G7/T1): renormalized every step;
                     // the ITP estimator gives the convergence readout free.
                     // The excited flavor deflates the cached ground state.
-                    const ses_qrhi::QrhiEngine::RelaxStats stats =
+                    const ses_vk::Engine::RelaxStats stats =
                         (stepping_ == Stepping::RelaxingExcited &&
                          !relax_deflate_.empty())
                             ? engine_.relax_deflated_step(relax_deflate_,
@@ -619,7 +670,7 @@ protected:
         // The psi display volume: the engine's bridge texture on the GPU
         // path; null lets the renderer fall back to its CPU-staged texture.
         if (gpu_ok_) {
-            in.psi_volume = engine_.volume_texture();
+            in.psi_volume = volume_wrapper();
         }
         if (in.cloud) {
             if (volume_dirty_) {
@@ -1418,7 +1469,9 @@ private:
     // GPU stepping state (docs/GPU_PLAN.md G5). cpu_is_truth_ is the single
     // sync invariant: true -> sim_.psi() is current, false -> the engine's
     // psi buffer is ahead and must be read back before any CPU-side operation.
-    ses_qrhi::QrhiEngine engine_;
+    ses_vk::DeviceContext vk_ctx_;  // adopts the QRhiWidget's device
+    ses_vk::Engine engine_;
+    QScopedPointer<QRhiTexture> volume_wrap_;  // createFrom import (non-owning)
     QRhi* rhi_ = nullptr;             // the widget's QRhi, cached in initialize()
     bool rhi_ready_ = false;          // render resources built
     bool compute_init_done_ = false;  // engine + atom solve done (run_gpu_frame)
@@ -1507,6 +1560,9 @@ private:
 }  // namespace
 
 int main(int argc, char** argv) {
+    // GUI-subsystem stderr through a redirect is a fully buffered pipe; a
+    // crash then eats every diagnostic. Unbuffered keeps them honest.
+    std::setbuf(stderr, nullptr);
     // QRhi on the Vulkan backend (Viewport::setApi). No MSAA: the volume ray
     // marcher is a full-screen fragment pass where 4x multisampling only
     // multiplies its cost (it smooths nothing but the cube edges) -- at 256^3

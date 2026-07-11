@@ -134,8 +134,9 @@ private:
     VkPipeline pipe_ = VK_NULL_HANDLE;
 };
 
-// A descriptor pool with allocate + write helpers. Sets are freed wholesale
-// with the pool (no per-set free), matching the harness one-shot pattern.
+// A GROWABLE descriptor arena: allocation from the newest pool, and when it
+// runs dry another pool of the same shape is chained (a 91-state atlas needs
+// hundreds of sets). Sets are freed wholesale with the pools.
 class DescriptorArena {
 public:
     DescriptorArena() = default;
@@ -146,37 +147,24 @@ public:
                 std::uint32_t storage_descs, std::uint32_t uniform_descs,
                 std::uint32_t dynamic_uniform_descs = 0,
                 std::uint32_t storage_images = 0) {
-        VkDescriptorPoolSize sizes[4] = {
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, storage_descs},
-            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, uniform_descs},
-            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
-             dynamic_uniform_descs > 0 ? dynamic_uniform_descs : 1},
-            {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-             storage_images > 0 ? storage_images : 1},
-        };
-        VkDescriptorPoolCreateInfo dpci{};
-        dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        dpci.maxSets = max_sets;
-        dpci.poolSizeCount = 4;
-        dpci.pPoolSizes = sizes;
-        if (vkCreateDescriptorPool(ctx.device, &dpci, nullptr, &pool_) !=
-            VK_SUCCESS) {
-            std::fprintf(stderr, "vk: descriptor pool create failed\n");
-            return false;
-        }
-        return true;
+        max_sets_ = max_sets;
+        storage_ = storage_descs;
+        uniform_ = uniform_descs;
+        dynamic_ = dynamic_uniform_descs;
+        images_ = storage_images;
+        return add_pool(ctx);
     }
 
     VkDescriptorSet allocate(DeviceContext& ctx, VkDescriptorSetLayout dsl) {
-        VkDescriptorSetAllocateInfo dsai{};
-        dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        dsai.descriptorPool = pool_;
-        dsai.descriptorSetCount = 1;
-        dsai.pSetLayouts = &dsl;
-        VkDescriptorSet set = VK_NULL_HANDLE;
-        if (vkAllocateDescriptorSets(ctx.device, &dsai, &set) != VK_SUCCESS) {
-            std::fprintf(stderr, "vk: descriptor set alloc failed\n");
-            return VK_NULL_HANDLE;
+        VkDescriptorSet set = try_allocate(ctx, dsl);
+        if (set == VK_NULL_HANDLE) {
+            if (!add_pool(ctx)) {
+                return VK_NULL_HANDLE;
+            }
+            set = try_allocate(ctx, dsl);
+            if (set == VK_NULL_HANDLE) {
+                std::fprintf(stderr, "vk: descriptor set alloc failed\n");
+            }
         }
         return set;
     }
@@ -210,14 +198,56 @@ public:
     }
 
     void destroy(DeviceContext& ctx) {
-        if (pool_ != VK_NULL_HANDLE) {
-            vkDestroyDescriptorPool(ctx.device, pool_, nullptr);
-            pool_ = VK_NULL_HANDLE;
+        for (VkDescriptorPool p : pools_) {
+            vkDestroyDescriptorPool(ctx.device, p, nullptr);
         }
+        pools_.clear();
     }
 
 private:
-    VkDescriptorPool pool_ = VK_NULL_HANDLE;
+    bool add_pool(DeviceContext& ctx) {
+        VkDescriptorPoolSize sizes[4] = {
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, storage_},
+            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, uniform_},
+            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+             dynamic_ > 0 ? dynamic_ : 1},
+            {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, images_ > 0 ? images_ : 1},
+        };
+        VkDescriptorPoolCreateInfo dpci{};
+        dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        dpci.maxSets = max_sets_;
+        dpci.poolSizeCount = 4;
+        dpci.pPoolSizes = sizes;
+        VkDescriptorPool pool = VK_NULL_HANDLE;
+        if (vkCreateDescriptorPool(ctx.device, &dpci, nullptr, &pool) !=
+            VK_SUCCESS) {
+            std::fprintf(stderr, "vk: descriptor pool create failed\n");
+            return false;
+        }
+        pools_.push_back(pool);
+        return true;
+    }
+
+    VkDescriptorSet try_allocate(DeviceContext& ctx,
+                                 VkDescriptorSetLayout dsl) {
+        VkDescriptorSetAllocateInfo dsai{};
+        dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dsai.descriptorPool = pools_.back();
+        dsai.descriptorSetCount = 1;
+        dsai.pSetLayouts = &dsl;
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        if (vkAllocateDescriptorSets(ctx.device, &dsai, &set) != VK_SUCCESS) {
+            return VK_NULL_HANDLE;
+        }
+        return set;
+    }
+
+    std::vector<VkDescriptorPool> pools_;
+    std::uint32_t max_sets_ = 0;
+    std::uint32_t storage_ = 0;
+    std::uint32_t uniform_ = 0;
+    std::uint32_t dynamic_ = 0;
+    std::uint32_t images_ = 0;
 };
 
 // One-shot record/submit/wait: the raw analog of a QRhi offscreen frame.

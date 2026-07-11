@@ -8,7 +8,7 @@
 // in the shell.
 
 #include "manifold_spec.hpp"
-#include "qrhi_engine.hpp"
+#include "vk_engine.hpp"
 
 #include <core/complex.hpp>
 #include <core/decay.hpp>
@@ -103,7 +103,7 @@ public:
         return state_energy_[static_cast<std::size_t>(idx)];
     }
 
-    int gpu_synthesize(ses_qrhi::QrhiEngine& engine, int idx,
+    int gpu_synthesize(ses_vk::Engine& engine, int idx,
                        double* out_peak = nullptr) {
         const std::size_t s = static_cast<std::size_t>(idx);
         const StateSpec& sp = kStateSpec[s];
@@ -123,7 +123,7 @@ public:
     // Population |<n|psi>|^2 from the last engine.project_psi() pass: the 1-D
     // radial dot g_lm . u_nl, grid-normalized to be value-identical to the
     // retired inner_with_psi(grid-normalized orbital) path.
-    double project_population(const ses_qrhi::QrhiEngine& engine, int idx) const {
+    double project_population(const ses_vk::Engine& engine, int idx) const {
         const StateSpec& sp = kStateSpec[static_cast<std::size_t>(idx)];
         const double n2 = state_norm2_[static_cast<std::size_t>(idx)];
         if (n2 <= 0.0) {
@@ -136,7 +136,7 @@ public:
 
     // Collapse psi onto eigenstate `idx` by synthesizing it ON DEMAND (no
     // resident atlas): psi is overwritten with the normalized orbital.
-    void collapse_onto(ses_qrhi::QrhiEngine& engine, int idx) {
+    void collapse_onto(ses_vk::Engine& engine, int idx) {
         const StateSpec& sp = kStateSpec[static_cast<std::size_t>(idx)];
         engine.synthesize_into_psi(radial_u_[static_cast<std::size_t>(sp.level)],
                                    sp.l, sp.m, radial_grid_.h(), radial_grid_.rmax,
@@ -150,7 +150,7 @@ public:
     // resident atlas is physically impossible, becomes feasible. (fp16 is kept
     // dormant for a future big-box preset; it only ever mattered for a
     // RESIDENT atlas.)
-    int synth_transient(ses_qrhi::QrhiEngine& engine, int idx,
+    int synth_transient(ses_vk::Engine& engine, int idx,
                         double* out_peak = nullptr) {
         const std::size_t s = static_cast<std::size_t>(idx);
         const StateSpec& sp = kStateSpec[s];
@@ -161,7 +161,7 @@ public:
     }
 
     // Ensure state `idx` has a resident GPU buffer, synthesized on the GPU.
-    bool ensure_state(ses_qrhi::QrhiEngine& engine, int idx) {
+    bool ensure_state(ses_vk::Engine& engine, int idx) {
         const std::size_t s = static_cast<std::size_t>(idx);
         if (state_buf_[s] >= 0) {
             return true;
@@ -198,7 +198,7 @@ public:
 
     std::vector<std::pair<int, int>>& pair_queue() { return pair_queue_; }
 
-    void evaluate_channel_pair(ses_qrhi::QrhiEngine& engine,
+    void evaluate_channel_pair(ses_vk::Engine& engine,
                                const std::pair<int, int>& p) {
         const std::size_t from = static_cast<std::size_t>(p.first);
         const std::size_t to = static_cast<std::size_t>(p.second);
@@ -224,7 +224,7 @@ public:
     }
 
     // Free the channel-build 'from' cache (the finale of the chunked build).
-    void release_pair_cache(ses_qrhi::QrhiEngine& engine) {
+    void release_pair_cache(ses_vk::Engine& engine) {
         if (pair_from_buf_ >= 0) {
             engine.release_state(pair_from_buf_);
             pair_from_buf_ = -1;
@@ -279,13 +279,13 @@ public:
     // the startup atlas everything is already cached, so these cost nothing;
     // if called early they synthesize just what is needed. The engine drives
     // its own offscreen frames, so they are legal any time between paints.
-    bool prepare_ground_cache(ses_qrhi::QrhiEngine& engine) {
+    bool prepare_ground_cache(ses_vk::Engine& engine) {
         return ensure_state(engine, kS1);
     }
 
     // The laser pair (1s + 2p_z); dipole_z_ (the T3 drive strength) comes
     // from the channel table or is computed here if the table is not up.
-    bool prepare_excited_cache(ses_qrhi::QrhiEngine& engine) {
+    bool prepare_excited_cache(ses_vk::Engine& engine) {
         const bool ok = ensure_state(engine, kS1) && ensure_state(engine, kP2Z);
         if (ok && dipole_z_ == 0.0) {
             const ses::DipoleMatrixElement d =
@@ -295,14 +295,14 @@ public:
         return ok;
     }
 
-    bool prepare_p_triplet(ses_qrhi::QrhiEngine& engine) {
+    bool prepare_p_triplet(ses_vk::Engine& engine) {
         if (!prepare_excited_cache(engine)) {
             return false;
         }
         return ensure_state(engine, kP2X) && ensure_state(engine, kP2Y);
     }
 
-    bool prepare_manifold_cache(ses_qrhi::QrhiEngine& engine,
+    bool prepare_manifold_cache(ses_vk::Engine& engine,
                                 double gamma_display_target) {
         if (!channels_.empty()) {
             return true;

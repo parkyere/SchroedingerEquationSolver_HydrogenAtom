@@ -87,10 +87,44 @@ struct DeviceContext {
     DeviceContext& operator=(const DeviceContext&) = delete;
     ~DeviceContext() { destroy(); }
 
-    // Self-create the whole chain (headless path). A later stage adds
-    // adopt(instance, phys_dev, device, family, queue) for the GUI's
-    // QRhi-owned device; that path must switch volkLoadDevice (single global
-    // device table) to volkLoadDeviceTable so two devices can coexist.
+    // ADOPT externally supplied handles (the GUI's QRhi-owned device): the
+    // core code stays framework-free -- these are Khronos-standard handles,
+    // dependency-injected. The context creates its OWN VmaAllocator on the
+    // shared device (never touch the owner's) and destroys only what it
+    // made. One device per process on this path (volkLoadDevice's global
+    // table); a multi-device build would switch to volkLoadDeviceTable.
+    Boot adopt(VkInstance inst, VkPhysicalDevice pd, VkDevice dev,
+               std::uint32_t family, VkQueue q) {
+        if (volkInitialize() != VK_SUCCESS) {
+            return Boot::no_driver;
+        }
+        instance = inst;
+        phys_dev = pd;
+        device = dev;
+        queue_family = family;
+        queue = q;
+        owns_device_ = false;
+        volkLoadInstance(instance);
+        volkLoadDevice(device);
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(phys_dev, &props);
+        std::memcpy(device_name, props.deviceName, sizeof(device_name));
+        VmaVulkanFunctions fns{};
+        fns.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
+        fns.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
+        VmaAllocatorCreateInfo aci{};
+        aci.physicalDevice = phys_dev;
+        aci.device = device;
+        aci.instance = instance;
+        aci.pVulkanFunctions = &fns;
+        aci.vulkanApiVersion = VK_API_VERSION_1_1;
+        if (vmaCreateAllocator(&aci, &allocator) != VK_SUCCESS) {
+            return Boot::error;
+        }
+        return Boot::ok;
+    }
+
+    // Self-create the whole chain (headless path).
     Boot create(bool want_validation) {
         if (volkInitialize() != VK_SUCCESS) {
             return Boot::no_driver;  // no vulkan-1 runtime on this machine
@@ -340,6 +374,13 @@ struct DeviceContext {
             vmaDestroyAllocator(allocator);
             allocator = VK_NULL_HANDLE;
         }
+        if (!owns_device_) {  // adopted handles belong to their owner
+            device = VK_NULL_HANDLE;
+            instance = VK_NULL_HANDLE;
+            phys_dev = VK_NULL_HANDLE;
+            queue = VK_NULL_HANDLE;
+            return;
+        }
         if (device != VK_NULL_HANDLE) {
             vkDestroyDevice(device, nullptr);
             device = VK_NULL_HANDLE;
@@ -353,6 +394,11 @@ struct DeviceContext {
             instance = VK_NULL_HANDLE;
         }
     }
+
+private:
+    bool owns_device_ = true;
+
+public:
 };
 
 }  // namespace ses_vk
