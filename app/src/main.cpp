@@ -151,8 +151,10 @@ protected:
                             QStringLiteral("ses_vk renderer initialization "
                                            "failed (see stderr)"));
         }
-        director_.init_compute(vk_ctx_, adopted,
-                               ses_shell::query_free_vram_bytes(rhi()));
+        director_.init_compute(
+            vk_ctx_, adopted,
+            ses_shell::query_free_vram_bytes(
+                adopted ? vk_ctx_.phys_dev : VK_NULL_HANDLE));
     }
 
     // The DRAW half of a frame, in ses_vk, outside any QRhi frame: assemble

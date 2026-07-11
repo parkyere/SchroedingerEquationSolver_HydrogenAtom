@@ -1,21 +1,14 @@
 #pragma once
 
-// Free VRAM in bytes via Vulkan's VK_EXT_memory_budget (heap budget minus
-// current usage, summed over device-local heaps), or ses::kVramUnknown when
-// the extension / entry points are absent. Physical-device property queries
-// only need the extension SUPPORTED, not enabled on the logical device.
+// Free VRAM in bytes via VK_EXT_memory_budget (heap budget minus current
+// usage, summed over device-local heaps), or ses::kVramUnknown when the
+// extension / entry points are absent. Pure volk -- call AFTER a
+// DeviceContext create()/adopt() has run volkLoadInstance. Physical-device
+// property queries only need the extension SUPPORTED, not enabled.
 
-// volk (inside vk_device.hpp) must own the vulkan.h inclusion before any Qt
-// header pulls its own Vulkan integration.
 #include "vk_device.hpp"
 
 #include <core/vram_budget.hpp>
-
-#include <QVulkanFunctions>
-#include <QVulkanInstance>
-
-#include <rhi/qrhi.h>
-#include <rhi/qrhi_platform.h>  // QRhiVulkanNativeHandles
 
 #include <cstdint>
 #include <cstring>
@@ -23,17 +16,14 @@
 
 namespace ses_shell {
 
-inline std::int64_t query_free_vram_bytes(QRhi* rhi) {
-    const QRhiVulkanNativeHandles* h =
-        static_cast<const QRhiVulkanNativeHandles*>(rhi->nativeHandles());
-    if (h == nullptr || h->inst == nullptr || h->physDev == VK_NULL_HANDLE) {
+inline std::int64_t query_free_vram_bytes(VkPhysicalDevice pd) {
+    if (pd == VK_NULL_HANDLE) {
         return ses::kVramUnknown;
     }
-    QVulkanFunctions* f = h->inst->functions();
     uint32_t n_ext = 0;
-    f->vkEnumerateDeviceExtensionProperties(h->physDev, nullptr, &n_ext, nullptr);
+    vkEnumerateDeviceExtensionProperties(pd, nullptr, &n_ext, nullptr);
     std::vector<VkExtensionProperties> exts(n_ext);
-    f->vkEnumerateDeviceExtensionProperties(h->physDev, nullptr, &n_ext, exts.data());
+    vkEnumerateDeviceExtensionProperties(pd, nullptr, &n_ext, exts.data());
     bool budget = false;
     for (const VkExtensionProperties& e : exts) {
         if (std::strcmp(e.extensionName, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME) == 0) {
@@ -44,12 +34,10 @@ inline std::int64_t query_free_vram_bytes(QRhi* rhi) {
     if (!budget) {
         return ses::kVramUnknown;
     }
-    auto get_props2 = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties2>(
-        h->inst->getInstanceProcAddr("vkGetPhysicalDeviceMemoryProperties2"));
-    if (get_props2 == nullptr) {
-        get_props2 = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties2>(
-            h->inst->getInstanceProcAddr("vkGetPhysicalDeviceMemoryProperties2KHR"));
-    }
+    const PFN_vkGetPhysicalDeviceMemoryProperties2 get_props2 =
+        vkGetPhysicalDeviceMemoryProperties2 != nullptr
+            ? vkGetPhysicalDeviceMemoryProperties2
+            : vkGetPhysicalDeviceMemoryProperties2KHR;
     if (get_props2 == nullptr) {
         return ses::kVramUnknown;
     }
@@ -58,7 +46,7 @@ inline std::int64_t query_free_vram_bytes(QRhi* rhi) {
     VkPhysicalDeviceMemoryProperties2 props{};
     props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
     props.pNext = &bud;
-    get_props2(h->physDev, &props);
+    get_props2(pd, &props);
     std::int64_t free_total = 0;
     bool any = false;
     for (uint32_t i = 0; i < props.memoryProperties.memoryHeapCount; ++i) {
