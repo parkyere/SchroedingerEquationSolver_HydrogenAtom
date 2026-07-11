@@ -32,7 +32,7 @@ app/     Qt shell (window/input/UI) + ses_vk (framework-free Vulkan engine
          and renderer) + sesolver_vkcheck (zero-Qt GPU test oracle).
 tests/   GoogleTest suite driving core/, test-first.
 bench/   Manual micro-benchmark.
-docs/    Architecture, TDD rules, physics roadmap.
+docs/    Architecture and TDD rules.
 tools/   Git hooks (TDD commit-discipline guard) + CMake helpers.
 ```
 
