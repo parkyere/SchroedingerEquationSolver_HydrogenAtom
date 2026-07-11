@@ -85,6 +85,10 @@ struct EngineKernels {
     std::size_t bridge_store_size = 0;
     const unsigned char* bridge_load = nullptr;   // bridge_load.comp (checks)
     std::size_t bridge_load_size = 0;
+    const unsigned char* pack = nullptr;    // pack_half.comp (fp16 atlas)
+    std::size_t pack_size = 0;
+    const unsigned char* unpack = nullptr;  // unpack_half.comp
+    std::size_t unpack_size = 0;
 };
 
 class Engine {
@@ -202,7 +206,15 @@ public:
             !bridge_load_.create(ctx, blobs.bridge_load, blobs.bridge_load_size,
                                  {{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
                                   {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE},
-                                  {2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER}})) {
+                                  {2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER}}) ||
+            !pack_.create(ctx, blobs.pack, blobs.pack_size,
+                          {{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
+                           {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER},
+                           {6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER}}) ||
+            !unpack_.create(ctx, blobs.unpack, blobs.unpack_size,
+                            {{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
+                             {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER},
+                             {6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER}})) {
             return false;
         }
 
@@ -526,17 +538,33 @@ public:
         ctx_->destroy_buffer(&st->buf);
     }
 
-    // <state|psi> = sum conj(state)*psi * dV.
+    // <state|psi> = sum conj(state)*psi * dV (fp16 states decode to scratch).
     ses::Complex<double> inner_with_psi(int handle) {
         State* st = state_at(handle);
         if (st == nullptr) {
             return {};
         }
+        VkDescriptorSet set = st->inner_set;
+        if (st->is_half) {
+            const VkBuffer sbuf = decode(st, 0);
+            if (sbuf == VK_NULL_HANDLE) {
+                return {};
+            }
+            const auto storage = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            arena_.write_buffer(*ctx_, inner_any_set_, 0, storage, psi_.buf);
+            arena_.write_buffer(*ctx_, inner_any_set_, 1,
+                                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                                muln_ubo_.buf, sizeof(MulParams));
+            arena_.write_buffer(*ctx_, inner_any_set_, 2, storage,
+                                partials_.buf);
+            arena_.write_buffer(*ctx_, inner_any_set_, 3, storage, sbuf);
+            set = inner_any_set_;
+        }
         OneShot shot;
         if (!shot.begin(*ctx_)) {
             return {};
         }
-        inner_.bind(shot.cb(), st->inner_set);
+        inner_.bind(shot.cb(), set);
         vkCmdDispatch(shot.cb(), kGroups, 1, 1);
         record_partials_readback(shot.cb());
         const bool ok = shot.submit_and_wait(*ctx_);
@@ -578,10 +606,10 @@ public:
         return stats;
     }
 
-    // psi <- src (bitwise; the quantum-jump collapse path).
+    // psi <- src (bitwise; the quantum-jump collapse path). fp32 states only.
     void copy_into_psi(int handle) {
         State* st = state_at(handle);
-        if (st == nullptr) {
+        if (st == nullptr || st->is_half) {
             return;
         }
         OneShot shot;
@@ -597,7 +625,7 @@ public:
     // psi <- psi * state (elementwise): the absorbing-boundary damp.
     void apply_mask(int handle) {
         State* st = state_at(handle);
-        if (st == nullptr) {
+        if (st == nullptr || st->is_half) {
             return;
         }
         OneShot shot;
@@ -647,7 +675,11 @@ public:
         return ensure_volume() ? volume_.view : VK_NULL_HANDLE;
     }
 
-    // Copy psi into the volume (imageStore, one texel per cell).
+    // Copy psi into the volume (imageStore, one texel per cell). The engine
+    // OWNS the layout round-trip: the store runs in GENERAL, then the image
+    // is handed to SHADER_READ_ONLY_OPTIMAL for the render shell's sampling
+    // (the imported QRhiTexture keeps a READ tracked state, so QRhi records
+    // no barriers of its own -- the verified interop contract).
     bool write_psi_to_volume() {
         if (!ensure_volume()) {
             return false;
@@ -657,8 +689,10 @@ public:
             return false;
         }
         barrier_compute_to_compute(shot.cb());  // psi vs prior compute
+        transition_volume(shot.cb(), VK_IMAGE_LAYOUT_GENERAL);
         bridge_store_.bind(shot.cb(), store_set_);
         vkCmdDispatch(shot.cb(), mul_groups_, 1, 1);
+        transition_volume(shot.cb(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         shot.submit_and_wait(*ctx_);
         shot.destroy(*ctx_);
         return true;
@@ -691,6 +725,7 @@ public:
             return false;
         }
         barrier_compute_to_compute(shot.cb());  // image written by the store
+        transition_volume(shot.cb(), VK_IMAGE_LAYOUT_GENERAL);  // imageLoad
         bridge_load_.bind(shot.cb(), load_set_);
         vkCmdDispatch(shot.cb(), mul_groups_, 1, 1);
         record_buffer_readback(shot.cb(), scratch_bridge_, field_bytes_);
@@ -830,12 +865,63 @@ public:
         return handle;
     }
 
-    // <to| r |from> = sum conj(to)*(x,y,z)*from * dV from two resident fp32
-    // states, component-wise complex (three complex reductions).
+    // Synthesize + normalize in fp32 (the tested path), then pack to fp16
+    // storage (cells uints, half the footprint) and return an fp16 handle.
+    // Consumers unpack fp16 to scratch on demand (decode-on-use).
+    int synthesize_state_half(const std::vector<double>& u, int l, int m,
+                              double h_radial, double rmax, int n_radial,
+                              double* out_peak = nullptr,
+                              double* out_norm2 = nullptr) {
+        if (!ensure_fp16()) {
+            return -1;
+        }
+        Buffer tmp{};
+        if (!ctx_->create_device_buffer(field_bytes_, &tmp)) {
+            return -1;
+        }
+        if (!synthesize_into_buffer(tmp, u, l, m, h_radial, rmax, n_radial,
+                                    out_peak, out_norm2)) {
+            ctx_->destroy_buffer(&tmp);
+            return -1;
+        }
+        State st;
+        st.is_half = true;
+        if (!ctx_->create_device_buffer(cells_ * sizeof(std::uint32_t),
+                                        &st.buf)) {
+            ctx_->destroy_buffer(&tmp);
+            return -1;
+        }
+        // pack tmp(fp32, binding 0) -> st.buf(fp16, binding 6).
+        const auto storage = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        arena_.write_buffer(*ctx_, pack_set_, 0, storage, tmp.buf);
+        arena_.write_buffer(*ctx_, pack_set_, 6, storage, st.buf.buf);
+        OneShot shot;
+        if (!shot.begin(*ctx_)) {
+            ctx_->destroy_buffer(&st.buf);
+            ctx_->destroy_buffer(&tmp);
+            return -1;
+        }
+        barrier_compute_to_compute(shot.cb());
+        pack_.bind(shot.cb(), pack_set_);
+        vkCmdDispatch(shot.cb(), mul_groups_, 1, 1);
+        shot.submit_and_wait(*ctx_);
+        shot.destroy(*ctx_);
+        ctx_->destroy_buffer(&tmp);
+        states_.push_back(st);
+        return static_cast<int>(states_.size()) - 1;
+    }
+
+    // <to| r |from> = sum conj(to)*(x,y,z)*from * dV from two resident
+    // states (fp32, or fp16 decoded to scratch), component-wise complex.
     ses::DipoleMatrixElement dipole_between(int to_h, int from_h) {
         State* to = state_at(to_h);
         State* from = state_at(from_h);
         if (to == nullptr || from == nullptr || !ensure_dipole()) {
+            return {};
+        }
+        VkBuffer to_buf = decode(to, 0);
+        VkBuffer from_buf = decode(from, 1);
+        if (to_buf == VK_NULL_HANDLE || from_buf == VK_NULL_HANDLE) {
             return {};
         }
         DipoleParams dp{};
@@ -854,8 +940,8 @@ public:
         // The shared set is re-pointed per call (all submissions fence-wait,
         // so the set is never in flight when rewritten).
         const auto storage = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        arena_.write_buffer(*ctx_, dipole_set_, 0, storage, to->buf.buf);
-        arena_.write_buffer(*ctx_, dipole_set_, 3, storage, from->buf.buf);
+        arena_.write_buffer(*ctx_, dipole_set_, 0, storage, to_buf);
+        arena_.write_buffer(*ctx_, dipole_set_, 3, storage, from_buf);
 
         OneShot shot;
         if (!shot.begin(*ctx_)) {
@@ -1047,6 +1133,8 @@ public:
         }
         states_.clear();
         arena_.destroy(*ctx_);
+        unpack_.destroy(*ctx_);
+        pack_.destroy(*ctx_);
         bridge_load_.destroy(*ctx_);
         bridge_store_.destroy(*ctx_);
         project_.destroy(*ctx_);
@@ -1065,6 +1153,8 @@ public:
         mul_.destroy(*ctx_);
         ctx_->destroy_buffer(&relax_kin_);
         ctx_->destroy_buffer(&relax_half_);
+        ctx_->destroy_buffer(&decode_scratch_[1]);
+        ctx_->destroy_buffer(&decode_scratch_[0]);
         ctx_->destroy_buffer(&scratch_bridge_);
         ctx_->destroy_buffer(&bridge_ubo_);
         ctx_->destroy_image(&volume_);
@@ -1258,9 +1348,11 @@ private:
         return ok;
     }
 
-    // A resident state: its fp32 buffer + the four per-op descriptor sets
-    // (inner/axpy/copy/mask-multiply against live psi).
+    // A resident state: its buffer (fp32, or fp16-packed at half footprint)
+    // + the four per-op descriptor sets (fp32 states only; fp16 consumers
+    // decode to scratch and go through the shared any-target sets).
     struct State {
+        bool is_half = false;
         Buffer buf{};
         VkDescriptorSet inner_set = VK_NULL_HANDLE;
         VkDescriptorSet axpy_set = VK_NULL_HANDLE;
@@ -1487,7 +1579,76 @@ private:
                                  VK_ACCESS_SHADER_WRITE_BIT);
         shot.submit_and_wait(*ctx_);
         shot.destroy(*ctx_);
+        volume_layout_ = VK_IMAGE_LAYOUT_GENERAL;
         return true;
+    }
+
+    // Transition the volume to `to` if not already there. Conservative
+    // compute+fragment stages/access both sides (the queue is a combined
+    // graphics+compute family on every supported path).
+    void transition_volume(VkCommandBuffer cb, VkImageLayout to) {
+        if (volume_layout_ == to) {
+            return;
+        }
+        const VkPipelineStageFlags stages =
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        const VkAccessFlags access =
+            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        image_layout_barrier(cb, volume_.img, volume_layout_, to, stages,
+                             access, stages, access);
+        volume_layout_ = to;
+    }
+
+    // Lazily build the fp16 codec resources: two decode scratch buffers (a
+    // 2-fp16-operand dipole needs both) + the shared re-pointed sets.
+    bool ensure_fp16() {
+        if (pack_set_ != VK_NULL_HANDLE) {
+            return true;
+        }
+        if (!ctx_->create_device_buffer(field_bytes_, &decode_scratch_[0]) ||
+            !ctx_->create_device_buffer(field_bytes_, &decode_scratch_[1])) {
+            return false;
+        }
+        pack_set_ = arena_.allocate(*ctx_, pack_.set_layout());
+        unpack_set_ = arena_.allocate(*ctx_, unpack_.set_layout());
+        inner_any_set_ = arena_.allocate(*ctx_, inner_.set_layout());
+        if (pack_set_ == VK_NULL_HANDLE || unpack_set_ == VK_NULL_HANDLE ||
+            inner_any_set_ == VK_NULL_HANDLE) {
+            pack_set_ = VK_NULL_HANDLE;
+            return false;
+        }
+        const auto uniform = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        arena_.write_buffer(*ctx_, pack_set_, 1, uniform, muln_ubo_.buf,
+                            sizeof(MulParams));
+        arena_.write_buffer(*ctx_, unpack_set_, 1, uniform, muln_ubo_.buf,
+                            sizeof(MulParams));
+        return true;
+    }
+
+    // A readable fp32 buffer for `st`: its own buffer if fp32, else the fp16
+    // content unpacked into decode_scratch_[slot] (0 or 1).
+    VkBuffer decode(State* st, int slot) {
+        if (!st->is_half) {
+            return st->buf.buf;
+        }
+        if (!ensure_fp16()) {
+            return VK_NULL_HANDLE;
+        }
+        const auto storage = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        arena_.write_buffer(*ctx_, unpack_set_, 0, storage,
+                            decode_scratch_[slot].buf);
+        arena_.write_buffer(*ctx_, unpack_set_, 6, storage, st->buf.buf);
+        OneShot shot;
+        if (!shot.begin(*ctx_)) {
+            return VK_NULL_HANDLE;
+        }
+        barrier_compute_to_compute(shot.cb());
+        unpack_.bind(shot.cb(), unpack_set_);
+        vkCmdDispatch(shot.cb(), mul_groups_, 1, 1);
+        shot.submit_and_wait(*ctx_);
+        shot.destroy(*ctx_);
+        return decode_scratch_[slot].buf;
     }
 
     // Lazily build the dipole reduction resources (shared re-pointed set).
@@ -1531,10 +1692,10 @@ private:
         return true;
     }
 
-    // psi -= (cre + i cim) * state (the Gram-Schmidt projection subtract).
+    // psi -= (cre + i cim) * state (Gram-Schmidt subtract). fp32 states only.
     void subtract_projection(int handle, double cre, double cim) {
         State* st = state_at(handle);
-        if (st == nullptr) {
+        if (st == nullptr || st->is_half) {
             return;
         }
         const AxpyParams ap{static_cast<std::uint32_t>(cells_), 0,
@@ -1839,8 +2000,12 @@ private:
     Kernel project_;
     Kernel bridge_store_;
     Kernel bridge_load_;
+    Kernel pack_;
+    Kernel unpack_;
     DescriptorArena arena_;
     DeviceContext::Image volume_{};
+    VkImageLayout volume_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    Buffer decode_scratch_[2]{};
     std::vector<State> states_;
     VkDeviceSize staging_bytes_ = 0;
     VkDeviceSize radial_bytes_ = 0;
@@ -1896,6 +2061,9 @@ private:
     VkDescriptorSet proj_set_ = VK_NULL_HANDLE;
     VkDescriptorSet store_set_ = VK_NULL_HANDLE;
     VkDescriptorSet load_set_ = VK_NULL_HANDLE;
+    VkDescriptorSet pack_set_ = VK_NULL_HANDLE;
+    VkDescriptorSet unpack_set_ = VK_NULL_HANDLE;
+    VkDescriptorSet inner_any_set_ = VK_NULL_HANDLE;
     VkDescriptorSet synth_any_set_ = VK_NULL_HANDLE;
     VkDescriptorSet norm_any_set_ = VK_NULL_HANDLE;
     VkDescriptorSet scale_any_set_ = VK_NULL_HANDLE;

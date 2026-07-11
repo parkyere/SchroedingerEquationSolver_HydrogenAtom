@@ -1107,6 +1107,10 @@ ses_vk::EngineKernels engine_blobs_8() {
     b.bridge_store_size = k_bridge_store_spv_size;
     b.bridge_load = k_bridge_load_spv;
     b.bridge_load_size = k_bridge_load_spv_size;
+    b.pack = k_pack_half_spv;
+    b.pack_size = k_pack_half_spv_size;
+    b.unpack = k_unpack_half_spv;
+    b.unpack_size = k_unpack_half_spv_size;
     return b;
 }
 
@@ -1799,6 +1803,68 @@ bool check_engine_dipole_between(ses_vk::DeviceContext& ctx) {
     return pass;
 }
 
+// fp16 atlas consumers: the same eigenstate synthesized fp32-resident and
+// fp16-packed must agree through the tested fp32 consumers (inner_with_psi
+// and dipole_between decode fp16 to scratch on demand). Tolerance is fp16
+// storage precision, matching qrhicheck's fp16-consumers contract (3e-3).
+bool check_engine_fp16_consumers(ses_vk::DeviceContext& ctx) {
+    const ses::Grid1D axis{-4.0, 4.0, 8};
+    const ses::Grid3D g{axis, axis, axis};
+    const std::vector<double> v =
+        ses::soft_coulomb_potential(g, 1.0, 1.0, ses::Vec3d{});
+    const ses::SplitOperator3D prop{g, v, 0.02};
+    ses::Field3D psi0 = ses::gaussian_wavepacket(g, ses::Vec3d{0.5, 0.3, 0.0},
+                                                 ses::Vec3d{1.4, 1.4, 1.4},
+                                                 ses::Vec3d{});
+    ses_vk::Engine engine;
+    if (!engine.initialize(ctx, g, engine_blobs_8(),
+                           prop.half_potential_phase(), prop.kinetic_phase(),
+                           psi0.data())) {
+        std::printf("fp16 consumers (raw Vulkan): engine init FAIL\n");
+        return false;
+    }
+    const ses::RadialGrid rg{8.0, 1599};
+    std::vector<double> vr(static_cast<std::size_t>(rg.n));
+    for (int i = 0; i < rg.n; ++i) {
+        vr[static_cast<std::size_t>(i)] = 0.5 * rg.r(i) * rg.r(i);
+    }
+    const ses::RadialState s0 =
+        ses::radial_eigenstate(rg, ses::radial_hamiltonian(rg, vr, 0), 0);
+    const ses::RadialState p0 =
+        ses::radial_eigenstate(rg, ses::radial_hamiltonian(rg, vr, 1), 0);
+    const int s_f32 = engine.synthesize_state(s0.u, 0, 0, rg.h(), rg.rmax, rg.n);
+    const int s_f16 =
+        engine.synthesize_state_half(s0.u, 0, 0, rg.h(), rg.rmax, rg.n);
+    const int p_f32 = engine.synthesize_state(p0.u, 1, 0, rg.h(), rg.rmax, rg.n);
+    if (s_f32 < 0 || s_f16 < 0 || p_f32 < 0) {
+        std::printf("fp16 consumers (raw Vulkan): synthesize FAIL\n");
+        return false;
+    }
+
+    // inner_with_psi: fp32 vs fp16 of the SAME state.
+    const ses::Complex<double> i32 = engine.inner_with_psi(s_f32);
+    const ses::Complex<double> i16 = engine.inner_with_psi(s_f16);
+    const double inner_err = std::max(std::abs(i32.real() - i16.real()),
+                                      std::abs(i32.imag() - i16.imag()));
+
+    // dipole_between: (fp16 to | fp32 from) vs (fp32 to | fp32 from).
+    const ses::DipoleMatrixElement d32 = engine.dipole_between(s_f32, p_f32);
+    const ses::DipoleMatrixElement d16 = engine.dipole_between(s_f16, p_f32);
+    double dip_err = 0.0;
+    const ses::Complex<double> a[3] = {d32.x, d32.y, d32.z};
+    const ses::Complex<double> b[3] = {d16.x, d16.y, d16.z};
+    for (int c = 0; c < 3; ++c) {
+        dip_err = std::max(dip_err, std::abs(a[c].real() - b[c].real()));
+        dip_err = std::max(dip_err, std::abs(a[c].imag() - b[c].imag()));
+    }
+    const double worst = std::max(inner_err, dip_err);
+    const bool pass = worst < 3e-3;  // fp16 storage precision
+    std::printf(
+        "fp16 atlas consumers (raw Vulkan): max |fp32 - fp16| = %.3e  [%s]\n",
+        worst, pass ? "PASS" : "FAIL");
+    return pass;
+}
+
 // SSBO -> 3D volume image bridge: copy psi into the RGBA32F volume via
 // imageStore, read it back through an SSBO (imageLoad). A store->load
 // round-trip that reproduces psi bit-for-bit proves imageStore wrote exactly
@@ -1886,6 +1952,7 @@ int main() {
     failures += check_engine_force(ctx) ? 0 : 1;
     failures += check_engine_project(ctx) ? 0 : 1;
     failures += check_engine_dipole_between(ctx) ? 0 : 1;
+    failures += check_engine_fp16_consumers(ctx) ? 0 : 1;
     failures += check_engine_bridge(ctx) ? 0 : 1;
 #ifdef SES_HAVE_VKFFT
     failures += check_native_vkfft_perf(ctx) ? 0 : 1;
