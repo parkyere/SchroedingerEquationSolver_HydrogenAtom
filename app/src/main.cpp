@@ -175,9 +175,14 @@ constexpr int kRelaxStepsPerTick = 1;
 constexpr double kRelaxDtau = 0.05;
 constexpr int kTickMs = 16;
 constexpr double kIsoFraction = 0.25;
-constexpr double kMeasureSigma = 0.625;  // position measurement resolution (Bohr):
-                                         // the sharpest a h = 0.625 grid resolves
-                                         // without aliasing (smaller needs finer h)
+constexpr double kMeasureSigma = 1.25;  // position measurement resolution (Bohr):
+                                        // the Heisenberg back-action deposits
+                                        // <T> = 3/(8 sigma^2) = 0.24 Ha, safely
+                                        // under the 0.5 Ha binding -- a typical
+                                        // measurement localizes the electron
+                                        // WITHOUT ionizing the atom (at the old
+                                        // one-cell 0.625 it injected 0.96 Ha and
+                                        // nearly every click blew the atom apart)
 // Display decay rate: the TRUE Einstein-A lifetime is ~1e8 a.u. (unwatchable);
 // this gives tau_display ~ 8 a.u. (~3 s of wall time). The title reports the
 // true lifetime and the acceleration factor honestly.
