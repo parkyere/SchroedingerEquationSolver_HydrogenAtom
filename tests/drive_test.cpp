@@ -1,4 +1,4 @@
-// RED: time-dependent dipole drive (transitions arc T2) -- the laser term
+// RED: time-dependent dipole drive -- the laser term
 //     V_drive(r, t) = amplitude * (axis . r) * cos(omega t)
 // entering the Strang step as scalar-coefficient half-kicks around the
 // static factors (diagonal factors commute, so the tested static tables
@@ -14,7 +14,7 @@
 //    state with |alpha(t)| = E0 t / (2 sqrt(2 w0)):
 //      <z>(t)  = -(E0 / 2 w0) t sin(w0 t)        (Ehrenfest, exact),
 //      P_n     = e^{-|a|^2} |a|^{2n} / n!         (Poisson populations);
-//    (true two-level Rabi needs the ANHARMONIC soft-Coulomb spectrum -- T3);
+//    (true two-level Rabi needs the ANHARMONIC soft-Coulomb spectrum);
 //  - SELECTION RULE: the z-polarized drive leaves the y-flavored state
 //    empty (<1_y|z|0> = 0 by symmetry) -- exact regardless of the ladder.
 

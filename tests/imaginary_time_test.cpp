@@ -56,7 +56,7 @@ TEST(ImaginaryTime, FindsHarmonicGroundState) {
 
 TEST(ImaginaryTime, FindsSoftCoulombBoundState) {
     // V = -1/sqrt(x^2+1): the 1D hydrogen stand-in. Ground state energy
-    // ~= -0.6698 (literature). This is the state the app will render first.
+    // ~= -0.6698 (literature).
     const std::vector<double> v = ses::soft_coulomb_potential(kGrid, 1.0, 1.0, 0.0);
     Field1D psi = ses::gaussian_wavepacket(kGrid, 0.5, 1.5, 0.0);
     ImaginaryTimePropagator1D relaxer{kGrid, v, 0.005};

@@ -1,4 +1,4 @@
-// RED: multi-channel quantum jumps (transitions arc T5) -- ALL tracked
+// RED: multi-channel quantum jumps -- ALL tracked
 // orbitals get their lifetimes, not just one. Decay channels compete as
 // independent Poisson processes: channel m fires at rate gamma_m * P_m with
 // P_m = |<from_m|psi>|^2, the total escape probability over dt is

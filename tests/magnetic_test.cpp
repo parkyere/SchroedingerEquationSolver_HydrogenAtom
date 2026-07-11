@@ -1,4 +1,4 @@
-// RED: the magnetic split-operator propagator (magnetic-field arc). The
+// RED: the magnetic split-operator propagator. The
 // minimal-coupling Hamiltonian for an electron in B = B z^ (symmetric gauge,
 // atomic units) is
 //     H = 1/2 p^2 + V + (B/2) L_z + (B^2/8) rho^2,

@@ -1,10 +1,11 @@
 // RED: hand-rolled 3D math for the renderer -- Vec3d operations and a
 // column-major Mat4 with perspective / look_at builders.
 //
-// Conventions pinned here (classic OpenGL, and classic bug territory):
+// Conventions pinned here (GL-style clip conventions, and classic bug
+// territory; the Vulkan renderer applies its own y-flip/depth-remap
+// clip correction on top of these):
 //  - Mat4 storage is COLUMN-MAJOR: element(row r, col c) = m[c*4 + r], so the
-//    translation vector of a transform sits at m[12], m[13], m[14] and the
-//    matrix uploads to glUniformMatrix4fv with transpose = GL_FALSE.
+//    translation vector of a transform sits at m[12], m[13], m[14].
 //  - View space is right-handed, camera looks down -Z.
 //  - NDC depth range is [-1, +1] (near plane -> -1, far plane -> +1).
 

@@ -1,13 +1,15 @@
 // RED: pick the resident eigenstate-atlas precision that fits GPU VRAM.
 //
-// The n<=6 manifold keeps 91 complex-fp32 state buffers resident (256^3 ->
-// 134,217,728 B each, ~12.2 GB). That overflows an 8 GB card: the driver pages
-// the surplus into system RAM (WDDM shared memory) and the frame rate
-// collapses. At startup the shell queries free VRAM and, when the fp32 atlas
-// would not fit, drops the buffers to fp16 (half the footprint, ~6.1 GB).
+// The tracked manifold keeps every state buffer resident in complex fp32; at
+// 256^3 the full atlas (kNumStates x kBytesPerStateFp32, ~12.2 GB) overflows
+// an 8 GB card: the driver pages the surplus into system RAM (WDDM shared
+// memory) and the frame rate collapses. At startup the shell queries free
+// VRAM and, when the fp32 atlas would not fit, drops the buffers to fp16
+// (half the footprint).
 //
-// The DECISION is pure integer arithmetic (this function); the GL query that
-// feeds it is the untested Humble-Object shell (app/src/main.cpp). Oracles:
+// The DECISION is pure integer arithmetic (this function); the Vulkan
+// VK_EXT_memory_budget query that feeds it is the untested Humble-Object
+// shell (app/src/main.cpp). Oracles:
 //   - ample VRAM              -> Fp32, fits;
 //   - fp32 overflows, fp16 ok -> Fp16, fits;
 //   - even fp16 overflows     -> Fp16, but out_fits=false (caller warns);
@@ -58,9 +60,9 @@ TEST(ChooseStatePrecision, EvenFp16OverflowsStillPicksFp16AndFlags) {
 }
 
 TEST(ChooseStatePrecision, UnmeasurableBudgetDefaultsToFp32) {
-    // The GL query returns kVramUnknown when neither NVX nor ATI meminfo is
-    // present: do NOT silently downgrade physics fidelity on a budget we
-    // cannot measure.
+    // The shell passes kVramUnknown when VK_EXT_memory_budget is unavailable:
+    // do NOT silently downgrade physics fidelity on a budget we cannot
+    // measure.
     bool fits = false;
     EXPECT_EQ(choose_state_precision(ses::kVramUnknown, kNumStates,
                                      kBytesPerStateFp32, kHeadroom, &fits),

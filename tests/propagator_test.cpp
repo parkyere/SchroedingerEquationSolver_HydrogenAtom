@@ -11,8 +11,8 @@
 //     sigma(t)  = sigma0 sqrt(1 + (t / (2 sigma0^2))^2)
 //     <p>(t)    = k0
 //     ||psi||   = 1
-// The potential path (e^{-i V dt/2}) is pinned later by the harmonic-
-// oscillator coherent-state spec (Phase 5).
+// The potential path (e^{-i V dt/2}) is pinned by the harmonic-oscillator
+// coherent-state spec (harmonic_dynamics_test).
 
 #include <core/field.hpp>
 #include <core/grid.hpp>

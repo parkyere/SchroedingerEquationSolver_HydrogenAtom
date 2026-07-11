@@ -1,4 +1,4 @@
-// RED: semiclassical emission from the oscillating dipole (radiation arc).
+// RED: semiclassical emission from the oscillating dipole.
 // A superposition of energy levels has an oscillating charge density, hence a
 // time-varying dipole d = -<r> that radiates. By Ehrenfest the dipole
 // acceleration is the mean force,

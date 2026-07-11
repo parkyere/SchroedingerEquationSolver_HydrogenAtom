@@ -1,5 +1,5 @@
 // RED: read access to the imaginary-time weight tables, so the GPU relax
-// path (docs/GPU_PLAN.md G7) consumes the TESTED tables instead of
+// path consumes the TESTED tables instead of
 // re-deriving them -- the same pattern as the real-time phase tables.
 //
 // Oracles: entries equal the defining formulas evaluated through the same

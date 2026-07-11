@@ -1,4 +1,4 @@
-// RED: real spherical harmonics + 3D orbital synthesis (T7). The radial
+// RED: real spherical harmonics + 3D orbital synthesis. The radial
 // engine gives u_nl(r) on a 1D grid; psi = (u/r) Y_lm placed onto the 3D
 // grid gives the eigenstate WITHOUT any imaginary-time ladder -- exact
 // separation of variables, the textbook route.

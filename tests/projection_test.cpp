@@ -196,7 +196,7 @@ TEST(RadialAngularProjection, StateCountIndependence) {
 }
 
 // Deterministic: fixed-order accumulation, no atomics/RNG -> two runs are
-// bit-for-bit identical (the property the GPU kernel must preserve so gpucheck
+// bit-for-bit identical (the property the GPU kernel must preserve so vkcheck
 // stays a clean bitwise-close comparison against this oracle).
 TEST(RadialAngularProjection, DeterministicRepro) {
     const Grid1D ax{-9.0, 9.0, 40};
@@ -221,7 +221,7 @@ TEST(RadialAngularProjection, DeterministicRepro) {
     }
 }
 
-// Phase 2: the static counting-sort geometry that lets the GPU deposit run one
+// The static counting-sort geometry that lets the GPU deposit run one
 // deterministic gather per radial bin (no atomics). Structural invariants: a
 // valid CSR; every in-sphere cell appears EXACTLY once and is stored in the bin
 // equal to its fp32 key; and the build is bit-for-bit reproducible.
@@ -272,10 +272,10 @@ TEST(RadialAngularProjection, StaticRadialBinIndex) {
     EXPECT_EQ(idx.bin_off, idx2.bin_off);
 }
 
-// GO/NO-GO for the GPU deposit (scoping Phase 3, risk 6.2): the GPU accumulates
+// GO/NO-GO for the GPU deposit: the GPU accumulates
 // each radial bin's g_lm in fp32 (one workgroup per bin), strictly less precise
 // than this double CPU oracle. Will fp32-per-bin accumulation stay within the
-// gpucheck tolerance (~1e-4), even on the HARD cancelling / continuum cases
+// vkcheck tolerance (~1e-4), even on the HARD cancelling / continuum cases
 // (a plane wave weights every outer bin fully and cancels hard against Y_lm)?
 // We answer it on the CPU by simulating the fp32 accumulation (conservatively:
 // sequential float, worse than the GPU's shared-memory tree reduction), then
@@ -383,7 +383,7 @@ TEST(RadialAngularProjection, Fp32PerBinAccumulationHoldsTolerance) {
 
     std::printf("[fp32-per-bin go/no-go] bound rel err = %.3e, continuum rel err = %.3e\n",
                 e_bound, e_continuum);
-    // GO if fp32-per-bin stays under the gpucheck ~1e-4 tolerance even on the
+    // GO if fp32-per-bin stays under the vkcheck ~1e-4 tolerance even on the
     // adversarial continuum case (the CPU sim is conservative vs the GPU tree).
     EXPECT_LT(e_bound, 1e-4);
     EXPECT_LT(e_continuum, 1e-4);

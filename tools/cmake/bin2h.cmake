@@ -1,5 +1,5 @@
-# bin2h.cmake: embed a binary file as a C++ header (M5: SPIR-V blobs for the
-# framework-free vkcheck harness, replacing Qt's resource system).
+# bin2h.cmake: embed a binary file as a C++ header (used to embed the baked
+# SPIR-V shader blobs; no Qt resource system involved).
 #
 # Usage: cmake -DIN=<file> -DOUT=<header> -DNAME=<symbol> -P bin2h.cmake
 # Emits: alignas(4) inline constexpr unsigned char <symbol>[];

@@ -1,5 +1,5 @@
 // RED: WavepacketSimulation -- the tested orchestration layer between the
-// physics core and the (untested) GL shell. Owns grid + potential +
+// physics core and the untested app shell. Owns grid + potential +
 // propagator + psi, advances real time, and hands the shell density frames.
 // Keeping this in core means the shell stays logic-free.
 //

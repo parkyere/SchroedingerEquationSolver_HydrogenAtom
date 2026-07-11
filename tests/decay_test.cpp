@@ -1,5 +1,5 @@
-// RED: spontaneous decay via quantum jumps (transitions arc T4) -- the
-// Monte-Carlo-wavefunction picture the user proposed: the Schrodinger
+// RED: spontaneous decay via quantum jumps (the Monte-Carlo-wavefunction
+// picture): the Schrodinger
 // equation itself carries no lifetimes, but the decay RATE follows from the
 // computed spectrum through the Einstein A coefficient (atomic units)
 //     A = (4/3) alpha^3 omega^3 |<f|r|i>|^2,

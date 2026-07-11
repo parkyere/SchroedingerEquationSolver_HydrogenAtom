@@ -1,5 +1,5 @@
-// RED: exact, unitary rotation of a 3D field about the z-axis (magnetic-field
-// arc). The paramagnetic term (B/2) L_z of the magnetic Hamiltonian is the
+// RED: exact, unitary rotation of a 3D field about the z-axis.
+// The paramagnetic term (B/2) L_z of the magnetic Hamiltonian is the
 // generator of z-rotations, so evolving psi under it is a rigid rotation --
 // but applied to the ACTUAL wavefunction, not just the display. Done by the
 // three-shear Fourier method (each shear is a per-line Fourier phase ramp),

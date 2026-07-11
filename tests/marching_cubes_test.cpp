@@ -1,8 +1,8 @@
 // RED: marching cubes -- isosurface extraction from a real scalar field on a
 // Grid3D, plus the probability_density bridge from the wavefunction.
 //
-// This is pure geometry generation (no OpenGL): the Humble-Object shell will
-// only upload the resulting mesh. Oracles:
+// This is pure geometry generation (no graphics API): the Humble-Object shell
+// will only upload the resulting mesh. Oracles:
 //  - analytic sphere: vertex radii, total area vs 4 pi R^2, outward normals;
 //  - WATERTIGHTNESS (every undirected edge shared by exactly two triangles)
 //    on the sphere and on a two-blob field -- a strong topological check on

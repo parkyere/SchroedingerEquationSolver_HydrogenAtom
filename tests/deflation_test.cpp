@@ -1,5 +1,5 @@
-// RED: excited states via deflated imaginary-time relaxation (transitions
-// arc T1). e^{-H dtau} cannot remove components along already-found lower
+// RED: excited states via deflated imaginary-time relaxation.
+// e^{-H dtau} cannot remove components along already-found lower
 // eigenstates by decay alone once they dominate -- so each step PROJECTS
 // them out (Gram-Schmidt deflation), and the flow converges to the ground
 // state of the orthogonal complement: the next excited state.

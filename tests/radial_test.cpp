@@ -1,4 +1,4 @@
-// RED: the radial engine (T7) -- lifetimes for ALL bound orbitals up to a
+// RED: the radial engine -- lifetimes for ALL bound orbitals up to a
 // requested principal quantum number. A 3D grid cannot hold Rydberg states
 // (n = 10 reaches ~400 Bohr), but the potential is spherically symmetric,
 // so the eigenproblem reduces EXACTLY to 1D per angular momentum l:
@@ -19,7 +19,7 @@
 //    tau(2p) = 1.60 ns, tau(3s) = 158 ns, tau(3p) = 5.4 ns, tau(3d) = 15.6
 //    ns; 1s and 2s are E1-stable;
 //  - the soft-core atom (a = 1): energies must match the 3D solver's ITP
-//    values and the level lifetime tau(2p) must match the T5 pipeline.
+//    values and the level lifetime tau(2p) must match the 3D GPU pipeline.
 
 #include <core/decay.hpp>
 #include <core/radial.hpp>
@@ -239,11 +239,11 @@ TEST(BoundLevelTable, SoftCoreAtomMatchesThe3DSolver) {
         }
         return ses::LevelInfo{};
     };
-    // The 3D ITP values from the 128^3 GPU solver (T5 report).
+    // Reference values: 3D ITP energies from the 128^3 GPU solver.
     EXPECT_NEAR(level(1, 0).energy, -0.2749, 2e-3);
     EXPECT_NEAR(level(2, 1).energy, -0.1129, 2e-3);
     EXPECT_NEAR(level(2, 0).energy, -0.0927, 2e-3);
-    // The T5 3D pipeline found tau(2p_z) = 1.93e8 au; the radial route must
+    // The 3D pipeline found tau(2p_z) = 1.93e8 au; the radial route must
     // agree (independent discretizations, same physics).
     EXPECT_NEAR(level(2, 1).lifetime, 1.93e8, 0.05 * 1.93e8);
 }

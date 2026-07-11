@@ -1,5 +1,5 @@
 // Validation capstone: the 3D softened-hydrogen ground state -- the electron
-// cloud the app will render. Pure test commit: all machinery already exists.
+// cloud the app renders. Validates existing machinery; introduces no new API.
 //
 // Oracles are RIGOROUS, no literature fits:
 //  - Variational window: V_soft(r) = -Z/sqrt(r^2+a^2) > -Z/r pointwise, so

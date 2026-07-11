@@ -1,5 +1,5 @@
 // RED: read access to the split-operator phase tables, so the GPU engine
-// consumes the TESTED tables instead of re-deriving them (docs/GPU_PLAN.md),
+// consumes the TESTED tables instead of re-deriving them,
 // plus dt access on the simulation session for the same reason.
 //
 // Oracles: table entries equal the defining formulas evaluated through the

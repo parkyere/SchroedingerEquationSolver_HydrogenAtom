@@ -1,5 +1,5 @@
-// RED: specification for the hand-written radix-2 FFT (the project centerpiece;
-// the split-operator propagator applies the kinetic factor in k-space with it).
+// RED: specification for the hand-written radix-2 FFT (the split-operator
+// propagator applies the kinetic factor in k-space with it).
 //
 // Convention pinned here (matches FFTW/NumPy):
 //     forward:  X_k = sum_n x_n e^{-2 pi i k n / N}   (unnormalized)

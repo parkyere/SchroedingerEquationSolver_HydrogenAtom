@@ -1,7 +1,7 @@
 // RED: specification for the 3D periodic grid, composed of three Grid1D axes.
 //
-// Memory-layout convention pinned here (load-bearing for the 3D FFT and,
-// later, for OpenGL glTexImage3D upload): X FASTEST --
+// Memory-layout convention pinned here (load-bearing for the 3D FFT and for
+// the GPU 3D-volume upload): X FASTEST --
 //     flat(i, j, k) = i + nx * (j + ny * k)
 // so x-lines are contiguous, y-stride is nx, z-stride is nx*ny.
 
