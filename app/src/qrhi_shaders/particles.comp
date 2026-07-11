@@ -1,0 +1,100 @@
+#version 450
+
+// Probability-flow particles: advect tracer particles with the Bohmian
+// velocity v = j / rho, j = Im(psi* grad psi) (atomic units), sampled from
+// the SAME bridge volume the raymarcher displays (psi in .xy; grad by
+// central differences of 6 texture taps). Particles seeded/respawned by
+// rejection sampling against |psi|^2 stay |psi|^2-distributed as the state
+// evolves (equivariance) -- the flow you see IS the probability current:
+// still for real eigenstates, circulating for m != 0 and driven states.
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) buffer Particles { vec4 part[]; };  // xyz, age
+layout(std140, binding = 1) uniform Params {
+    vec4 box_min;   // .xyz
+    vec4 box_max;   // .xyz
+    float dt;       // display advection step (au)
+    float inv_peak; // |psi|^2 normalizer (rejection sampling)
+    float lifetime; // frames until forced respawn
+    float frame;    // RNG decorrelation
+    int n_particles;
+    int animate;    // 0 = hold positions (paused)
+};
+layout(binding = 2) uniform sampler3D psi_tex;
+
+vec2 psi_at(vec3 p) {
+    // Half-texel alignment (grid point i = texel center (i+0.5)/n).
+    vec3 uvw = (p - box_min.xyz) / (box_max.xyz - box_min.xyz) +
+               0.5 / vec3(textureSize(psi_tex, 0));
+    return texture(psi_tex, uvw).xy;
+}
+
+// PCG-ish hash -> [0,1).
+float rnd(inout uint state) {
+    state = state * 747796405u + 2891336453u;
+    uint w = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    w = (w >> 22u) ^ w;
+    return float(w) / 4294967296.0;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(n_particles)) {
+        return;
+    }
+    vec4 st = part[i];
+    vec3 p = st.xyz;
+    float age = st.w;
+
+    uint rng = i * 9781u + uint(frame) * 6271u + 12345u;
+
+    vec2 s = psi_at(p);
+    float rho = dot(s, s);
+    bool dead = age > lifetime || rho * inv_peak < 1e-4 ||
+                any(lessThan(p, box_min.xyz)) ||
+                any(greaterThan(p, box_max.xyz));
+
+    if (dead) {
+        // Rejection-sample a respawn point against |psi|^2 (a few tries per
+        // frame; failures just retry next frame from a fresh draw).
+        for (int t = 0; t < 4; ++t) {
+            vec3 cand = box_min.xyz +
+                        vec3(rnd(rng), rnd(rng), rnd(rng)) *
+                            (box_max.xyz - box_min.xyz);
+            vec2 cs = psi_at(cand);
+            float crho = dot(cs, cs) * inv_peak;
+            if (rnd(rng) < crho) {
+                p = cand;
+                break;
+            }
+            p = cand;  // keep the last draw; density gate re-tests next frame
+        }
+        age = lifetime * rnd(rng) * 0.25;  // stagger lifetimes
+        part[i] = vec4(p, age);
+        return;
+    }
+
+    if (animate != 0) {
+        // Central-difference grad psi (h = one cell-ish in world units).
+        vec3 ext = box_max.xyz - box_min.xyz;
+        vec3 h = ext / 256.0;
+        vec2 dx = (psi_at(p + vec3(h.x, 0, 0)) - psi_at(p - vec3(h.x, 0, 0))) /
+                  (2.0 * h.x);
+        vec2 dy = (psi_at(p + vec3(0, h.y, 0)) - psi_at(p - vec3(0, h.y, 0))) /
+                  (2.0 * h.y);
+        vec2 dz = (psi_at(p + vec3(0, 0, h.z)) - psi_at(p - vec3(0, 0, h.z))) /
+                  (2.0 * h.z);
+        // j = Im(conj(psi) * grad psi) = re*d_im - im*d_re, per component.
+        vec3 j = vec3(s.x * dx.y - s.y * dx.x, s.x * dy.y - s.y * dy.x,
+                      s.x * dz.y - s.y * dz.x);
+        vec3 v = j / max(rho, 1e-12);
+        float speed = length(v);
+        const float vmax = 3.0;  // au/au; clamp the low-density blowup
+        if (speed > vmax) {
+            v *= vmax / speed;
+        }
+        p += v * dt;
+        age += 1.0;
+    }
+    part[i] = vec4(p, age);
+}

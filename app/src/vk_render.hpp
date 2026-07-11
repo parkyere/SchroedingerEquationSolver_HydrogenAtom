@@ -54,6 +54,12 @@ struct RenderKernels {
     std::size_t bloom_up_size = 0;
     const unsigned char* compose = nullptr;  // tonemap + bloom + dither
     std::size_t compose_size = 0;
+    const unsigned char* particles = nullptr;  // probability-flow advection
+    std::size_t particles_size = 0;
+    const unsigned char* flow_vert = nullptr;  // particle sprites
+    std::size_t flow_vert_size = 0;
+    const unsigned char* flow_frag = nullptr;
+    std::size_t flow_frag_size = 0;
 };
 
 class SceneRenderer {
@@ -70,6 +76,8 @@ public:
         float flash = 0.0f;       // photon-flash background weight, 0..1
         bool accumulate = false;  // scene static: keep temporal averaging
         float frame_index = 0.0f;  // temporal jitter/dither rotation
+        bool flow = false;          // draw the probability-flow particles
+        bool flow_animate = false;  // advance the advection (false = paused)
         VkImageView psi_volume = VK_NULL_HANDLE;  // engine bridge; null -> CPU fallback
         const ses::Mesh* mesh = nullptr;          // non-null: upload isosurface
         const std::vector<ses::Rgb>* mesh_colors = nullptr;
@@ -90,7 +98,8 @@ public:
         }
         if (!create_samplers() || !create_ubos() || !create_render_pass() ||
             !create_pipelines(blobs) || !create_static_geometry() ||
-            !create_phase_lut() || !create_post_kernels(blobs)) {
+            !create_phase_lut() || !create_post_kernels(blobs) ||
+            !create_flow(blobs)) {
             return false;
         }
         scene_set_ = arena_.allocate(*ctx_, mesh_dsl_holder_.set);
@@ -159,6 +168,34 @@ public:
         }
         VkCommandBuffer cb = shot.cb();
 
+        // Advect the probability-flow particles BEFORE the pass (their SSBO
+        // is vertex-pulled by the sprite draw inside it).
+        if (in.flow && in.cloud) {
+            FlowParams fp{};
+            fp.box_min[0] = static_cast<float>(grid_.x.xmin);
+            fp.box_min[1] = static_cast<float>(grid_.y.xmin);
+            fp.box_min[2] = static_cast<float>(grid_.z.xmin);
+            fp.box_max[0] = static_cast<float>(grid_.x.xmax);
+            fp.box_max[1] = static_cast<float>(grid_.y.xmax);
+            fp.box_max[2] = static_cast<float>(grid_.z.xmax);
+            fp.dt = 0.6f;
+            fp.inv_peak =
+                static_cast<float>(in.peak > 0.0 ? 1.0 / in.peak : 0.0);
+            fp.lifetime = 600.0f;
+            fp.frame = in.frame_index;
+            fp.n_particles = static_cast<std::int32_t>(kFlowParticles);
+            fp.animate = in.flow_animate ? 1 : 0;
+            std::memcpy(flow_ubo_.mapped, &fp, sizeof(fp));
+            vmaFlushAllocation(ctx_->allocator, flow_ubo_.alloc, 0,
+                               VK_WHOLE_SIZE);
+            particles_k_.bind(cb, particles_set_);
+            vkCmdDispatch(cb, (kFlowParticles + 255) / 256, 1, 1);
+            memory_barrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                           VK_ACCESS_SHADER_WRITE_BIT,
+                           VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+                           VK_ACCESS_SHADER_READ_BIT);
+        }
+
         const float w = in.flash;
         VkClearValue clears[2]{};
         clears[0].color = {{0.04f + 0.55f * w, 0.05f + 0.42f * w,
@@ -185,6 +222,14 @@ public:
                                         nullptr);
                 vkCmdBindVertexBuffers(cb, 0, 1, &cube_vbuf_.buf, &zero_off);
                 vkCmdDraw(cb, 36, 1, 0, 0);
+            }
+            if (in.flow) {  // additive sprites over the cloud
+                vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                  flow_pipe_);
+                vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        flow_pl_, 0, 1, &flow_set_, 0,
+                                        nullptr);
+                vkCmdDraw(cb, kFlowParticles, 1, 0, 0);
             }
         } else {
             vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, mesh_pipe_);
@@ -259,6 +304,12 @@ public:
         }
         destroy_target();
         arena_.destroy(*ctx_);
+        destroy_pipe(flow_pipe_);
+        destroy_layout(flow_pl_);
+        flow_dsl_holder_.destroy(*ctx_);
+        particles_k_.destroy(*ctx_);
+        ctx_->destroy_buffer(&flow_ubo_);
+        ctx_->destroy_buffer(&flow_buf_);
         compose_k_.destroy(*ctx_);
         up_k_.destroy(*ctx_);
         down_k_.destroy(*ctx_);
@@ -735,13 +786,17 @@ private:
         mesh_pipe_ = build_pipeline(
             blobs.mesh_vert, blobs.mesh_vert_size, blobs.mesh_frag,
             blobs.mesh_frag_size, mesh_pl_, &mesh_bind, mesh_attrs, 3,
-            /*depth=*/true, VK_CULL_MODE_NONE, /*blend=*/false);
+            /*depth=*/true, VK_CULL_MODE_NONE, kBlendOff,
+            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
         volume_pipe_ = build_pipeline(
             blobs.volume_vert, blobs.volume_vert_size, blobs.volume_frag,
             blobs.volume_frag_size, vol_pl_, &cube_bind, &cube_attr, 1,
-            /*depth=*/false, VK_CULL_MODE_FRONT_BIT, /*blend=*/true);
+            /*depth=*/false, VK_CULL_MODE_FRONT_BIT, kBlendPremultiplied,
+            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
         return mesh_pipe_ != VK_NULL_HANDLE && volume_pipe_ != VK_NULL_HANDLE;
     }
+
+    enum BlendMode { kBlendOff, kBlendPremultiplied, kBlendAdditive };
 
     VkPipeline build_pipeline(const unsigned char* vs_spv, std::size_t vs_size,
                               const unsigned char* fs_spv, std::size_t fs_size,
@@ -749,7 +804,8 @@ private:
                               const VkVertexInputBindingDescription* bind,
                               const VkVertexInputAttributeDescription* attrs,
                               std::uint32_t attr_count, bool depth,
-                              VkCullModeFlags cull, bool blend) {
+                              VkCullModeFlags cull, BlendMode blend,
+                              VkPrimitiveTopology topo) {
         VkShaderModule vs = make_module(vs_spv, vs_size);
         VkShaderModule fs = make_module(fs_spv, fs_size);
         if (vs == VK_NULL_HANDLE || fs == VK_NULL_HANDLE) {
@@ -769,7 +825,7 @@ private:
         VkPipelineVertexInputStateCreateInfo vin{};
         vin.sType =
             VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        vin.vertexBindingDescriptionCount = 1;
+        vin.vertexBindingDescriptionCount = (bind != nullptr) ? 1 : 0;
         vin.pVertexBindingDescriptions = bind;
         vin.vertexAttributeDescriptionCount = attr_count;
         vin.pVertexAttributeDescriptions = attrs;
@@ -777,7 +833,7 @@ private:
         VkPipelineInputAssemblyStateCreateInfo ia{};
         ia.sType =
             VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        ia.topology = topo;
 
         VkPipelineViewportStateCreateInfo vpst{};
         vpst.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
@@ -807,13 +863,21 @@ private:
         ba.colorWriteMask =
             VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
             VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-        if (blend) {  // premultiplied alpha (QRhi TargetBlend defaults)
+        if (blend == kBlendPremultiplied) {
             ba.blendEnable = VK_TRUE;
             ba.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
             ba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
             ba.colorBlendOp = VK_BLEND_OP_ADD;
             ba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
             ba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            ba.alphaBlendOp = VK_BLEND_OP_ADD;
+        } else if (blend == kBlendAdditive) {  // glow sprites
+            ba.blendEnable = VK_TRUE;
+            ba.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            ba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            ba.colorBlendOp = VK_BLEND_OP_ADD;
+            ba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            ba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
             ba.alphaBlendOp = VK_BLEND_OP_ADD;
         }
         VkPipelineColorBlendStateCreateInfo cbst{};
@@ -881,6 +945,130 @@ private:
                         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)) {
             return false;
         }
+        return true;
+    }
+
+    // Probability-flow particle system: the SSBO, its advection kernel, and
+    // the additive point-sprite pipeline drawn inside the scene pass.
+    bool create_flow(const RenderKernels& blobs) {
+        const auto sbuf = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        const auto cis = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        const auto ubo = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        if (!particles_k_.create(*ctx_, blobs.particles, blobs.particles_size,
+                                 {{0, sbuf}, {1, ubo}, {2, cis}})) {
+            return false;
+        }
+        // Flow draw set layout: SSBO + volume UBO + psi + LUT, vertex stage.
+        {
+            const VkDescriptorSetLayoutBinding bs[4] = {
+                {0, sbuf, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr},
+                {1, ubo, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr},
+                {2, cis, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr},
+                {3, cis, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr},
+            };
+            VkDescriptorSetLayoutCreateInfo ci{};
+            ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+            ci.bindingCount = 4;
+            ci.pBindings = bs;
+            if (vkCreateDescriptorSetLayout(ctx_->device, &ci, nullptr,
+                                            &flow_dsl_holder_.set) !=
+                VK_SUCCESS) {
+                return false;
+            }
+        }
+        VkPipelineLayoutCreateInfo plci{};
+        plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        plci.setLayoutCount = 1;
+        plci.pSetLayouts = &flow_dsl_holder_.set;
+        if (vkCreatePipelineLayout(ctx_->device, &plci, nullptr, &flow_pl_) !=
+            VK_SUCCESS) {
+            return false;
+        }
+        flow_pipe_ = build_pipeline(
+            blobs.flow_vert, blobs.flow_vert_size, blobs.flow_frag,
+            blobs.flow_frag_size, flow_pl_, nullptr, nullptr, 0,
+            /*depth=*/false, VK_CULL_MODE_NONE, kBlendAdditive,
+            VK_PRIMITIVE_TOPOLOGY_POINT_LIST);
+        if (flow_pipe_ == VK_NULL_HANDLE) {
+            return false;
+        }
+
+        // Seed: uniform positions in the inner half of the box, staggered
+        // ages; the rejection respawn converges them onto |psi|^2 quickly.
+        std::vector<float> seed(4 * kFlowParticles);
+        std::uint32_t rng = 0x9e3779b9u;
+        auto rnd = [&rng]() {
+            rng = rng * 747796405u + 2891336453u;
+            std::uint32_t w = ((rng >> ((rng >> 28u) + 4u)) ^ rng) * 277803737u;
+            w = (w >> 22u) ^ w;
+            return static_cast<float>(w) / 4294967296.0f;
+        };
+        const float ext[3] = {
+            static_cast<float>(grid_.x.xmax - grid_.x.xmin),
+            static_cast<float>(grid_.y.xmax - grid_.y.xmin),
+            static_cast<float>(grid_.z.xmax - grid_.z.xmin)};
+        const float lo[3] = {static_cast<float>(grid_.x.xmin),
+                             static_cast<float>(grid_.y.xmin),
+                             static_cast<float>(grid_.z.xmin)};
+        for (std::uint32_t i = 0; i < kFlowParticles; ++i) {
+            seed[4 * i + 0] = lo[0] + ext[0] * (0.25f + 0.5f * rnd());
+            seed[4 * i + 1] = lo[1] + ext[1] * (0.25f + 0.5f * rnd());
+            seed[4 * i + 2] = lo[2] + ext[2] * (0.25f + 0.5f * rnd());
+            seed[4 * i + 3] = 1e9f;  // born dead: respawn onto |psi|^2
+        }
+        const VkDeviceSize bytes = seed.size() * sizeof(float);
+        VkBufferCreateInfo bci{};
+        bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bci.size = bytes;
+        bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                    VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        VmaAllocationCreateInfo alc{};
+        alc.usage = VMA_MEMORY_USAGE_AUTO;
+        if (vmaCreateBuffer(ctx_->allocator, &bci, &alc, &flow_buf_.buf,
+                            &flow_buf_.alloc, nullptr) != VK_SUCCESS) {
+            return false;
+        }
+        if (!ensure_staging(bytes)) {
+            return false;
+        }
+        std::memcpy(staging_.mapped, seed.data(), bytes);
+        vmaFlushAllocation(ctx_->allocator, staging_.alloc, 0, VK_WHOLE_SIZE);
+        OneShot shot;
+        if (!shot.begin(*ctx_)) {
+            return false;
+        }
+        const VkBufferCopy up{0, 0, bytes};
+        vkCmdCopyBuffer(shot.cb(), staging_.buf, flow_buf_.buf, 1, &up);
+        memory_barrier(shot.cb(), VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       VK_ACCESS_TRANSFER_WRITE_BIT,
+                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+        shot.submit_and_wait(*ctx_);
+        shot.destroy(*ctx_);
+
+        const std::uint32_t zero16[4] = {0, 0, 0, 0};
+        if (!write_host(&flow_ubo_, zero16, sizeof(FlowParams),
+                        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)) {
+            return false;
+        }
+        particles_set_ = arena_.allocate(*ctx_, particles_k_.set_layout());
+        flow_set_ = arena_.allocate(*ctx_, flow_dsl_holder_.set);
+        if (particles_set_ == VK_NULL_HANDLE || flow_set_ == VK_NULL_HANDLE) {
+            return false;
+        }
+        arena_.write_buffer(*ctx_, particles_set_, 0, sbuf, flow_buf_.buf);
+        arena_.write_buffer(*ctx_, particles_set_, 1, ubo, flow_ubo_.buf,
+                            sizeof(FlowParams));
+        arena_.write_buffer(*ctx_, flow_set_, 0, sbuf, flow_buf_.buf);
+        arena_.write_buffer(*ctx_, flow_set_, 1, ubo, volume_ubuf_.buf,
+                            sizeof(VolumeUbo));
+        arena_.write_sampled(*ctx_, flow_set_, 3, phase_tex_.view, samp_1d_);
+        // Binding 2 (psi) of both sets is pointed per frame alongside the
+        // volume set; seed with the LUT so they are never invalid.
+        arena_.write_sampled(*ctx_, particles_set_, 2, phase_tex_.view,
+                             samp_3d_);
+        arena_.write_sampled(*ctx_, flow_set_, 2, phase_tex_.view, samp_3d_);
         return true;
     }
 
@@ -1198,7 +1386,8 @@ private:
                      rgba.size() * sizeof(float), {nx, ny, nz}, first);
     }
 
-    // Point binding 1 at the live psi volume (engine bridge or fallback).
+    // Point the psi bindings (raymarch, particle advection, sprite color)
+    // at the live volume (engine bridge or fallback).
     void point_volume_binding(VkImageView engine_view) {
         VkImageView view = engine_view;
         if (view == VK_NULL_HANDLE) {
@@ -1209,6 +1398,8 @@ private:
             return;
         }
         arena_.write_sampled(*ctx_, volume_set_, 1, view, samp_3d_);
+        arena_.write_sampled(*ctx_, particles_set_, 2, view, samp_3d_);
+        arena_.write_sampled(*ctx_, flow_set_, 2, view, samp_3d_);
         volume_bound_view_ = view;
     }
 
@@ -1301,7 +1492,11 @@ private:
             static_cast<float>(in.peak > 0.0 ? 1.0 / in.peak : 0.0);
         vol_u.absorbance = static_cast<float>(in.absorbance);
         vol_u.proton_radius = static_cast<float>(kProtonMarkerRadius);
-        vol_u.jitter_frame = in.frame_index;
+        // Rotate the raymarch jitter ONLY while accumulating: a still frame
+        // averages the rotating pattern into hundreds of effective samples,
+        // while a moving/evolving scene keeps a STATIC dither (no shimmer --
+        // the physics stays smooth on screen, as the smooth field it is).
+        vol_u.jitter_frame = in.accumulate ? in.frame_index : 0.0f;
         std::memcpy(volume_ubuf_.mapped, &vol_u, sizeof(vol_u));
 
         vmaFlushAllocation(ctx_->allocator, scene_ubuf_.alloc, 0,
@@ -1387,6 +1582,27 @@ private:
     Buffer accum_ubo_{};
     Buffer down_ubo_[3]{};
     Buffer compose_ubo_{};
+    // Probability-flow particles.
+    static constexpr std::uint32_t kFlowParticles = 49152;
+    struct alignas(16) FlowParams {
+        float box_min[4];
+        float box_max[4];
+        float dt;
+        float inv_peak;
+        float lifetime;
+        float frame;
+        std::int32_t n_particles;
+        std::int32_t animate;
+        std::int32_t p0, p1;
+    };
+    Kernel particles_k_;
+    DslHolder flow_dsl_holder_;
+    VkPipelineLayout flow_pl_ = VK_NULL_HANDLE;
+    VkPipeline flow_pipe_ = VK_NULL_HANDLE;
+    Buffer flow_buf_{};
+    Buffer flow_ubo_{};
+    VkDescriptorSet particles_set_ = VK_NULL_HANDLE;
+    VkDescriptorSet flow_set_ = VK_NULL_HANDLE;
 
     DslHolder mesh_dsl_holder_;
     DslHolder vol_dsl_holder_;

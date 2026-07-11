@@ -133,7 +133,7 @@ if(TARGET volk::volk AND TARGET GPUOpen::VulkanMemoryAllocator
             dipole_kick mean_force dipole pack_half unpack_half conj_scale
             shear axpy copy_state synth project_deposit
             bridge_store bridge_load
-            accum bloom_down bloom_up compose
+            accum bloom_down bloom_up compose particles
             fft_line8 fft_line64 fft_line256)
         set(_src "${CMAKE_CURRENT_SOURCE_DIR}/src/qrhi_shaders/${_k}.comp")
         set(_spv "${_ses_vk_spv_dir}/${_k}.spv")
@@ -153,7 +153,8 @@ if(TARGET volk::volk AND TARGET GPUOpen::VulkanMemoryAllocator
     endforeach()
     # Render shader pairs for the raw-Vulkan scene renderer (Plan B). Dots in
     # the stage extension are sanitized out of the symbol name.
-    foreach(_k IN ITEMS mesh.vert mesh.frag volume.vert volume.frag)
+    foreach(_k IN ITEMS mesh.vert mesh.frag volume.vert volume.frag
+            flow.vert flow.frag)
         string(REPLACE "." "_" _sym "${_k}")
         set(_src "${CMAKE_CURRENT_SOURCE_DIR}/src/qrhi_shaders/${_k}")
         set(_spv "${_ses_vk_spv_dir}/${_sym}.spv")

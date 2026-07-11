@@ -76,11 +76,17 @@ void main() {
     vec2 jp = gl_FragCoord.xy + 5.588238 * jitter_frame;
     float jitter = fract(52.9829189 * fract(0.06711056 * jp.x + 0.00583715 * jp.y));
 
+    // Half-texel alignment: the periodic grid puts point i at
+    // box_min + i*h (h = L/n), but texel i's CENTER is at (i+0.5)/n --
+    // without the correction the displayed cloud sits half a cell
+    // (~0.3 Bohr) off the analytic proton/world coordinates.
+    vec3 half_texel = 0.5 / vec3(textureSize(psi_tex, 0));
+
     vec3 C = vec3(0.0);
     float A = 0.0;
     for (int i = 0; i < kSteps; ++i) {
         vec3 p = eye.xyz + (tn + (float(i) + jitter) * step_len) * dir;
-        vec3 uvw = (p - box_min.xyz) / (box_max.xyz - box_min.xyz);
+        vec3 uvw = (p - box_min.xyz) / (box_max.xyz - box_min.xyz) + half_texel;
         vec2 s = texture(psi_tex, uvw).rg;
         float dens = dot(s, s) * inv_peak;
         float alpha = 1.0 - exp(-absorbance * dens * step_len);

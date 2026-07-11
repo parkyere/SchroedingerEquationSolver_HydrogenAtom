@@ -37,6 +37,9 @@
 #include <bloom_down_spv.h>
 #include <bloom_up_spv.h>
 #include <compose_spv.h>
+#include <particles_spv.h>
+#include <flow_vert_spv.h>
+#include <flow_frag_spv.h>
 
 #include <cstdio>
 
@@ -119,6 +122,12 @@ inline ses_vk::RenderKernels app_render_blobs() {
     r.bloom_up_size = k_bloom_up_spv_size;
     r.compose = k_compose_spv;
     r.compose_size = k_compose_spv_size;
+    r.particles = k_particles_spv;
+    r.particles_size = k_particles_spv_size;
+    r.flow_vert = k_flow_vert_spv;
+    r.flow_vert_size = k_flow_vert_spv_size;
+    r.flow_frag = k_flow_frag_spv;
+    r.flow_frag_size = k_flow_frag_spv_size;
     return r;
 }
 

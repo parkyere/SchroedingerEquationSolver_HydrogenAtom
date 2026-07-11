@@ -672,9 +672,13 @@ protected:
             in.flash = static_cast<float>(flash_ticks_) / 25.0f;
             --flash_ticks_;
         }
+        // Probability-flow particles (Key F): drawn over the cloud, frozen
+        // while paused so a still frame can still accumulate.
+        in.flow = flow_on_ && in.cloud;
+        in.flow_animate = !paused_;
         // Temporal accumulation: keep averaging only while NOTHING changed
-        // -- camera, display params, view mode, flash, and the psi volume
-        // itself (any bridge write this frame resets the history).
+        // -- camera, display params, view mode, flash, the psi volume
+        // itself (any bridge write resets), and no animating particles.
         in.frame_index = static_cast<float>(frame_index_++ % 4096);
         const bool scene_static =
             !volume_written_ && azimuth_ == acc_prev_.azimuth &&
@@ -682,7 +686,7 @@ protected:
             distance_ == acc_prev_.distance && peak_ == acc_prev_.peak &&
             absorbance_ == acc_prev_.absorbance && in.flash == 0.0f &&
             acc_prev_.flash == 0.0f && in.cloud == acc_prev_.cloud;
-        in.accumulate = scene_static;
+        in.accumulate = scene_static && !(in.flow && in.flow_animate);
         acc_prev_ = {azimuth_, elevation_, distance_, peak_, absorbance_,
                      in.flash, in.cloud};
         volume_written_ = false;
@@ -1364,6 +1368,12 @@ protected:
             case Qt::Key_D:
                 toggle_decay();
                 break;
+            case Qt::Key_F:
+                // Probability-current flow particles (Bohmian tracers):
+                // still for real eigenstates, swirling under drive/B-field.
+                flow_on_ = !flow_on_;
+                update();
+                break;
             case Qt::Key_L:
                 toggle_laser();
                 break;
@@ -1580,6 +1590,7 @@ private:
     } acc_prev_;
     long long frame_index_ = 0;
     bool volume_written_ = false;  // bridge wrote psi this frame
+    bool flow_on_ = false;  // Key F: probability-current flow particles
     // Qt's entire render surface: the imported scene image + one blit pass.
     QScopedPointer<QRhiTexture> scene_wrap_;  // createFrom import (non-owning)
     VkImage scene_wrapped_img_ = VK_NULL_HANDLE;
