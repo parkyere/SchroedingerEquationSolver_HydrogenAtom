@@ -8,7 +8,10 @@
         "vulkan-headers",
         "vulkan-loader",
         "vkfft",
-        "glslang",
+        {
+            "name": "glslang",
+            "features": [ "tools" ]
+        },
         "qtshadertools",
         "gtest",
         {
@@ -22,5 +25,11 @@
             "features": [ "xcb", "fontconfig" ],
             "platform": "linux"
         }
-    ]
+    ],
+    "features": {
+        "validation": {
+            "description": "Dev-time Vulkan validation layers (never linked; loader-discovered DLL). Enable with VCPKG_MANIFEST_FEATURES=validation, then set VK_ADD_LAYER_PATH=<build>/vcpkg_installed/<triplet>/bin and VK_LOADER_LAYERS_ENABLE=*validation* to activate.",
+            "dependencies": [ "vulkan-validationlayers" ]
+        }
+    }
 }
