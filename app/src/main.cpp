@@ -7,7 +7,7 @@
 // WavepacketSimulation; matrices, colormaps, marching cubes, and ALL the
 // volume-rendering math (ray_box, Beer-Lambert alpha, front-to-back
 // compositing, phase LUT) live in core and are unit-tested -- the Vulkan-GLSL
-// kernels under src/qrhi_shaders/ are line-by-line transcriptions of those
+// kernels under src/shaders/ are line-by-line transcriptions of those
 // verified formulas.
 //
 // The demo arcs (all first-principles from our own wavefunctions):

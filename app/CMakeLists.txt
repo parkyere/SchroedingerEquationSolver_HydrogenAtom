@@ -81,8 +81,8 @@ qt6_add_shaders(sesolver_app "app_shaders"
     PREFIX "/shaders"
     NOGLSL NOHLSL NOMSL
     FILES
-        src/qrhi_shaders/blit.vert
-        src/qrhi_shaders/blit.frag
+        src/shaders/blit.vert
+        src/shaders/blit.frag
     OUTPUTS
         blit.vert.qsb
         blit.frag.qsb)
@@ -137,7 +137,7 @@ if(TARGET volk::volk AND TARGET GPUOpen::VulkanMemoryAllocator
             accum bloom_down bloom_up compose particles
             occupancy occ_dilate shadow
             fft_line8 fft_line64 fft_line256)
-        set(_src "${CMAKE_CURRENT_SOURCE_DIR}/src/qrhi_shaders/${_k}.comp")
+        set(_src "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${_k}.comp")
         set(_spv "${_ses_vk_spv_dir}/${_k}.spv")
         set(_hdr "${_ses_vk_spv_dir}/${_k}_spv.h")
         add_custom_command(
@@ -158,7 +158,7 @@ if(TARGET volk::volk AND TARGET GPUOpen::VulkanMemoryAllocator
     foreach(_k IN ITEMS mesh.vert mesh.frag volume.vert volume.frag
             flow.vert flow.frag)
         string(REPLACE "." "_" _sym "${_k}")
-        set(_src "${CMAKE_CURRENT_SOURCE_DIR}/src/qrhi_shaders/${_k}")
+        set(_src "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${_k}")
         set(_spv "${_ses_vk_spv_dir}/${_sym}.spv")
         set(_hdr "${_ses_vk_spv_dir}/${_sym}_spv.h")
         add_custom_command(
