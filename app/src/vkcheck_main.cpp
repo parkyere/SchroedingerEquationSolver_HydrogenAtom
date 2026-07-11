@@ -1,28 +1,45 @@
-// sesolver_vkcheck: framework-free Vulkan verification harness (M5 Stage 0).
+// sesolver_vkcheck: framework-free Vulkan verification harness (M5).
 //
 // The raw-Vulkan analog of sesolver_qrhicheck and the seed of the eventual
 // framework-free compute core: NO Qt anywhere in this binary. volk loads the
 // loader, VMA allocates, the kernels are the SAME Vulkan-GLSL sources the
 // QRhi engine bakes with qsb -- here compiled offline by glslangValidator to
-// plain SPIR-V and embedded as C arrays (tools/cmake/bin2h.cmake). Results
-// compare against the SAME CPU double references the core tests pin, at the
-// SAME tolerances as qrhicheck, so the two harnesses cross-check each other
-// kernel by kernel as the M5 port proceeds.
+// plain SPIR-V and embedded as C arrays (tools/cmake/bin2h.cmake). Every
+// check reproduces its qrhicheck twin: same oracle data, same tolerance, so
+// the two harnesses cross-check each other kernel by kernel as the M5 port
+// proceeds. Stage 1 covers the full individual-kernel set: element-wise ops,
+// the four reductions, the fp16 codec (a compute-to-compute hazard), the
+// line FFT at N=64/256, and the 3-axis fft3 orchestration (three dispatches
+// aliasing one buffer -- the barrier pattern at the heart of the Strang
+// step, here hand-authored and policed by the validation layer).
 //
 // Validation layers: set SES_VK_VALIDATION=1 (and have the layer discoverable
 // via VK_ADD_LAYER_PATH or the SDK registry). Any validation ERROR fails the
-// run even if the numbers pass -- hand-authored barriers are load-bearing in
-// a raw-Vulkan engine, and this is the tripwire that keeps them honest.
+// run even if the numbers pass.
 //
 // Exit codes: 0 = all checks PASS, 1 = FAIL, 77 = SKIP (no Vulkan runtime /
 // device on this machine; ctest maps 77 to SKIP).
 
 #define VMA_IMPLEMENTATION
-#include "vk_device.hpp"
+#include "vk_compute.hpp"
 
 #include <core/complex.hpp>
+#include <core/fft.hpp>
+#include <core/field.hpp>
+#include <core/grid.hpp>
 
 #include <phase_multiply_spv.h>
+#include <scale_spv.h>
+#include <norm_peak_spv.h>
+#include <inner_product_spv.h>
+#include <dipole_kick_spv.h>
+#include <mean_force_spv.h>
+#include <dipole_spv.h>
+#include <pack_half_spv.h>
+#include <unpack_half_spv.h>
+#include <fft_line8_spv.h>
+#include <fft_line64_spv.h>
+#include <fft_line256_spv.h>
 
 #include <algorithm>
 #include <cmath>
@@ -33,6 +50,9 @@
 #include <vector>
 
 namespace {
+
+constexpr VkDescriptorType kStorage = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+constexpr VkDescriptorType kUniform = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 
 // Complex<double> -> interleaved rg32f, byte-identical to the qrhicheck /
 // engine upload format so all harnesses see the same fp32 inputs.
@@ -45,9 +65,68 @@ std::vector<float> to_rg32f(const std::vector<ses::Complex<double>>& src) {
     return out;
 }
 
+// Tears down a check's Vulkan objects at scope exit (declare LAST in the
+// check so its destructor runs first, while the registered objects are
+// still alive). Keeps every early return leak-free.
+class Scope {
+public:
+    explicit Scope(ses_vk::DeviceContext& ctx) : ctx_(ctx) {}
+    Scope(const Scope&) = delete;
+    Scope& operator=(const Scope&) = delete;
+    ~Scope() {
+        shot.destroy(ctx_);
+        arena.destroy(ctx_);
+        for (auto it = kernels.rbegin(); it != kernels.rend(); ++it) {
+            (*it)->destroy(ctx_);
+        }
+        for (auto it = buffers.rbegin(); it != buffers.rend(); ++it) {
+            ctx_.destroy_buffer(*it);
+        }
+    }
+    ses_vk::OneShot shot;
+    ses_vk::DescriptorArena arena;
+    std::vector<ses_vk::Kernel*> kernels;
+    std::vector<ses_vk::Buffer*> buffers;
+
+private:
+    ses_vk::DeviceContext& ctx_;
+};
+
+// staging[src_off .. src_off+bytes) -> dst[0..bytes)
+struct UploadCopy {
+    const ses_vk::Buffer* dst;
+    VkDeviceSize src_off;
+    VkDeviceSize bytes;
+};
+
+void record_uploads(VkCommandBuffer cb, const ses_vk::Buffer& staging,
+                    std::initializer_list<UploadCopy> copies) {
+    for (const UploadCopy& c : copies) {
+        const VkBufferCopy r{c.src_off, 0, c.bytes};
+        vkCmdCopyBuffer(cb, staging.buf, c.dst->buf, 1, &r);
+    }
+    ses_vk::barrier_transfer_to_compute(cb);
+}
+
+// device src[0..bytes) -> staging[0..bytes), fenced for host reads.
+void record_readback(VkCommandBuffer cb, const ses_vk::Buffer& src,
+                     const ses_vk::Buffer& staging, VkDeviceSize bytes) {
+    ses_vk::barrier_compute_to_transfer(cb);
+    const VkBufferCopy r{0, 0, bytes};
+    vkCmdCopyBuffer(cb, src.buf, staging.buf, 1, &r);
+    ses_vk::barrier_transfer_to_host(cb);
+}
+
+void flush(ses_vk::DeviceContext& ctx, const ses_vk::Buffer& b) {
+    vmaFlushAllocation(ctx.allocator, b.alloc, 0, VK_WHOLE_SIZE);
+}
+
+void invalidate(ses_vk::DeviceContext& ctx, const ses_vk::Buffer& b) {
+    vmaInvalidateAllocation(ctx.allocator, b.alloc, 0, VK_WHOLE_SIZE);
+}
+
 // psi <- psi (complex-*) phase: same data and tolerance (1e-5) as
-// qrhicheck's check_phase_multiply, run through hand-rolled Vulkan --
-// descriptor set, pipeline, staging copies, and every barrier explicit.
+// qrhicheck's check_phase_multiply.
 bool check_phase_multiply(ses_vk::DeviceContext& ctx) {
     const std::size_t n = 4096;
     std::vector<ses::Complex<double>> psi_d(n);
@@ -62,260 +141,915 @@ bool check_phase_multiply(ses_vk::DeviceContext& ctx) {
     const std::vector<float> phase_f = to_rg32f(phase_d);
     const VkDeviceSize bytes = psi_f.size() * sizeof(float);
 
-    bool pass = false;
-    ses_vk::Buffer psi{};
-    ses_vk::Buffer phase{};
-    ses_vk::Buffer staging{};  // [0,bytes) psi up + result down; [bytes,2b) phase up
-    ses_vk::Buffer ubo{};
-    VkShaderModule shader = VK_NULL_HANDLE;
-    VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
-    VkPipelineLayout layout = VK_NULL_HANDLE;
-    VkPipeline pipe = VK_NULL_HANDLE;
-    VkDescriptorPool pool = VK_NULL_HANDLE;
-    VkCommandPool cmd_pool = VK_NULL_HANDLE;
-    VkFence fence = VK_NULL_HANDLE;
-
-    // Single-exit cleanup keeps every failure path leak-free without RAII
-    // scaffolding this early in the port (M5.1 factors real wrappers).
-    const auto cleanup = [&] {
-        if (fence != VK_NULL_HANDLE) vkDestroyFence(ctx.device, fence, nullptr);
-        if (cmd_pool != VK_NULL_HANDLE)
-            vkDestroyCommandPool(ctx.device, cmd_pool, nullptr);
-        if (pool != VK_NULL_HANDLE)
-            vkDestroyDescriptorPool(ctx.device, pool, nullptr);
-        if (pipe != VK_NULL_HANDLE) vkDestroyPipeline(ctx.device, pipe, nullptr);
-        if (layout != VK_NULL_HANDLE)
-            vkDestroyPipelineLayout(ctx.device, layout, nullptr);
-        if (dsl != VK_NULL_HANDLE)
-            vkDestroyDescriptorSetLayout(ctx.device, dsl, nullptr);
-        if (shader != VK_NULL_HANDLE)
-            vkDestroyShaderModule(ctx.device, shader, nullptr);
-        ctx.destroy_buffer(&ubo);
-        ctx.destroy_buffer(&staging);
-        ctx.destroy_buffer(&phase);
-        ctx.destroy_buffer(&psi);
+    struct alignas(16) Params {
+        std::uint32_t n, pad0, pad1, pad2;
     };
+    ses_vk::Kernel k;
+    ses_vk::Buffer psi{}, phase{}, staging{}, ubo{};
+    Scope s(ctx);
+    s.kernels = {&k};
+    s.buffers = {&psi, &phase, &staging, &ubo};
+
+    if (!k.create(ctx, k_phase_multiply_spv, k_phase_multiply_spv_size,
+                  {{0, kStorage}, {1, kStorage}, {2, kUniform}})) {
+        return false;
+    }
+    if (!ctx.create_device_buffer(bytes, &psi) ||
+        !ctx.create_device_buffer(bytes, &phase) ||
+        !ctx.create_host_buffer(2 * bytes,
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                    VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                &staging) ||
+        !ctx.create_host_buffer(sizeof(Params),
+                                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &ubo)) {
+        return false;
+    }
+    std::memcpy(staging.mapped, psi_f.data(), bytes);
+    std::memcpy(static_cast<char*>(staging.mapped) + bytes, phase_f.data(),
+                bytes);
+    const Params params{static_cast<std::uint32_t>(n), 0, 0, 0};
+    std::memcpy(ubo.mapped, &params, sizeof(params));
+    flush(ctx, staging);
+    flush(ctx, ubo);
+
+    if (!s.arena.create(ctx, 1, 2, 1)) return false;
+    VkDescriptorSet set = s.arena.allocate(ctx, k.set_layout());
+    if (set == VK_NULL_HANDLE) return false;
+    s.arena.write_buffer(ctx, set, 0, kStorage, psi.buf);
+    s.arena.write_buffer(ctx, set, 1, kStorage, phase.buf);
+    s.arena.write_buffer(ctx, set, 2, kUniform, ubo.buf, sizeof(Params));
+
+    if (!s.shot.begin(ctx)) return false;
+    record_uploads(s.shot.cb(), staging,
+                   {{&psi, 0, bytes}, {&phase, bytes, bytes}});
+    k.bind(s.shot.cb(), set);
+    vkCmdDispatch(s.shot.cb(), static_cast<std::uint32_t>((n + 255) / 256), 1,
+                  1);
+    record_readback(s.shot.cb(), psi, staging, bytes);
+    if (!s.shot.submit_and_wait(ctx)) return false;
+    invalidate(ctx, staging);
+
+    const float* out = static_cast<const float*>(staging.mapped);
+    double max_err = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        const ses::Complex<double> expected = psi_d[i] * phase_d[i];
+        max_err = std::max(max_err, std::abs(out[2 * i] - expected.real()));
+        max_err = std::max(max_err, std::abs(out[2 * i + 1] - expected.imag()));
+    }
+    const bool pass = max_err < 1e-5;
+    std::printf(
+        "phase-multiply kernel (raw Vulkan): max |gpu - cpu| = %.3e  [%s]\n",
+        max_err, pass ? "PASS" : "FAIL");
+    return pass;
+}
+
+// data <- s * data, same data/tolerance as qrhicheck's check_scale.
+bool check_scale(ses_vk::DeviceContext& ctx) {
+    const std::size_t n = 4096;
+    const float sc = 0.5f;
+    std::vector<ses::Complex<double>> d0(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        const double x = static_cast<double>(i);
+        d0[i] = ses::Complex<double>{std::sin(0.7 * x) - 0.3,
+                                     std::cos(0.21 * x) + 0.4};
+    }
+    const std::vector<float> in = to_rg32f(d0);
+    const VkDeviceSize bytes = in.size() * sizeof(float);
 
     struct alignas(16) Params {
         std::uint32_t n;
-        std::uint32_t pad0, pad1, pad2;
+        float scale;
+        float pad0, pad1;
+    };
+    ses_vk::Kernel k;
+    ses_vk::Buffer data{}, staging{}, ubo{};
+    Scope s(ctx);
+    s.kernels = {&k};
+    s.buffers = {&data, &staging, &ubo};
+
+    if (!k.create(ctx, k_scale_spv, k_scale_spv_size,
+                  {{0, kStorage}, {1, kUniform}})) {
+        return false;
+    }
+    if (!ctx.create_device_buffer(bytes, &data) ||
+        !ctx.create_host_buffer(bytes,
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                    VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                &staging) ||
+        !ctx.create_host_buffer(sizeof(Params),
+                                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &ubo)) {
+        return false;
+    }
+    std::memcpy(staging.mapped, in.data(), bytes);
+    const Params params{static_cast<std::uint32_t>(n), sc, 0.0f, 0.0f};
+    std::memcpy(ubo.mapped, &params, sizeof(params));
+    flush(ctx, staging);
+    flush(ctx, ubo);
+
+    if (!s.arena.create(ctx, 1, 1, 1)) return false;
+    VkDescriptorSet set = s.arena.allocate(ctx, k.set_layout());
+    if (set == VK_NULL_HANDLE) return false;
+    s.arena.write_buffer(ctx, set, 0, kStorage, data.buf);
+    s.arena.write_buffer(ctx, set, 1, kUniform, ubo.buf, sizeof(Params));
+
+    if (!s.shot.begin(ctx)) return false;
+    record_uploads(s.shot.cb(), staging, {{&data, 0, bytes}});
+    k.bind(s.shot.cb(), set);
+    vkCmdDispatch(s.shot.cb(), static_cast<std::uint32_t>((n + 255) / 256), 1,
+                  1);
+    record_readback(s.shot.cb(), data, staging, bytes);
+    if (!s.shot.submit_and_wait(ctx)) return false;
+    invalidate(ctx, staging);
+
+    const float* out = static_cast<const float*>(staging.mapped);
+    double max_err = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        max_err = std::max(
+            max_err, std::abs(out[2 * i] - static_cast<double>(sc) * d0[i].real()));
+        max_err = std::max(max_err, std::abs(out[2 * i + 1] -
+                                             static_cast<double>(sc) *
+                                                 d0[i].imag()));
+    }
+    const bool pass = max_err < 1e-5;
+    std::printf("scale kernel (raw Vulkan): max |gpu - cpu| = %.3e  [%s]\n",
+                max_err, pass ? "PASS" : "FAIL");
+    return pass;
+}
+
+// Fixed-order tree reduction of |psi|^2 into per-workgroup (sum, max)
+// partials, finished on the host. Same data/tolerances as qrhicheck.
+bool check_norm_peak(ses_vk::DeviceContext& ctx) {
+    const std::size_t n = 20000;
+    std::vector<ses::Complex<double>> psi_d(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        const double x = static_cast<double>(i);
+        psi_d[i] = ses::Complex<double>{0.5 * std::sin(0.013 * x),
+                                        0.3 * std::cos(0.017 * x) + 0.1};
+    }
+    double cpu_sum = 0.0;
+    double cpu_peak = 0.0;
+    for (const ses::Complex<double>& z : psi_d) {
+        const double d = z.real() * z.real() + z.imag() * z.imag();
+        cpu_sum += d;
+        cpu_peak = std::max(cpu_peak, d);
+    }
+    const std::vector<float> in = to_rg32f(psi_d);
+    const VkDeviceSize psi_bytes = in.size() * sizeof(float);
+    const int groups = 256;
+    const VkDeviceSize part_bytes = 2u * groups * sizeof(float);
+
+    struct alignas(16) Params {
+        std::uint32_t n, pad0, pad1, pad2;
+    };
+    ses_vk::Kernel k;
+    ses_vk::Buffer psi{}, partials{}, staging{}, ubo{};
+    Scope s(ctx);
+    s.kernels = {&k};
+    s.buffers = {&psi, &partials, &staging, &ubo};
+
+    if (!k.create(ctx, k_norm_peak_spv, k_norm_peak_spv_size,
+                  {{0, kStorage}, {1, kUniform}, {2, kStorage}})) {
+        return false;
+    }
+    if (!ctx.create_device_buffer(psi_bytes, &psi) ||
+        !ctx.create_device_buffer(part_bytes, &partials) ||
+        !ctx.create_host_buffer(psi_bytes,
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                    VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                &staging) ||
+        !ctx.create_host_buffer(sizeof(Params),
+                                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &ubo)) {
+        return false;
+    }
+    std::memcpy(staging.mapped, in.data(), psi_bytes);
+    const Params params{static_cast<std::uint32_t>(n), 0, 0, 0};
+    std::memcpy(ubo.mapped, &params, sizeof(params));
+    flush(ctx, staging);
+    flush(ctx, ubo);
+
+    if (!s.arena.create(ctx, 1, 2, 1)) return false;
+    VkDescriptorSet set = s.arena.allocate(ctx, k.set_layout());
+    if (set == VK_NULL_HANDLE) return false;
+    s.arena.write_buffer(ctx, set, 0, kStorage, psi.buf);
+    s.arena.write_buffer(ctx, set, 1, kUniform, ubo.buf, sizeof(Params));
+    s.arena.write_buffer(ctx, set, 2, kStorage, partials.buf);
+
+    if (!s.shot.begin(ctx)) return false;
+    record_uploads(s.shot.cb(), staging, {{&psi, 0, psi_bytes}});
+    k.bind(s.shot.cb(), set);
+    vkCmdDispatch(s.shot.cb(), groups, 1, 1);
+    record_readback(s.shot.cb(), partials, staging, part_bytes);
+    if (!s.shot.submit_and_wait(ctx)) return false;
+    invalidate(ctx, staging);
+
+    const float* p = static_cast<const float*>(staging.mapped);
+    double gpu_sum = 0.0;
+    double gpu_peak = 0.0;
+    for (int g = 0; g < groups; ++g) {
+        gpu_sum += p[2 * g];
+        gpu_peak = std::max(gpu_peak, static_cast<double>(p[2 * g + 1]));
+    }
+    const double sum_rel = std::abs(gpu_sum - cpu_sum) / cpu_sum;
+    const double peak_rel = std::abs(gpu_peak - cpu_peak) / cpu_peak;
+    const bool pass = sum_rel < 1e-5 && peak_rel < 1e-6;
+    std::printf(
+        "norm/peak reduce (raw Vulkan): rel err sum %.3e, peak %.3e  [%s]\n",
+        sum_rel, peak_rel, pass ? "PASS" : "FAIL");
+    return pass;
+}
+
+// <phi|psi> complex two-input reduction. Same data/tolerance as qrhicheck.
+bool check_inner_product(ses_vk::DeviceContext& ctx) {
+    const std::size_t n = 20000;
+    std::vector<ses::Complex<double>> psi_d(n);
+    std::vector<ses::Complex<double>> phi_d(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        const double x = static_cast<double>(i);
+        psi_d[i] =
+            ses::Complex<double>{std::sin(0.019 * x) + 0.1, std::cos(0.023 * x)};
+        phi_d[i] =
+            ses::Complex<double>{std::cos(0.011 * x), std::sin(0.029 * x) - 0.2};
+    }
+    double cpu_re = 0.0;
+    double cpu_im = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        const double ar = phi_d[i].real();
+        const double ai = phi_d[i].imag();
+        const double br = psi_d[i].real();
+        const double bi = psi_d[i].imag();
+        cpu_re += ar * br + ai * bi;
+        cpu_im += ar * bi - ai * br;
+    }
+    const std::vector<float> psi_f = to_rg32f(psi_d);
+    const std::vector<float> phi_f = to_rg32f(phi_d);
+    const VkDeviceSize bytes = psi_f.size() * sizeof(float);
+    const int groups = 256;
+    const VkDeviceSize part_bytes = 2u * groups * sizeof(float);
+
+    struct alignas(16) Params {
+        std::uint32_t n, pad0, pad1, pad2;
+    };
+    ses_vk::Kernel k;
+    ses_vk::Buffer psi{}, phi{}, partials{}, staging{}, ubo{};
+    Scope s(ctx);
+    s.kernels = {&k};
+    s.buffers = {&psi, &phi, &partials, &staging, &ubo};
+
+    if (!k.create(ctx, k_inner_product_spv, k_inner_product_spv_size,
+                  {{0, kStorage}, {1, kUniform}, {2, kStorage}, {3, kStorage}})) {
+        return false;
+    }
+    if (!ctx.create_device_buffer(bytes, &psi) ||
+        !ctx.create_device_buffer(bytes, &phi) ||
+        !ctx.create_device_buffer(part_bytes, &partials) ||
+        !ctx.create_host_buffer(2 * bytes,
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                    VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                &staging) ||
+        !ctx.create_host_buffer(sizeof(Params),
+                                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &ubo)) {
+        return false;
+    }
+    std::memcpy(staging.mapped, psi_f.data(), bytes);
+    std::memcpy(static_cast<char*>(staging.mapped) + bytes, phi_f.data(), bytes);
+    const Params params{static_cast<std::uint32_t>(n), 0, 0, 0};
+    std::memcpy(ubo.mapped, &params, sizeof(params));
+    flush(ctx, staging);
+    flush(ctx, ubo);
+
+    if (!s.arena.create(ctx, 1, 3, 1)) return false;
+    VkDescriptorSet set = s.arena.allocate(ctx, k.set_layout());
+    if (set == VK_NULL_HANDLE) return false;
+    s.arena.write_buffer(ctx, set, 0, kStorage, psi.buf);
+    s.arena.write_buffer(ctx, set, 1, kUniform, ubo.buf, sizeof(Params));
+    s.arena.write_buffer(ctx, set, 2, kStorage, partials.buf);
+    s.arena.write_buffer(ctx, set, 3, kStorage, phi.buf);
+
+    if (!s.shot.begin(ctx)) return false;
+    record_uploads(s.shot.cb(), staging,
+                   {{&psi, 0, bytes}, {&phi, bytes, bytes}});
+    k.bind(s.shot.cb(), set);
+    vkCmdDispatch(s.shot.cb(), groups, 1, 1);
+    record_readback(s.shot.cb(), partials, staging, part_bytes);
+    if (!s.shot.submit_and_wait(ctx)) return false;
+    invalidate(ctx, staging);
+
+    const float* p = static_cast<const float*>(staging.mapped);
+    double gpu_re = 0.0;
+    double gpu_im = 0.0;
+    for (int g = 0; g < groups; ++g) {
+        gpu_re += p[2 * g];
+        gpu_im += p[2 * g + 1];
+    }
+    const double mag = std::sqrt(cpu_re * cpu_re + cpu_im * cpu_im);
+    const double err = std::sqrt((gpu_re - cpu_re) * (gpu_re - cpu_re) +
+                                 (gpu_im - cpu_im) * (gpu_im - cpu_im));
+    const double rel = (mag > 0.0) ? err / mag : err;
+    const bool pass = rel < 1e-5;
+    std::printf("inner-product kernel (raw Vulkan): rel err = %.3e  [%s]\n",
+                rel, pass ? "PASS" : "FAIL");
+    return pass;
+}
+
+// One dipole half-kick psi <- exp(-i theta axis.r) psi per grid cell.
+// Same data/tolerance as qrhicheck (vec4-padded vec3 geometry UBO).
+bool check_dipole_kick(ses_vk::DeviceContext& ctx) {
+    const int nx = 8;
+    const int ny = 8;
+    const int nz = 8;
+    const std::size_t n = static_cast<std::size_t>(nx * ny * nz);
+    const double box_min[3] = {-4.0, -4.0, -4.0};
+    const double cell_h[3] = {1.0, 1.1, 0.9};
+    const double axis[3] = {0.3, 0.6, -0.2};
+    const double theta = 0.15;
+
+    std::vector<ses::Complex<double>> psi_d(n);
+    std::vector<ses::Complex<double>> cpu(n);
+    for (std::size_t idx = 0; idx < n; ++idx) {
+        const double x = static_cast<double>(idx);
+        psi_d[idx] = ses::Complex<double>{std::sin(0.13 * x) + 0.2,
+                                          std::cos(0.09 * x) - 0.1};
+        const int i = static_cast<int>(idx) % nx;
+        const int j = (static_cast<int>(idx) / nx) % ny;
+        const int kk = static_cast<int>(idx) / (nx * ny);
+        const double rx = box_min[0] + i * cell_h[0];
+        const double ry = box_min[1] + j * cell_h[1];
+        const double rz = box_min[2] + kk * cell_h[2];
+        const double ang = -theta * (axis[0] * rx + axis[1] * ry + axis[2] * rz);
+        const double wr = std::cos(ang);
+        const double wi = std::sin(ang);
+        const double ar = psi_d[idx].real();
+        const double ai = psi_d[idx].imag();
+        cpu[idx] = ses::Complex<double>{ar * wr - ai * wi, ar * wi + ai * wr};
+    }
+    const std::vector<float> in = to_rg32f(psi_d);
+    const VkDeviceSize bytes = in.size() * sizeof(float);
+
+    struct alignas(16) Params {
+        std::uint32_t n;
+        std::int32_t nx;
+        std::int32_t ny;
+        float theta;
+        float box_min[4];
+        float cell_h[4];
+        float axis[4];
+    };
+    Params params{};
+    params.n = static_cast<std::uint32_t>(n);
+    params.nx = nx;
+    params.ny = ny;
+    params.theta = static_cast<float>(theta);
+    for (int c = 0; c < 3; ++c) {
+        params.box_min[c] = static_cast<float>(box_min[c]);
+        params.cell_h[c] = static_cast<float>(cell_h[c]);
+        params.axis[c] = static_cast<float>(axis[c]);
+    }
+
+    ses_vk::Kernel k;
+    ses_vk::Buffer psi{}, staging{}, ubo{};
+    Scope s(ctx);
+    s.kernels = {&k};
+    s.buffers = {&psi, &staging, &ubo};
+
+    if (!k.create(ctx, k_dipole_kick_spv, k_dipole_kick_spv_size,
+                  {{0, kStorage}, {1, kUniform}})) {
+        return false;
+    }
+    if (!ctx.create_device_buffer(bytes, &psi) ||
+        !ctx.create_host_buffer(bytes,
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                    VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                &staging) ||
+        !ctx.create_host_buffer(sizeof(Params),
+                                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &ubo)) {
+        return false;
+    }
+    std::memcpy(staging.mapped, in.data(), bytes);
+    std::memcpy(ubo.mapped, &params, sizeof(params));
+    flush(ctx, staging);
+    flush(ctx, ubo);
+
+    if (!s.arena.create(ctx, 1, 1, 1)) return false;
+    VkDescriptorSet set = s.arena.allocate(ctx, k.set_layout());
+    if (set == VK_NULL_HANDLE) return false;
+    s.arena.write_buffer(ctx, set, 0, kStorage, psi.buf);
+    s.arena.write_buffer(ctx, set, 1, kUniform, ubo.buf, sizeof(Params));
+
+    if (!s.shot.begin(ctx)) return false;
+    record_uploads(s.shot.cb(), staging, {{&psi, 0, bytes}});
+    k.bind(s.shot.cb(), set);
+    vkCmdDispatch(s.shot.cb(), static_cast<std::uint32_t>((n + 255) / 256), 1,
+                  1);
+    record_readback(s.shot.cb(), psi, staging, bytes);
+    if (!s.shot.submit_and_wait(ctx)) return false;
+    invalidate(ctx, staging);
+
+    const float* out = static_cast<const float*>(staging.mapped);
+    double max_err = 0.0;
+    for (std::size_t idx = 0; idx < n; ++idx) {
+        max_err = std::max(max_err, std::abs(out[2 * idx] - cpu[idx].real()));
+        max_err =
+            std::max(max_err, std::abs(out[2 * idx + 1] - cpu[idx].imag()));
+    }
+    const bool pass = max_err < 1e-4;
+    std::printf(
+        "dipole-kick kernel (raw Vulkan): max |gpu - cpu| = %.3e  [%s]\n",
+        max_err, pass ? "PASS" : "FAIL");
+    return pass;
+}
+
+// <grad V> = sum |psi|^2 grad V: vec4 field-input reduction. Same
+// data/tolerance as qrhicheck (grad V at binding 4).
+bool check_mean_force(ses_vk::DeviceContext& ctx) {
+    const std::size_t n = 20000;
+    std::vector<ses::Complex<double>> psi_d(n);
+    std::vector<float> grad_f(4 * n);
+    double cpu[3] = {0.0, 0.0, 0.0};
+    for (std::size_t i = 0; i < n; ++i) {
+        const double x = static_cast<double>(i);
+        psi_d[i] = ses::Complex<double>{0.4 * std::sin(0.011 * x),
+                                        0.3 * std::cos(0.013 * x) + 0.05};
+        const double gx = std::sin(0.007 * x);
+        const double gy = std::cos(0.005 * x) - 0.3;
+        const double gz = 0.2 * std::sin(0.017 * x);
+        grad_f[4 * i + 0] = static_cast<float>(gx);
+        grad_f[4 * i + 1] = static_cast<float>(gy);
+        grad_f[4 * i + 2] = static_cast<float>(gz);
+        grad_f[4 * i + 3] = 0.0f;
+        const double d =
+            psi_d[i].real() * psi_d[i].real() + psi_d[i].imag() * psi_d[i].imag();
+        cpu[0] += d * gx;
+        cpu[1] += d * gy;
+        cpu[2] += d * gz;
+    }
+    const std::vector<float> psi_f = to_rg32f(psi_d);
+    const VkDeviceSize psi_bytes = psi_f.size() * sizeof(float);
+    const VkDeviceSize grad_bytes = grad_f.size() * sizeof(float);
+    const int groups = 256;
+    const VkDeviceSize part_bytes = 4u * groups * sizeof(float);
+
+    struct alignas(16) Params {
+        std::uint32_t n, pad0, pad1, pad2;
+    };
+    ses_vk::Kernel k;
+    ses_vk::Buffer psi{}, grad{}, partials{}, staging{}, ubo{};
+    Scope s(ctx);
+    s.kernels = {&k};
+    s.buffers = {&psi, &grad, &partials, &staging, &ubo};
+
+    if (!k.create(ctx, k_mean_force_spv, k_mean_force_spv_size,
+                  {{0, kStorage}, {1, kUniform}, {2, kStorage}, {4, kStorage}})) {
+        return false;
+    }
+    if (!ctx.create_device_buffer(psi_bytes, &psi) ||
+        !ctx.create_device_buffer(grad_bytes, &grad) ||
+        !ctx.create_device_buffer(part_bytes, &partials) ||
+        !ctx.create_host_buffer(psi_bytes + grad_bytes,
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                    VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                &staging) ||
+        !ctx.create_host_buffer(sizeof(Params),
+                                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &ubo)) {
+        return false;
+    }
+    std::memcpy(staging.mapped, psi_f.data(), psi_bytes);
+    std::memcpy(static_cast<char*>(staging.mapped) + psi_bytes, grad_f.data(),
+                grad_bytes);
+    const Params params{static_cast<std::uint32_t>(n), 0, 0, 0};
+    std::memcpy(ubo.mapped, &params, sizeof(params));
+    flush(ctx, staging);
+    flush(ctx, ubo);
+
+    if (!s.arena.create(ctx, 1, 3, 1)) return false;
+    VkDescriptorSet set = s.arena.allocate(ctx, k.set_layout());
+    if (set == VK_NULL_HANDLE) return false;
+    s.arena.write_buffer(ctx, set, 0, kStorage, psi.buf);
+    s.arena.write_buffer(ctx, set, 1, kUniform, ubo.buf, sizeof(Params));
+    s.arena.write_buffer(ctx, set, 2, kStorage, partials.buf);
+    s.arena.write_buffer(ctx, set, 4, kStorage, grad.buf);
+
+    if (!s.shot.begin(ctx)) return false;
+    record_uploads(s.shot.cb(), staging,
+                   {{&psi, 0, psi_bytes}, {&grad, psi_bytes, grad_bytes}});
+    k.bind(s.shot.cb(), set);
+    vkCmdDispatch(s.shot.cb(), groups, 1, 1);
+    record_readback(s.shot.cb(), partials, staging, part_bytes);
+    if (!s.shot.submit_and_wait(ctx)) return false;
+    invalidate(ctx, staging);
+
+    const float* p = static_cast<const float*>(staging.mapped);
+    double gpu[3] = {0.0, 0.0, 0.0};
+    for (int g = 0; g < groups; ++g) {
+        gpu[0] += p[4 * g + 0];
+        gpu[1] += p[4 * g + 1];
+        gpu[2] += p[4 * g + 2];
+    }
+    const double mag =
+        std::sqrt(cpu[0] * cpu[0] + cpu[1] * cpu[1] + cpu[2] * cpu[2]);
+    const double err = std::sqrt((gpu[0] - cpu[0]) * (gpu[0] - cpu[0]) +
+                                 (gpu[1] - cpu[1]) * (gpu[1] - cpu[1]) +
+                                 (gpu[2] - cpu[2]) * (gpu[2] - cpu[2]));
+    const double rel = (mag > 0.0) ? err / mag : err;
+    const bool pass = rel < 1e-4;
+    std::printf("mean-force <grad V> (raw Vulkan): rel err = %.3e  [%s]\n", rel,
+                pass ? "PASS" : "FAIL");
+    return pass;
+}
+
+// <to| r |from>: three complex reductions with grid coordinates, 6 floats
+// per workgroup. Same data/tolerance as qrhicheck.
+bool check_dipole(ses_vk::DeviceContext& ctx) {
+    const int nx = 8;
+    const int ny = 8;
+    const int nz = 8;
+    const std::size_t n = static_cast<std::size_t>(nx * ny * nz);
+    const double box_min[3] = {-4.0, -4.0, -4.0};
+    const double cell_h[3] = {1.0, 1.1, 0.9};
+
+    std::vector<ses::Complex<double>> to_d(n);
+    std::vector<ses::Complex<double>> from_d(n);
+    double cpu[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    for (std::size_t idx = 0; idx < n; ++idx) {
+        const double x = static_cast<double>(idx);
+        to_d[idx] =
+            ses::Complex<double>{std::sin(0.11 * x) + 0.1, std::cos(0.07 * x)};
+        from_d[idx] =
+            ses::Complex<double>{std::cos(0.05 * x), std::sin(0.13 * x) - 0.2};
+        const int i = static_cast<int>(idx) % nx;
+        const int j = (static_cast<int>(idx) / nx) % ny;
+        const int kk = static_cast<int>(idx) / (nx * ny);
+        const double r[3] = {box_min[0] + i * cell_h[0],
+                             box_min[1] + j * cell_h[1],
+                             box_min[2] + kk * cell_h[2]};
+        const double ar = to_d[idx].real();
+        const double ai = to_d[idx].imag();
+        const double br = from_d[idx].real();
+        const double bi = from_d[idx].imag();
+        const double c_re = ar * br + ai * bi;
+        const double c_im = ar * bi - ai * br;
+        for (int a = 0; a < 3; ++a) {
+            cpu[2 * a + 0] += c_re * r[a];
+            cpu[2 * a + 1] += c_im * r[a];
+        }
+    }
+    const std::vector<float> to_f = to_rg32f(to_d);
+    const std::vector<float> from_f = to_rg32f(from_d);
+    const VkDeviceSize bytes = to_f.size() * sizeof(float);
+    const int groups = 256;
+    const VkDeviceSize part_bytes = 6u * groups * sizeof(float);
+
+    struct alignas(16) Params {
+        std::uint32_t n;
+        std::int32_t nx;
+        std::int32_t ny;
+        std::int32_t pad0;
+        float box_min[4];
+        float cell_h[4];
+    };
+    Params params{};
+    params.n = static_cast<std::uint32_t>(n);
+    params.nx = nx;
+    params.ny = ny;
+    for (int c = 0; c < 3; ++c) {
+        params.box_min[c] = static_cast<float>(box_min[c]);
+        params.cell_h[c] = static_cast<float>(cell_h[c]);
+    }
+
+    ses_vk::Kernel k;
+    ses_vk::Buffer fto{}, ffrom{}, partials{}, staging{}, ubo{};
+    Scope s(ctx);
+    s.kernels = {&k};
+    s.buffers = {&fto, &ffrom, &partials, &staging, &ubo};
+
+    if (!k.create(ctx, k_dipole_spv, k_dipole_spv_size,
+                  {{0, kStorage}, {1, kUniform}, {2, kStorage}, {3, kStorage}})) {
+        return false;
+    }
+    if (!ctx.create_device_buffer(bytes, &fto) ||
+        !ctx.create_device_buffer(bytes, &ffrom) ||
+        !ctx.create_device_buffer(part_bytes, &partials) ||
+        !ctx.create_host_buffer(part_bytes + 2 * bytes,
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                    VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                &staging) ||
+        !ctx.create_host_buffer(sizeof(Params),
+                                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &ubo)) {
+        return false;
+    }
+    std::memcpy(staging.mapped, to_f.data(), bytes);
+    std::memcpy(static_cast<char*>(staging.mapped) + bytes, from_f.data(),
+                bytes);
+    std::memcpy(ubo.mapped, &params, sizeof(params));
+    flush(ctx, staging);
+    flush(ctx, ubo);
+
+    if (!s.arena.create(ctx, 1, 3, 1)) return false;
+    VkDescriptorSet set = s.arena.allocate(ctx, k.set_layout());
+    if (set == VK_NULL_HANDLE) return false;
+    s.arena.write_buffer(ctx, set, 0, kStorage, fto.buf);
+    s.arena.write_buffer(ctx, set, 1, kUniform, ubo.buf, sizeof(Params));
+    s.arena.write_buffer(ctx, set, 2, kStorage, partials.buf);
+    s.arena.write_buffer(ctx, set, 3, kStorage, ffrom.buf);
+
+    if (!s.shot.begin(ctx)) return false;
+    record_uploads(s.shot.cb(), staging,
+                   {{&fto, 0, bytes}, {&ffrom, bytes, bytes}});
+    k.bind(s.shot.cb(), set);
+    vkCmdDispatch(s.shot.cb(), groups, 1, 1);
+    record_readback(s.shot.cb(), partials, staging, part_bytes);
+    if (!s.shot.submit_and_wait(ctx)) return false;
+    invalidate(ctx, staging);
+
+    const float* p = static_cast<const float*>(staging.mapped);
+    double gpu[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    for (int g = 0; g < groups; ++g) {
+        for (int c = 0; c < 6; ++c) {
+            gpu[c] += p[6 * g + c];
+        }
+    }
+    double mag2 = 0.0;
+    double err2 = 0.0;
+    for (int c = 0; c < 6; ++c) {
+        mag2 += cpu[c] * cpu[c];
+        err2 += (gpu[c] - cpu[c]) * (gpu[c] - cpu[c]);
+    }
+    const double rel = (mag2 > 0.0) ? std::sqrt(err2 / mag2) : std::sqrt(err2);
+    const bool pass = rel < 1e-4;
+    std::printf("dipole <to|r|from> (raw Vulkan): rel err = %.3e  [%s]\n", rel,
+                pass ? "PASS" : "FAIL");
+    return pass;
+}
+
+// fp16 storage codec roundtrip: pack fp32 -> half, unpack half -> fp32. Two
+// dispatches with an EXPLICIT compute-to-compute barrier on the half buffer
+// -- the read-after-write edge QRhi ordered automatically. Tolerance is fp16
+// precision, same as qrhicheck.
+bool check_fp16_roundtrip(ses_vk::DeviceContext& ctx) {
+    const std::size_t n = 4096;
+    std::vector<ses::Complex<double>> src_d(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        const double x = static_cast<double>(i);
+        src_d[i] = ses::Complex<double>{0.5 * std::sin(0.05 * x),
+                                        0.5 * std::cos(0.03 * x)};
+    }
+    const std::vector<float> src_f = to_rg32f(src_d);
+    const VkDeviceSize fp32_bytes = src_f.size() * sizeof(float);
+    const VkDeviceSize half_bytes = n * sizeof(std::uint32_t);
+
+    struct alignas(16) Params {
+        std::uint32_t n, pad0, pad1, pad2;
+    };
+    ses_vk::Kernel pack;
+    ses_vk::Kernel unpack;
+    ses_vk::Buffer src{}, half{}, dst{}, staging{}, ubo{};
+    Scope s(ctx);
+    s.kernels = {&pack, &unpack};
+    s.buffers = {&src, &half, &dst, &staging, &ubo};
+
+    if (!pack.create(ctx, k_pack_half_spv, k_pack_half_spv_size,
+                     {{0, kStorage}, {1, kUniform}, {6, kStorage}}) ||
+        !unpack.create(ctx, k_unpack_half_spv, k_unpack_half_spv_size,
+                       {{0, kStorage}, {1, kUniform}, {6, kStorage}})) {
+        return false;
+    }
+    if (!ctx.create_device_buffer(fp32_bytes, &src) ||
+        !ctx.create_device_buffer(half_bytes, &half) ||
+        !ctx.create_device_buffer(fp32_bytes, &dst) ||
+        !ctx.create_host_buffer(fp32_bytes,
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                    VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                &staging) ||
+        !ctx.create_host_buffer(sizeof(Params),
+                                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &ubo)) {
+        return false;
+    }
+    std::memcpy(staging.mapped, src_f.data(), fp32_bytes);
+    const Params params{static_cast<std::uint32_t>(n), 0, 0, 0};
+    std::memcpy(ubo.mapped, &params, sizeof(params));
+    flush(ctx, staging);
+    flush(ctx, ubo);
+
+    if (!s.arena.create(ctx, 2, 4, 2)) return false;
+    VkDescriptorSet pack_set = s.arena.allocate(ctx, pack.set_layout());
+    VkDescriptorSet unpack_set = s.arena.allocate(ctx, unpack.set_layout());
+    if (pack_set == VK_NULL_HANDLE || unpack_set == VK_NULL_HANDLE) {
+        return false;
+    }
+    s.arena.write_buffer(ctx, pack_set, 0, kStorage, src.buf);
+    s.arena.write_buffer(ctx, pack_set, 1, kUniform, ubo.buf, sizeof(Params));
+    s.arena.write_buffer(ctx, pack_set, 6, kStorage, half.buf);
+    s.arena.write_buffer(ctx, unpack_set, 0, kStorage, dst.buf);
+    s.arena.write_buffer(ctx, unpack_set, 1, kUniform, ubo.buf, sizeof(Params));
+    s.arena.write_buffer(ctx, unpack_set, 6, kStorage, half.buf);
+
+    const std::uint32_t groups = static_cast<std::uint32_t>((n + 255) / 256);
+    if (!s.shot.begin(ctx)) return false;
+    record_uploads(s.shot.cb(), staging, {{&src, 0, fp32_bytes}});
+    pack.bind(s.shot.cb(), pack_set);
+    vkCmdDispatch(s.shot.cb(), groups, 1, 1);
+    ses_vk::barrier_compute_to_compute(s.shot.cb());
+    unpack.bind(s.shot.cb(), unpack_set);
+    vkCmdDispatch(s.shot.cb(), groups, 1, 1);
+    record_readback(s.shot.cb(), dst, staging, fp32_bytes);
+    if (!s.shot.submit_and_wait(ctx)) return false;
+    invalidate(ctx, staging);
+
+    const float* out = static_cast<const float*>(staging.mapped);
+    double max_err = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        max_err = std::max(max_err, std::abs(out[2 * i] - src_d[i].real()));
+        max_err = std::max(max_err, std::abs(out[2 * i + 1] - src_d[i].imag()));
+    }
+    const bool pass = max_err < 5e-3;
+    std::printf(
+        "fp16 pack/unpack roundtrip (raw Vulkan): max |gpu - cpu| = %.3e  "
+        "[%s]\n",
+        max_err, pass ? "PASS" : "FAIL");
+    return pass;
+}
+
+// Radix-2 shared-memory line FFT at a baked N: forward unnormalized DFT of
+// one contiguous line vs ses::fft. Same data/tolerance as qrhicheck.
+bool check_line_fft(ses_vk::DeviceContext& ctx, int N, const unsigned char* spv,
+                    std::size_t spv_size) {
+    std::vector<ses::Complex<double>> line(static_cast<std::size_t>(N));
+    for (int i = 0; i < N; ++i) {
+        line[static_cast<std::size_t>(i)] =
+            ses::Complex<double>{std::sin(0.3 * i) + 0.1 * i,
+                                 std::cos(0.7 * i) - 0.2};
+    }
+    std::vector<ses::Complex<double>> cpu = line;
+    ses::fft(cpu);  // forward, unnormalized -- same convention as the kernel
+
+    const std::vector<float> in = to_rg32f(line);
+    const VkDeviceSize bytes = in.size() * sizeof(float);
+
+    struct alignas(16) Params {
+        std::int32_t mod_a, mul_b, mul_c, stride, n_lines, pad0, pad1, pad2;
+    };
+    Params params{};
+    params.mod_a = N;  // l=0 -> base = (0 % N)*1 + (0 / N)*0 = 0
+    params.mul_b = 1;
+    params.mul_c = 0;
+    params.stride = 1;
+    params.n_lines = 1;
+
+    ses_vk::Kernel k;
+    ses_vk::Buffer data{}, staging{}, ubo{};
+    Scope s(ctx);
+    s.kernels = {&k};
+    s.buffers = {&data, &staging, &ubo};
+
+    if (!k.create(ctx, spv, spv_size, {{0, kStorage}, {1, kUniform}})) {
+        return false;
+    }
+    if (!ctx.create_device_buffer(bytes, &data) ||
+        !ctx.create_host_buffer(bytes,
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                    VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                &staging) ||
+        !ctx.create_host_buffer(sizeof(Params),
+                                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &ubo)) {
+        return false;
+    }
+    std::memcpy(staging.mapped, in.data(), bytes);
+    std::memcpy(ubo.mapped, &params, sizeof(params));
+    flush(ctx, staging);
+    flush(ctx, ubo);
+
+    if (!s.arena.create(ctx, 1, 1, 1)) return false;
+    VkDescriptorSet set = s.arena.allocate(ctx, k.set_layout());
+    if (set == VK_NULL_HANDLE) return false;
+    s.arena.write_buffer(ctx, set, 0, kStorage, data.buf);
+    s.arena.write_buffer(ctx, set, 1, kUniform, ubo.buf, sizeof(Params));
+
+    if (!s.shot.begin(ctx)) return false;
+    record_uploads(s.shot.cb(), staging, {{&data, 0, bytes}});
+    k.bind(s.shot.cb(), set);
+    vkCmdDispatch(s.shot.cb(), 1, 1, 1);  // n_lines = 1 workgroup
+    record_readback(s.shot.cb(), data, staging, bytes);
+    if (!s.shot.submit_and_wait(ctx)) return false;
+    invalidate(ctx, staging);
+
+    const float* out = static_cast<const float*>(staging.mapped);
+    double max_err = 0.0;
+    for (int i = 0; i < N; ++i) {
+        max_err = std::max(
+            max_err,
+            std::abs(out[2 * i] - cpu[static_cast<std::size_t>(i)].real()));
+        max_err = std::max(
+            max_err,
+            std::abs(out[2 * i + 1] - cpu[static_cast<std::size_t>(i)].imag()));
+    }
+    const bool pass = max_err < 1e-3;
+    std::printf("line FFT N=%d (raw Vulkan): max |gpu - cpu| = %.3e  [%s]\n", N,
+                max_err, pass ? "PASS" : "FAIL");
+    return pass;
+}
+
+// 3-D forward FFT of an 8x8x8 cube: the line FFT once per axis, three
+// dispatches aliasing ONE buffer with explicit compute-to-compute barriers
+// between axes -- the multi-axis orchestration at the heart of the engine's
+// Strang step, exactly where QRhi's automatic tracking used to sit. Three
+// descriptor sets share one kernel; per-axis uniforms in three tiny UBOs.
+bool check_fft3(ses_vk::DeviceContext& ctx) {
+    const int nx = 8;
+    const int ny = 8;
+    const int nz = 8;
+    const ses::Grid1D ax{-4.0, 4.0, 8};
+    const ses::Grid3D g{ax, ax, ax};
+    ses::Field3D original{g};
+    for (int i = 0; i < original.size(); ++i) {
+        const double x = static_cast<double>(i);
+        original.data()[static_cast<std::size_t>(i)] =
+            ses::Complex<double>{std::sin(0.61 * x) + 0.15,
+                                 std::cos(1.27 * x) - 0.2};
+    }
+    ses::Field3D cpu = original;
+    ses::fft(cpu);  // 3-D forward, x/y/z line FFTs (same convention)
+
+    const std::vector<float> in = to_rg32f(original.data());
+    const VkDeviceSize bytes = in.size() * sizeof(float);
+
+    struct alignas(16) AxisParams {
+        std::int32_t mod_a, mul_b, mul_c, stride, n_lines, p0, p1, p2;
+    };
+    // {mod_a, mul_b, mul_c, stride, n_lines} per axis (ses_gpu::axis_passes).
+    const AxisParams axp[3] = {
+        {ny * nz, nx, 0, 1, ny * nz, 0, 0, 0},       // x-lines (contiguous)
+        {nx, 1, nx * ny, nx, nx * nz, 0, 0, 0},      // y-lines
+        {nx * ny, 1, 0, nx * ny, nx * ny, 0, 0, 0},  // z-lines
     };
 
-    do {
-        if (!ctx.create_device_buffer(bytes, &psi) ||
-            !ctx.create_device_buffer(bytes, &phase) ||
-            !ctx.create_host_buffer(2 * bytes,
-                                    VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-                                        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                    &staging) ||
-            !ctx.create_host_buffer(sizeof(Params),
-                                    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &ubo)) {
-            std::fprintf(stderr, "buffer create failed\n");
-            break;
-        }
-        std::memcpy(staging.mapped, psi_f.data(), bytes);
-        std::memcpy(static_cast<char*>(staging.mapped) + bytes, phase_f.data(),
-                    bytes);
-        const Params params{static_cast<std::uint32_t>(n), 0, 0, 0};
-        std::memcpy(ubo.mapped, &params, sizeof(params));
-        vmaFlushAllocation(ctx.allocator, staging.alloc, 0, VK_WHOLE_SIZE);
-        vmaFlushAllocation(ctx.allocator, ubo.alloc, 0, VK_WHOLE_SIZE);
+    ses_vk::Kernel k;
+    ses_vk::Buffer data{}, staging{}, ubo0{}, ubo1{}, ubo2{};
+    ses_vk::Buffer* ubos[3] = {&ubo0, &ubo1, &ubo2};
+    Scope s(ctx);
+    s.kernels = {&k};
+    s.buffers = {&data, &staging, &ubo0, &ubo1, &ubo2};
 
-        // Shader + pipeline from the embedded SPIR-V (bin2h aligns to 4).
-        VkShaderModuleCreateInfo smci{};
-        smci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-        smci.codeSize = k_phase_multiply_spv_size;
-        smci.pCode = reinterpret_cast<const std::uint32_t*>(k_phase_multiply_spv);
-        if (vkCreateShaderModule(ctx.device, &smci, nullptr, &shader) !=
-            VK_SUCCESS) {
-            std::fprintf(stderr, "shader module create failed\n");
-            break;
+    if (!k.create(ctx, k_fft_line8_spv, k_fft_line8_spv_size,
+                  {{0, kStorage}, {1, kUniform}})) {
+        return false;
+    }
+    if (!ctx.create_device_buffer(bytes, &data) ||
+        !ctx.create_host_buffer(bytes,
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                    VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                &staging)) {
+        return false;
+    }
+    for (int a = 0; a < 3; ++a) {
+        if (!ctx.create_host_buffer(sizeof(AxisParams),
+                                    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                    ubos[a])) {
+            return false;
         }
+        std::memcpy(ubos[a]->mapped, &axp[a], sizeof(AxisParams));
+        flush(ctx, *ubos[a]);
+    }
+    std::memcpy(staging.mapped, in.data(), bytes);
+    flush(ctx, staging);
 
-        const VkDescriptorSetLayoutBinding bindings[3] = {
-            {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
-             VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-            {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
-             VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-            {2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
-             VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        };
-        VkDescriptorSetLayoutCreateInfo dslci{};
-        dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        dslci.bindingCount = 3;
-        dslci.pBindings = bindings;
-        if (vkCreateDescriptorSetLayout(ctx.device, &dslci, nullptr, &dsl) !=
-            VK_SUCCESS) {
-            std::fprintf(stderr, "descriptor set layout create failed\n");
-            break;
+    if (!s.arena.create(ctx, 3, 3, 3)) return false;
+    VkDescriptorSet sets[3] = {};
+    for (int a = 0; a < 3; ++a) {
+        sets[a] = s.arena.allocate(ctx, k.set_layout());
+        if (sets[a] == VK_NULL_HANDLE) return false;
+        s.arena.write_buffer(ctx, sets[a], 0, kStorage, data.buf);
+        s.arena.write_buffer(ctx, sets[a], 1, kUniform, ubos[a]->buf,
+                             sizeof(AxisParams));
+    }
+
+    if (!s.shot.begin(ctx)) return false;
+    record_uploads(s.shot.cb(), staging, {{&data, 0, bytes}});
+    for (int a = 0; a < 3; ++a) {
+        if (a > 0) {
+            ses_vk::barrier_compute_to_compute(s.shot.cb());
         }
-        VkPipelineLayoutCreateInfo plci{};
-        plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        plci.setLayoutCount = 1;
-        plci.pSetLayouts = &dsl;
-        if (vkCreatePipelineLayout(ctx.device, &plci, nullptr, &layout) !=
-            VK_SUCCESS) {
-            std::fprintf(stderr, "pipeline layout create failed\n");
-            break;
-        }
-        VkComputePipelineCreateInfo cpci{};
-        cpci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-        cpci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        cpci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-        cpci.stage.module = shader;
-        cpci.stage.pName = "main";
-        cpci.layout = layout;
-        if (vkCreateComputePipelines(ctx.device, VK_NULL_HANDLE, 1, &cpci,
-                                     nullptr, &pipe) != VK_SUCCESS) {
-            std::fprintf(stderr, "compute pipeline create failed\n");
-            break;
-        }
+        k.bind(s.shot.cb(), sets[a]);
+        vkCmdDispatch(s.shot.cb(), static_cast<std::uint32_t>(axp[a].n_lines),
+                      1, 1);
+    }
+    record_readback(s.shot.cb(), data, staging, bytes);
+    if (!s.shot.submit_and_wait(ctx)) return false;
+    invalidate(ctx, staging);
 
-        const VkDescriptorPoolSize sizes[2] = {
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2},
-            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1},
-        };
-        VkDescriptorPoolCreateInfo dpci{};
-        dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        dpci.maxSets = 1;
-        dpci.poolSizeCount = 2;
-        dpci.pPoolSizes = sizes;
-        if (vkCreateDescriptorPool(ctx.device, &dpci, nullptr, &pool) !=
-            VK_SUCCESS) {
-            std::fprintf(stderr, "descriptor pool create failed\n");
-            break;
-        }
-        VkDescriptorSetAllocateInfo dsai{};
-        dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        dsai.descriptorPool = pool;
-        dsai.descriptorSetCount = 1;
-        dsai.pSetLayouts = &dsl;
-        VkDescriptorSet set = VK_NULL_HANDLE;
-        if (vkAllocateDescriptorSets(ctx.device, &dsai, &set) != VK_SUCCESS) {
-            std::fprintf(stderr, "descriptor set alloc failed\n");
-            break;
-        }
-        const VkDescriptorBufferInfo psi_info{psi.buf, 0, VK_WHOLE_SIZE};
-        const VkDescriptorBufferInfo phase_info{phase.buf, 0, VK_WHOLE_SIZE};
-        const VkDescriptorBufferInfo ubo_info{ubo.buf, 0, sizeof(Params)};
-        VkWriteDescriptorSet writes[3]{};
-        for (int i = 0; i < 3; ++i) {
-            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[i].dstSet = set;
-            writes[i].dstBinding = static_cast<std::uint32_t>(i);
-            writes[i].descriptorCount = 1;
-        }
-        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        writes[0].pBufferInfo = &psi_info;
-        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        writes[1].pBufferInfo = &phase_info;
-        writes[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        writes[2].pBufferInfo = &ubo_info;
-        vkUpdateDescriptorSets(ctx.device, 3, writes, 0, nullptr);
-
-        VkCommandPoolCreateInfo cpci2{};
-        cpci2.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-        cpci2.queueFamilyIndex = ctx.queue_family;
-        if (vkCreateCommandPool(ctx.device, &cpci2, nullptr, &cmd_pool) !=
-            VK_SUCCESS) {
-            std::fprintf(stderr, "command pool create failed\n");
-            break;
-        }
-        VkCommandBufferAllocateInfo cbai{};
-        cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        cbai.commandPool = cmd_pool;
-        cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        cbai.commandBufferCount = 1;
-        VkCommandBuffer cb = VK_NULL_HANDLE;
-        if (vkAllocateCommandBuffers(ctx.device, &cbai, &cb) != VK_SUCCESS) {
-            std::fprintf(stderr, "command buffer alloc failed\n");
-            break;
-        }
-
-        // Record: upload copies -> transfer-to-compute barrier -> dispatch ->
-        // compute-to-transfer barrier -> readback copy -> transfer-to-host
-        // barrier. This is the barrier discipline QRhi supplied implicitly;
-        // here it is the thing under test (validation layers police it).
-        VkCommandBufferBeginInfo cbbi{};
-        cbbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vkBeginCommandBuffer(cb, &cbbi);
-
-        VkBufferCopy up0{0, 0, bytes};
-        vkCmdCopyBuffer(cb, staging.buf, psi.buf, 1, &up0);
-        VkBufferCopy up1{bytes, 0, bytes};
-        vkCmdCopyBuffer(cb, staging.buf, phase.buf, 1, &up1);
-
-        VkMemoryBarrier to_compute{};
-        to_compute.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        to_compute.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        to_compute.dstAccessMask =
-            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
-                             &to_compute, 0, nullptr, 0, nullptr);
-
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
-        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0,
-                                1, &set, 0, nullptr);
-        vkCmdDispatch(cb, static_cast<std::uint32_t>((n + 255) / 256), 1, 1);
-
-        VkMemoryBarrier to_transfer{};
-        to_transfer.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        to_transfer.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        to_transfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &to_transfer,
-                             0, nullptr, 0, nullptr);
-
-        VkBufferCopy down{0, 0, bytes};
-        vkCmdCopyBuffer(cb, psi.buf, staging.buf, 1, &down);
-
-        VkMemoryBarrier to_host{};
-        to_host.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        to_host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        to_host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &to_host, 0,
-                             nullptr, 0, nullptr);
-        vkEndCommandBuffer(cb);
-
-        VkFenceCreateInfo fci{};
-        fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        if (vkCreateFence(ctx.device, &fci, nullptr, &fence) != VK_SUCCESS) {
-            std::fprintf(stderr, "fence create failed\n");
-            break;
-        }
-        VkSubmitInfo si{};
-        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        si.commandBufferCount = 1;
-        si.pCommandBuffers = &cb;
-        if (vkQueueSubmit(ctx.queue, 1, &si, fence) != VK_SUCCESS) {
-            std::fprintf(stderr, "queue submit failed\n");
-            break;
-        }
-        if (vkWaitForFences(ctx.device, 1, &fence, VK_TRUE,
-                            5ull * 1000 * 1000 * 1000) != VK_SUCCESS) {
-            std::fprintf(stderr, "fence wait failed/timed out\n");
-            break;
-        }
-        vmaInvalidateAllocation(ctx.allocator, staging.alloc, 0, VK_WHOLE_SIZE);
-
-        const float* out = static_cast<const float*>(staging.mapped);
-        double max_err = 0.0;
-        for (std::size_t i = 0; i < n; ++i) {
-            const ses::Complex<double> expected = psi_d[i] * phase_d[i];
-            max_err = std::max(max_err, std::abs(out[2 * i] - expected.real()));
-            max_err =
-                std::max(max_err, std::abs(out[2 * i + 1] - expected.imag()));
-        }
-        pass = max_err < 1e-5;
-        std::printf(
-            "phase-multiply kernel (raw Vulkan): max |gpu - cpu| = %.3e  [%s]\n",
-            max_err, pass ? "PASS" : "FAIL");
-    } while (false);
-
-    cleanup();
+    const float* out = static_cast<const float*>(staging.mapped);
+    double max_err = 0.0;
+    double max_mag = 0.0;
+    for (std::size_t i = 0; i < cpu.data().size(); ++i) {
+        max_err = std::max(max_err, std::abs(out[2 * i] - cpu.data()[i].real()));
+        max_err =
+            std::max(max_err, std::abs(out[2 * i + 1] - cpu.data()[i].imag()));
+        max_mag = std::max(max_mag, std::abs(cpu.data()[i].real()));
+        max_mag = std::max(max_mag, std::abs(cpu.data()[i].imag()));
+    }
+    const double tol = 1e-3 + 1e-5 * max_mag;
+    const bool pass = max_err < tol;
+    std::printf(
+        "fft3 8x8x8 (raw Vulkan): max |gpu - cpu| = %.3e (tol %.3e)  [%s]\n",
+        max_err, tol, pass ? "PASS" : "FAIL");
     return pass;
 }
 
@@ -339,9 +1073,22 @@ int main() {
                 ctx.validation_active ? " [validation ON]" : "");
 
     int failures = 0;
-    if (!check_phase_multiply(ctx)) {
-        ++failures;
-    }
+    failures += check_phase_multiply(ctx) ? 0 : 1;
+    failures += check_scale(ctx) ? 0 : 1;
+    failures += check_norm_peak(ctx) ? 0 : 1;
+    failures += check_inner_product(ctx) ? 0 : 1;
+    failures += check_dipole_kick(ctx) ? 0 : 1;
+    failures += check_mean_force(ctx) ? 0 : 1;
+    failures += check_dipole(ctx) ? 0 : 1;
+    failures += check_fp16_roundtrip(ctx) ? 0 : 1;
+    failures += check_line_fft(ctx, 64, k_fft_line64_spv, k_fft_line64_spv_size)
+                    ? 0
+                    : 1;
+    failures +=
+        check_line_fft(ctx, 256, k_fft_line256_spv, k_fft_line256_spv_size)
+            ? 0
+            : 1;
+    failures += check_fft3(ctx) ? 0 : 1;
 
     const int verrs = ses_vk::g_validation_errors.load();
     if (ctx.validation_active && verrs != 0) {
