@@ -166,15 +166,8 @@ public:
             }
             // Boundary absorber: (mask, 0) complex buffer (interior = 1) so
             // the elementwise multiply damps outgoing flux each real-time step.
-            {
-                const std::vector<double> mask =
-                    ses::absorbing_mask(sim_.grid(), kAbsorbWidth);
-                ses::Field3D mf{sim_.grid()};
-                for (std::size_t i = 0; i < mf.data().size(); ++i) {
-                    mf.data()[i] = ses::Complex<double>{mask[i], 0.0};
-                }
-                mask_buf_ = engine_.create_state_buffer(mf.data());
-            }
+            absorber_on_ = engine_.set_absorber(
+                ses::absorbing_mask(sim_.grid(), kAbsorbWidth));
             // A slider moved before gpu_ok_ stored its value but could not
             // upload the augmented half-potential: re-apply to match the UI.
             if (efield_e0_ > 0.0 || bfield_b_ > 0.0) {
@@ -732,20 +725,20 @@ private:
             // phase cos(w t) stays continuous across batches/pauses.
             const ses::DipoleDrive d{laser_axis(), laser_e0_, laser_omega_};
             engine_.driven_step(d, sim_.time() + gpu_time_, sim_.dt(),
-                                pending_gpu_steps_, mask_buf_, true);
+                                pending_gpu_steps_, absorber_on_, true);
         } else if (bfield_b_ > 0.0) {
             // Minimal-coupling magnetic step: static E + diamagnetic are
             // already folded into the half-potential (upload_field_tables);
             // the paramagnetic L_axis is the exact three-shear rotation.
             engine_.magnetic_step(bfield_axis_,
                                   0.5 * bfield_b_ * (0.5 * sim_.dt()),
-                                  pending_gpu_steps_, mask_buf_, true);
+                                  pending_gpu_steps_, absorber_on_, true);
         } else {
             // The static E-field (if any) is folded into the half-potential,
             // so a plain step polarizes / field-ionizes correctly. The
             // absorbing mask and the display bridge record into the same
             // submission (batch tail).
-            engine_.step(pending_gpu_steps_, mask_buf_, true);
+            engine_.step(pending_gpu_steps_, absorber_on_, true);
         }
         // Time is credited where steps EXECUTE, so a stalled or
         // occluded paint cannot desync the clock from the state.
@@ -1200,7 +1193,7 @@ private:
     bool volume_written_ = false;  // bridge wrote psi this frame
     long long ticks_ = 0;
 
-    int mask_buf_ = -1;  // boundary absorber (mask, 0) complex state handle
+    bool absorber_on_ = false;  // real R32 absorber uploaded (set_absorber)
     std::mt19937 rng_{std::random_device{}()};
 };
 

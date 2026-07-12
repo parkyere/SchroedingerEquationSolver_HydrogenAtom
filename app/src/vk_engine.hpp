@@ -56,6 +56,8 @@ struct EngineKernels {
     std::size_t half_mul_size = 0;
     const unsigned char* kin_mul = nullptr;   // kin_mul.comp (1D k^2 tables)
     std::size_t kin_mul_size = 0;
+    const unsigned char* damp = nullptr;      // damp_mul.comp (real absorber)
+    std::size_t damp_size = 0;
     std::size_t mul_size = 0;
     const unsigned char* conj = nullptr;   // conj_scale.comp
     std::size_t conj_size = 0;
@@ -173,6 +175,10 @@ public:
                               {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
                               {3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
                               {4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER}}) ||
+            !damp_.create(ctx, blobs.damp, blobs.damp_size,
+                          {{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
+                           {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
+                           {2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER}}) ||
             !conj_.create(ctx, blobs.conj, blobs.conj_size,
                           {{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
                            {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER}}) ||
@@ -417,7 +423,7 @@ public:
     // a compute-to-compute barrier precedes every psi-aliasing dispatch.
     // mask_handle >= 0 records the absorbing-mask multiply and bridge=true
     // the psi -> volume store into the SAME submission (no extra fences).
-    void step(int nsteps, int mask_handle = -1, bool bridge = false) {
+    void step(int nsteps, bool absorb = false, bool bridge = false) {
         OneShot shot;
         if (!shot.begin(*ctx_)) {
             return;
@@ -426,7 +432,7 @@ public:
         for (int s = 0; s < nsteps; ++s) {
             run_step_body(r, half_mul_, halfv_set_, kin_mul_, kin3_set_);
         }
-        record_batch_tail(shot.cb(), mask_handle, bridge);
+        record_batch_tail(shot.cb(), absorb, bridge);
         shot.submit_and_wait(*ctx_);
         shot.destroy(*ctx_);
     }
@@ -436,7 +442,7 @@ public:
     // parameters live in dynamic-offset slots of ONE host-mapped UBO and the
     // whole batch records as a single submission.
     void driven_step(const ses::DipoleDrive& d, double t0, double dt,
-                     int nsteps, int mask_handle = -1, bool bridge = false) {
+                     int nsteps, bool absorb = false, bool bridge = false) {
         const int kicks = 2 * nsteps;
         if (!ensure_kick_capacity(kicks)) {
             return;
@@ -468,7 +474,7 @@ public:
             r.dispatch_dyn(kick_, kick_set_, mul_groups_,
                            static_cast<std::uint32_t>(2 * s + 1) * kick_stride_);
         }
-        record_batch_tail(shot.cb(), mask_handle, bridge);
+        record_batch_tail(shot.cb(), absorb, bridge);
         shot.submit_and_wait(*ctx_);
         shot.destroy(*ctx_);
     }
@@ -477,6 +483,37 @@ public:
     // magnetic/Stark run); the half-kick phase is computed in-shader.
     bool set_potential(const std::vector<double>& v) {
         return upload_potential(v);
+    }
+
+    // The absorbing-boundary mask as a REAL R32 buffer (engine-owned);
+    // batches damp with it when their absorb flag is set.
+    bool set_absorber(const std::vector<double>& mask) {
+        if (damp_buf_.buf == VK_NULL_HANDLE &&
+            !ctx_->create_device_buffer(cells_ * sizeof(float), &damp_buf_)) {
+            return false;
+        }
+        std::vector<float> mf(cells_);
+        for (std::size_t i = 0; i < cells_; ++i) {
+            mf[i] = static_cast<float>(mask[i]);
+        }
+        if (!upload_raw(damp_buf_, mf.data(), cells_ * sizeof(float))) {
+            return false;
+        }
+        if (damp_set_ == VK_NULL_HANDLE) {
+            damp_set_ = arena_.allocate(*ctx_, damp_.set_layout());
+            if (damp_set_ == VK_NULL_HANDLE) {
+                return false;
+            }
+            arena_.write_buffer(*ctx_, damp_set_, 0,
+                                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, psi_.buf);
+            arena_.write_buffer(*ctx_, damp_set_, 1,
+                                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                damp_buf_.buf);
+            arena_.write_buffer(*ctx_, damp_set_, 2,
+                                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                                muln_ubo_.buf, sizeof(MulParams));
+        }
+        return true;
     }
 
     // Exact three-shear rotation of psi about coordinate `axis` by theta --
@@ -502,7 +539,7 @@ public:
     // the batch, so the two shear parameter sets are staged once and the
     // whole batch records as one submission.
     void magnetic_step(int axis, double half_angle, int nsteps,
-                       int mask_handle = -1, bool bridge = false) {
+                       bool absorb = false, bool bridge = false) {
         const int b = (axis + 1) % 3;
         const int c = (axis + 2) % 3;
         stage_rotation_ubos(b, c, half_angle);
@@ -516,7 +553,7 @@ public:
             run_step_body(r, half_mul_, halfv_set_, kin_mul_, kin3_set_);
             record_rotation(r, b, c);
         }
-        record_batch_tail(shot.cb(), mask_handle, bridge);
+        record_batch_tail(shot.cb(), absorb, bridge);
         shot.submit_and_wait(*ctx_);
         shot.destroy(*ctx_);
     }
@@ -731,14 +768,11 @@ public:
     // psi <- psi * state (elementwise): the absorbing-boundary damp.
     // Record the real-time batch tail: the absorbing-mask multiply and/or
     // the psi -> volume bridge into an ALREADY-recording command buffer.
-    void record_batch_tail(VkCommandBuffer cb, int mask_handle, bool bridge) {
-        if (mask_handle >= 0) {
-            State* st = state_at(mask_handle);
-            if (st != nullptr && !st->is_half) {
-                barrier_compute_to_compute(cb);
-                mul_.bind(cb, st->mul_set);
-                vkCmdDispatch(cb, mul_groups_, 1, 1);
-            }
+    void record_batch_tail(VkCommandBuffer cb, bool absorb, bool bridge) {
+        if (absorb && damp_set_ != VK_NULL_HANDLE) {
+            barrier_compute_to_compute(cb);
+            damp_.bind(cb, damp_set_);
+            vkCmdDispatch(cb, mul_groups_, 1, 1);
         }
         // store_set_ (not ensure_volume): lazy creation submits its own
         // OneShot, which must never run while THIS cb is recording (the
@@ -1284,6 +1318,7 @@ public:
         mul_.destroy(*ctx_);
         half_mul_.destroy(*ctx_);
         kin_mul_.destroy(*ctx_);
+        damp_.destroy(*ctx_);
         ctx_->destroy_buffer(&relax_kin_);
         ctx_->destroy_buffer(&relax_half_);
         ctx_->destroy_buffer(&decode_scratch_[1]);
@@ -1321,6 +1356,7 @@ public:
         ctx_->destroy_buffer(&kz2_buf_);
         ctx_->destroy_buffer(&halfp_ubo_);
         ctx_->destroy_buffer(&kinp_ubo_);
+        ctx_->destroy_buffer(&damp_buf_);
         ctx_->destroy_buffer(&psi_);
         ctx_ = nullptr;
     }
@@ -2163,6 +2199,7 @@ private:
     Kernel mul_;
     Kernel half_mul_;
     Kernel kin_mul_;
+    Kernel damp_;
     Kernel conj_;
     Kernel fft_;
     Kernel norm_;
@@ -2199,6 +2236,7 @@ private:
     Buffer kz2_buf_{};
     Buffer halfp_ubo_{};
     Buffer kinp_ubo_{};
+    Buffer damp_buf_{};  // real absorber mask, R32
     double dt_step_ = 0.0;
     Buffer partials_{};
     Buffer staging_{};
@@ -2228,6 +2266,7 @@ private:
 
     VkDescriptorSet halfv_set_ = VK_NULL_HANDLE;
     VkDescriptorSet kin3_set_ = VK_NULL_HANDLE;
+    VkDescriptorSet damp_set_ = VK_NULL_HANDLE;
     VkDescriptorSet conj1_set_ = VK_NULL_HANDLE;
     VkDescriptorSet conjN_set_ = VK_NULL_HANDLE;
     VkDescriptorSet fft_set_[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE,

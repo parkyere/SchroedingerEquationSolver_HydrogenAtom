@@ -41,6 +41,7 @@
 #include <phase_multiply_spv.h>
 #include <half_mul_spv.h>
 #include <kin_mul_spv.h>
+#include <damp_mul_spv.h>
 #include <conj_scale_spv.h>
 #include <scale_spv.h>
 #include <norm_peak_spv.h>
@@ -1089,6 +1090,8 @@ ses_vk::EngineKernels engine_blobs_8() {
     b.half_mul_size = k_half_mul_spv_size;
     b.kin_mul = k_kin_mul_spv;
     b.kin_mul_size = k_kin_mul_spv_size;
+    b.damp = k_damp_mul_spv;
+    b.damp_size = k_damp_mul_spv_size;
     b.conj = k_conj_scale_spv;
     b.conj_size = k_conj_scale_spv_size;
     b.fft = k_fft_line8_spv;
@@ -1186,6 +1189,56 @@ bool check_engine_step(ses_vk::DeviceContext& ctx) {
     }
     engine.set_use_vkfft(true);
     return all_pass;
+}
+
+// Real-absorber batch tail: step(5, absorb) vs CPU 5 Strang steps followed
+// by ONE elementwise mask multiply (the tail damps once per batch). fp32
+// step tolerance; the mask itself multiplies exactly.
+bool check_engine_absorber(ses_vk::DeviceContext& ctx) {
+    const ses::Grid1D axis{-4.0, 4.0, 8};
+    const ses::Grid3D g{axis, axis, axis};
+    const std::vector<double> v =
+        ses::soft_coulomb_potential(g, 1.0, 1.0, ses::Vec3d{});
+    const double dt = 0.02;
+    const ses::SplitOperator3D cpu_prop{g, v, dt};
+    const std::vector<double> mask = ses::absorbing_mask(g, 2.0);
+    ses::Field3D psi0 = ses::gaussian_wavepacket(g, ses::Vec3d{1.0, 0.0, 0.0},
+                                                 ses::Vec3d{1.2, 1.2, 1.2},
+                                                 ses::Vec3d{0.0, 0.5, 0.0});
+    ses_vk::Engine engine;
+    if (!engine.initialize(ctx, g, engine_blobs_8(), v, dt, psi0.data()) ||
+        !engine.set_absorber(mask)) {
+        std::printf("engine absorber tail: init FAIL\n");
+        return false;
+    }
+    engine.step(5, /*absorb=*/true);
+    std::vector<float> gpu_out;
+    if (!engine.readback(gpu_out)) {
+        std::printf("engine absorber tail: readback FAIL\n");
+        return false;
+    }
+    ses::Field3D cpu = psi0;
+    cpu_prop.step(cpu, 5);
+    for (std::size_t i = 0; i < cpu.data().size(); ++i) {
+        cpu.data()[i] = cpu.data()[i] * ses::Complex<double>{mask[i], 0.0};
+    }
+    double max_err = 0.0;
+    double max_mag = 0.0;
+    for (std::size_t i = 0; i < cpu.data().size(); ++i) {
+        max_err = std::max(max_err,
+                           std::abs(gpu_out[2 * i] - cpu.data()[i].real()));
+        max_err = std::max(
+            max_err, std::abs(gpu_out[2 * i + 1] - cpu.data()[i].imag()));
+        max_mag = std::max(max_mag, std::abs(cpu.data()[i].real()));
+        max_mag = std::max(max_mag, std::abs(cpu.data()[i].imag()));
+    }
+    const double tol = 1e-4 + 1e-5 * max_mag;
+    const bool pass = max_err < tol;
+    std::printf(
+        "engine absorber tail (real mask): max |gpu - cpu| = %.3e (tol %.3e)  "
+        "[%s]\n",
+        max_err, tol, pass ? "PASS" : "FAIL");
+    return pass;
 }
 
 #ifdef SES_HAVE_VKFFT
@@ -1930,6 +1983,7 @@ int main() {
             : 1;
     failures += check_fft3(ctx) ? 0 : 1;
     failures += check_engine_step(ctx) ? 0 : 1;
+    failures += check_engine_absorber(ctx) ? 0 : 1;
     failures += check_engine_relax(ctx) ? 0 : 1;
     failures += check_engine_driven(ctx) ? 0 : 1;
     failures += check_engine_magnetic(ctx) ? 0 : 1;

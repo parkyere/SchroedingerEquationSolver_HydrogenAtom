@@ -12,6 +12,7 @@
 #include <phase_multiply_spv.h>
 #include <half_mul_spv.h>
 #include <kin_mul_spv.h>
+#include <damp_mul_spv.h>
 #include <conj_scale_spv.h>
 #include <norm_peak_spv.h>
 #include <scale_spv.h>
@@ -60,6 +61,8 @@ inline ses_vk::EngineKernels app_engine_blobs(int n) {
     b.half_mul_size = k_half_mul_spv_size;
     b.kin_mul = k_kin_mul_spv;
     b.kin_mul_size = k_kin_mul_spv_size;
+    b.damp = k_damp_mul_spv;
+    b.damp_size = k_damp_mul_spv_size;
     b.conj = k_conj_scale_spv;
     b.conj_size = k_conj_scale_spv_size;
     b.norm = k_norm_peak_spv;

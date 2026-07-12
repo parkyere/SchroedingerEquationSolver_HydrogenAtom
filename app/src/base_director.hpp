@@ -74,13 +74,8 @@ public:
             return;
         }
         if (absorber_width() > 0.0) {
-            const std::vector<double> mask =
-                ses::absorbing_mask(sim_.grid(), absorber_width());
-            ses::Field3D mf{sim_.grid()};
-            for (std::size_t i = 0; i < mf.data().size(); ++i) {
-                mf.data()[i] = ses::Complex<double>{mask[i], 0.0};
-            }
-            mask_buf_ = engine_.create_state_buffer(mf.data());
+            absorber_on_ = engine_.set_absorber(
+                ses::absorbing_mask(sim_.grid(), absorber_width()));
         }
         on_gpu_ready();
     }
@@ -305,7 +300,7 @@ protected:
                 engine_.scale(static_cast<float>(1.0 / std::sqrt(np.sum)));
             }
         }
-        engine_.step(pending_gpu_steps_, mask_buf_, true);
+        engine_.step(pending_gpu_steps_, absorber_on_, true);
         gpu_time_ += pending_gpu_steps_ * sim_.dt();
         after_step_batch();
     }
@@ -422,7 +417,7 @@ protected:
     bool volume_written_ = false;
     long long ticks_ = 0;
 
-    int mask_buf_ = -1;
+    bool absorber_on_ = false;
     std::mt19937 rng_{std::random_device{}()};
 };
 
