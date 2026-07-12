@@ -36,6 +36,7 @@
 #include <core/decay.hpp>
 #include <core/drive.hpp>
 #include <core/grid.hpp>
+#include <core/spectral.hpp>
 #include <core/vec.hpp>
 
 #include <algorithm>
@@ -51,6 +52,10 @@ namespace ses_vk {
 // storage (embedded C arrays in the harness; a file loader later).
 struct EngineKernels {
     const unsigned char* mul = nullptr;    // phase_multiply.comp
+    const unsigned char* half_mul = nullptr;  // half_mul.comp (in-shader V phase)
+    std::size_t half_mul_size = 0;
+    const unsigned char* kin_mul = nullptr;   // kin_mul.comp (1D k^2 tables)
+    std::size_t kin_mul_size = 0;
     std::size_t mul_size = 0;
     const unsigned char* conj = nullptr;   // conj_scale.comp
     std::size_t conj_size = 0;
@@ -88,6 +93,19 @@ struct EngineKernels {
     std::size_t unpack_size = 0;
 };
 
+struct HalfMulParams {
+    std::uint32_t n;
+    float coef;  // -dt/2
+    float pad0;
+    float pad1;
+};
+struct KinMulParams {
+    std::uint32_t n;
+    std::int32_t nx;
+    std::int32_t ny;
+    float coef;  // -dt/2
+};
+
 class Engine {
 public:
     // Free-energy estimate + normalized peak density from the per-step
@@ -109,11 +127,13 @@ public:
 
     // half_v / kinetic are SplitOperator3D's phase tables; psi0 the initial
     // field. Cubic grids only (one baked fft_line<n>).
+    // The propagator's phases are computed IN-SHADER from the scalar
+    // potential (R32) and three 1D k^2 tables -- no complex phase tables.
     bool initialize(DeviceContext& ctx, const ses::Grid3D& grid,
                     const EngineKernels& blobs,
-                    const std::vector<ses::Complex<double>>& half_v,
-                    const std::vector<ses::Complex<double>>& kinetic,
+                    const std::vector<double>& potential, double dt,
                     const std::vector<ses::Complex<double>>& psi0) {
+        dt_step_ = dt;
         ctx_ = &ctx;
         grid_ = grid;
         n_ = grid.x.n;
@@ -143,6 +163,16 @@ public:
                          {{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
                           {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
                           {2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER}}) ||
+            !half_mul_.create(ctx, blobs.half_mul, blobs.half_mul_size,
+                              {{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
+                               {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
+                               {2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER}}) ||
+            !kin_mul_.create(ctx, blobs.kin_mul, blobs.kin_mul_size,
+                             {{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
+                              {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
+                              {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
+                              {3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
+                              {4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER}}) ||
             !conj_.create(ctx, blobs.conj, blobs.conj_size,
                           {{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
                            {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER}}) ||
@@ -216,8 +246,16 @@ public:
         }
 
         if (!ctx.create_device_buffer(field_bytes_, &psi_) ||
-            !ctx.create_device_buffer(field_bytes_, &half_) ||
-            !ctx.create_device_buffer(field_bytes_, &kin_) ||
+            !ctx.create_device_buffer(cells_ * sizeof(float), &v_buf_) ||
+            !ctx.create_device_buffer(static_cast<VkDeviceSize>(n_) *
+                                          sizeof(float),
+                                      &kx2_buf_) ||
+            !ctx.create_device_buffer(static_cast<VkDeviceSize>(n_) *
+                                          sizeof(float),
+                                      &ky2_buf_) ||
+            !ctx.create_device_buffer(static_cast<VkDeviceSize>(n_) *
+                                          sizeof(float),
+                                      &kz2_buf_) ||
             !ctx.create_device_buffer(2 * kGroups * sizeof(float), &partials_) ||
             !ctx.create_host_buffer(field_bytes_,
                                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
@@ -231,6 +269,10 @@ public:
         // submission fence-waits, so no in-flight aliasing; the scale UBO is
         // the only one rewritten, between submissions).
         const MulParams muln{static_cast<std::uint32_t>(cells_), 0, 0, 0};
+        const HalfMulParams halfp{static_cast<std::uint32_t>(cells_),
+                                  static_cast<float>(-0.5 * dt), 0.0f, 0.0f};
+        const KinMulParams kinp{static_cast<std::uint32_t>(cells_), grid.x.n,
+                                grid.y.n, static_cast<float>(-0.5 * dt)};
         const ConjParams conj1{static_cast<std::uint32_t>(cells_), 1.0f, 0.0f,
                                0.0f};
         const ConjParams conjN{static_cast<std::uint32_t>(cells_),
@@ -246,7 +288,9 @@ public:
         const ConjParams conjA{static_cast<std::uint32_t>(cells_),
                                1.0f / static_cast<float>(n_), 0.0f, 0.0f};
         const ShearParams shear_zero{};
-        if (!write_ubo(&muln_ubo_, &muln, sizeof(muln)) ||
+        if (!write_ubo(&halfp_ubo_, &halfp, sizeof(halfp)) ||
+            !write_ubo(&kinp_ubo_, &kinp, sizeof(kinp)) ||
+            !write_ubo(&muln_ubo_, &muln, sizeof(muln)) ||
             !write_ubo(&conj1_ubo_, &conj1, sizeof(conj1)) ||
             !write_ubo(&conjN_ubo_, &conjN, sizeof(conjN)) ||
             !write_ubo(&fft_ubo_[0], &fftp[0], sizeof(FftParams)) ||
@@ -281,8 +325,30 @@ public:
         if (!arena_.create(ctx_ ? *ctx_ : ctx, 96, 192, 96, 2, 4)) {
             return false;
         }
-        half_set_ = make_mul_set(half_.buf);
-        kin_set_ = make_mul_set(kin_.buf);
+        halfv_set_ = arena_.allocate(*ctx_, half_mul_.set_layout());
+        if (halfv_set_ != VK_NULL_HANDLE) {
+            arena_.write_buffer(*ctx_, halfv_set_, 0,
+                                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, psi_.buf);
+            arena_.write_buffer(*ctx_, halfv_set_, 1,
+                                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, v_buf_.buf);
+            arena_.write_buffer(*ctx_, halfv_set_, 2,
+                                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                                halfp_ubo_.buf, sizeof(HalfMulParams));
+        }
+        kin3_set_ = arena_.allocate(*ctx_, kin_mul_.set_layout());
+        if (kin3_set_ != VK_NULL_HANDLE) {
+            arena_.write_buffer(*ctx_, kin3_set_, 0,
+                                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, psi_.buf);
+            arena_.write_buffer(*ctx_, kin3_set_, 1,
+                                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kx2_buf_.buf);
+            arena_.write_buffer(*ctx_, kin3_set_, 2,
+                                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, ky2_buf_.buf);
+            arena_.write_buffer(*ctx_, kin3_set_, 3,
+                                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kz2_buf_.buf);
+            arena_.write_buffer(*ctx_, kin3_set_, 4,
+                                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                                kinp_ubo_.buf, sizeof(KinMulParams));
+        }
         conj1_set_ = make_unary_set(conj_, conj1_ubo_, sizeof(ConjParams));
         conjN_set_ = make_unary_set(conj_, conjN_ubo_, sizeof(ConjParams));
         for (int a = 0; a < 3; ++a) {
@@ -314,7 +380,7 @@ public:
         synth_any_set_ = arena_.allocate(*ctx_, synth_.set_layout());
         norm_any_set_ = arena_.allocate(*ctx_, norm_.set_layout());
         scale_any_set_ = arena_.allocate(*ctx_, scale_.set_layout());
-        if (half_set_ == VK_NULL_HANDLE || kin_set_ == VK_NULL_HANDLE ||
+        if (halfv_set_ == VK_NULL_HANDLE || kin3_set_ == VK_NULL_HANDLE ||
             conj1_set_ == VK_NULL_HANDLE || conjN_set_ == VK_NULL_HANDLE ||
             fft_set_[0] == VK_NULL_HANDLE || fft_set_[1] == VK_NULL_HANDLE ||
             fft_set_[2] == VK_NULL_HANDLE || scale_set_ == VK_NULL_HANDLE ||
@@ -326,7 +392,7 @@ public:
             return false;
         }
 
-        if (!upload_field(half_, half_v) || !upload_field(kin_, kinetic) ||
+        if (!upload_potential(potential) || !upload_k2_tables(grid) ||
             !upload_field(psi_, psi0)) {
             return false;
         }
@@ -358,7 +424,7 @@ public:
         }
         Recorder r{shot.cb(), true};
         for (int s = 0; s < nsteps; ++s) {
-            run_step_body(r, half_set_, kin_set_);
+            run_step_body(r, half_mul_, halfv_set_, kin_mul_, kin3_set_);
         }
         record_batch_tail(shot.cb(), mask_handle, bridge);
         shot.submit_and_wait(*ctx_);
@@ -398,7 +464,7 @@ public:
         for (int s = 0; s < nsteps; ++s) {
             r.dispatch_dyn(kick_, kick_set_, mul_groups_,
                            static_cast<std::uint32_t>(2 * s) * kick_stride_);
-            run_step_body(r, half_set_, kin_set_);
+            run_step_body(r, half_mul_, halfv_set_, kin_mul_, kin3_set_);
             r.dispatch_dyn(kick_, kick_set_, mul_groups_,
                            static_cast<std::uint32_t>(2 * s + 1) * kick_stride_);
         }
@@ -407,10 +473,10 @@ public:
         shot.destroy(*ctx_);
     }
 
-    // Swap the half-potential phase table (e.g. the diamagnetic-augmented one
-    // before a magnetic run).
-    bool set_half_potential(const std::vector<ses::Complex<double>>& half_v) {
-        return upload_field(half_, half_v);
+    // Swap the scalar potential (e.g. the field-augmented one before a
+    // magnetic/Stark run); the half-kick phase is computed in-shader.
+    bool set_potential(const std::vector<double>& v) {
+        return upload_potential(v);
     }
 
     // Exact three-shear rotation of psi about coordinate `axis` by theta --
@@ -447,7 +513,7 @@ public:
         Recorder r{shot.cb(), true};
         for (int s = 0; s < nsteps; ++s) {
             record_rotation(r, b, c);
-            run_step_body(r, half_set_, kin_set_);
+            run_step_body(r, half_mul_, halfv_set_, kin_mul_, kin3_set_);
             record_rotation(r, b, c);
         }
         record_batch_tail(shot.cb(), mask_handle, bridge);
@@ -525,7 +591,7 @@ public:
                 return stats;
             }
             Recorder r{shot.cb(), true};
-            run_step_body(r, relax_half_set_, relax_kin_set_);
+            run_step_body(r, mul_, relax_half_set_, mul_, relax_kin_set_);
             barrier_compute_to_compute(shot.cb());
             norm_.bind(shot.cb(), norm_set_);
             vkCmdDispatch(shot.cb(), kGroups, 1, 1);
@@ -629,7 +695,7 @@ public:
                 return stats;
             }
             Recorder r{shot.cb(), true};
-            run_step_body(r, relax_half_set_, relax_kin_set_);
+            run_step_body(r, mul_, relax_half_set_, mul_, relax_kin_set_);
             shot.submit_and_wait(*ctx_);
             shot.destroy(*ctx_);
             for (int h : lower) {
@@ -1216,6 +1282,8 @@ public:
         fft_.destroy(*ctx_);
         conj_.destroy(*ctx_);
         mul_.destroy(*ctx_);
+        half_mul_.destroy(*ctx_);
+        kin_mul_.destroy(*ctx_);
         ctx_->destroy_buffer(&relax_kin_);
         ctx_->destroy_buffer(&relax_half_);
         ctx_->destroy_buffer(&decode_scratch_[1]);
@@ -1247,8 +1315,12 @@ public:
         ctx_->destroy_buffer(&muln_ubo_);
         ctx_->destroy_buffer(&staging_);
         ctx_->destroy_buffer(&partials_);
-        ctx_->destroy_buffer(&kin_);
-        ctx_->destroy_buffer(&half_);
+        ctx_->destroy_buffer(&v_buf_);
+        ctx_->destroy_buffer(&kx2_buf_);
+        ctx_->destroy_buffer(&ky2_buf_);
+        ctx_->destroy_buffer(&kz2_buf_);
+        ctx_->destroy_buffer(&halfp_ubo_);
+        ctx_->destroy_buffer(&kinp_ubo_);
         ctx_->destroy_buffer(&psi_);
         ctx_ = nullptr;
     }
@@ -1923,25 +1995,57 @@ private:
     // inverse carries the 1/N normalize), replacing six line-FFT dispatches
     // and both conj-scale dispatches. Else the hand-rolled chain (the
     // inverse FFT = conj . FFT . conj/N), barriers explicit either way.
-    void run_step_body(Recorder& r, VkDescriptorSet half_set,
+    void run_step_body(Recorder& r, const Kernel& half_k,
+                       VkDescriptorSet half_set, const Kernel& kin_k,
                        VkDescriptorSet kin_set) {
 #ifdef SES_HAVE_VKFFT
         if (vkfft_active()) {
-            r.dispatch(mul_, half_set, mul_groups_);
+            r.dispatch(half_k, half_set, mul_groups_);
             record_vkfft(r, -1);  // forward
-            r.dispatch(mul_, kin_set, mul_groups_);
+            r.dispatch(kin_k, kin_set, mul_groups_);
             record_vkfft(r, 1);   // inverse, normalized 1/N by the plan
-            r.dispatch(mul_, half_set, mul_groups_);
+            r.dispatch(half_k, half_set, mul_groups_);
             return;
         }
 #endif
-        r.dispatch(mul_, half_set, mul_groups_);
+        r.dispatch(half_k, half_set, mul_groups_);
         fft3(r);
-        r.dispatch(mul_, kin_set, mul_groups_);
+        r.dispatch(kin_k, kin_set, mul_groups_);
         r.dispatch(conj_, conj1_set_, mul_groups_);
         fft3(r);
         r.dispatch(conj_, conjN_set_, mul_groups_);
-        r.dispatch(mul_, half_set, mul_groups_);
+        r.dispatch(half_k, half_set, mul_groups_);
+    }
+
+    // Upload helpers for the in-shader phase inputs.
+    bool upload_potential(const std::vector<double>& v) {
+        std::vector<float> vf(cells_);
+        for (std::size_t i = 0; i < cells_; ++i) {
+            vf[i] = static_cast<float>(v[i]);
+        }
+        return upload_raw(v_buf_, vf.data(), cells_ * sizeof(float));
+    }
+    bool upload_k2_tables(const ses::Grid3D& grid) {
+        const std::vector<double> kx = ses::wavenumbers(grid.x);
+        const std::vector<double> ky = ses::wavenumbers(grid.y);
+        const std::vector<double> kz = ses::wavenumbers(grid.z);
+        std::vector<float> t(static_cast<std::size_t>(n_));
+        for (int i = 0; i < n_; ++i) {
+            t[static_cast<std::size_t>(i)] = static_cast<float>(kx[i] * kx[i]);
+        }
+        if (!upload_raw(kx2_buf_, t.data(), t.size() * sizeof(float))) {
+            return false;
+        }
+        for (int i = 0; i < n_; ++i) {
+            t[static_cast<std::size_t>(i)] = static_cast<float>(ky[i] * ky[i]);
+        }
+        if (!upload_raw(ky2_buf_, t.data(), t.size() * sizeof(float))) {
+            return false;
+        }
+        for (int i = 0; i < n_; ++i) {
+            t[static_cast<std::size_t>(i)] = static_cast<float>(kz[i] * kz[i]);
+        }
+        return upload_raw(kz2_buf_, t.data(), t.size() * sizeof(float));
     }
 
 #ifdef SES_HAVE_VKFFT
@@ -2057,6 +2161,8 @@ private:
     int kick_slots_ = 0;
 
     Kernel mul_;
+    Kernel half_mul_;
+    Kernel kin_mul_;
     Kernel conj_;
     Kernel fft_;
     Kernel norm_;
@@ -2087,8 +2193,13 @@ private:
     std::vector<std::vector<ses::Complex<double>>> glm_host_;
 
     Buffer psi_{};
-    Buffer half_{};
-    Buffer kin_{};
+    Buffer v_buf_{};    // scalar potential, R32
+    Buffer kx2_buf_{};  // per-axis k^2, R32 x n
+    Buffer ky2_buf_{};
+    Buffer kz2_buf_{};
+    Buffer halfp_ubo_{};
+    Buffer kinp_ubo_{};
+    double dt_step_ = 0.0;
     Buffer partials_{};
     Buffer staging_{};
     Buffer muln_ubo_{};
@@ -2115,8 +2226,8 @@ private:
     Buffer relax_half_{};
     Buffer relax_kin_{};
 
-    VkDescriptorSet half_set_ = VK_NULL_HANDLE;
-    VkDescriptorSet kin_set_ = VK_NULL_HANDLE;
+    VkDescriptorSet halfv_set_ = VK_NULL_HANDLE;
+    VkDescriptorSet kin3_set_ = VK_NULL_HANDLE;
     VkDescriptorSet conj1_set_ = VK_NULL_HANDLE;
     VkDescriptorSet conjN_set_ = VK_NULL_HANDLE;
     VkDescriptorSet fft_set_[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE,

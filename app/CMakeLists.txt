@@ -135,7 +135,7 @@ if(TARGET volk::volk AND TARGET GPUOpen::VulkanMemoryAllocator
             shear axpy copy_state synth project_deposit
             bridge_store bridge_load
             accum bloom_down bloom_up compose particles
-            occupancy occ_dilate shadow
+            occupancy occ_dilate shadow half_mul kin_mul
             fft_line8 fft_line64 fft_line256)
         set(_src "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${_k}.comp")
         set(_spv "${_ses_vk_spv_dir}/${_k}.spv")

@@ -1,0 +1,28 @@
+#version 450
+
+// Kinetic factor without a phase table: psi[i] *= exp(i * coef * k^2),
+// coef = -dt/2, k^2 = kx^2 + ky^2 + kz^2 from three 1D per-axis tables
+// (n floats each, FFT frequency order). Replaces a 134 MB complex table
+// read with three ~1 KB reads + sincos.
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) buffer PsiBuf { vec2 psi[]; };
+layout(std430, binding = 1) readonly buffer KxBuf { float kx2[]; };
+layout(std430, binding = 2) readonly buffer KyBuf { float ky2[]; };
+layout(std430, binding = 3) readonly buffer KzBuf { float kz2[]; };
+layout(std140, binding = 4) uniform Params { uint n; int nx; int ny; float coef; };
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= n) {
+        return;
+    }
+    int ix = int(i) % nx;
+    int iy = (int(i) / nx) % ny;
+    int iz = int(i) / (nx * ny);
+    float a = coef * (kx2[ix] + ky2[iy] + kz2[iz]);
+    float c = cos(a);
+    float s = sin(a);
+    vec2 z = psi[i];
+    psi[i] = vec2(z.x * c - z.y * s, z.x * s + z.y * c);
+}

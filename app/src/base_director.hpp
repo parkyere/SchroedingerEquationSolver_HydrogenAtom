@@ -60,8 +60,7 @@ public:
         gpu_ok_ = device_ok &&
                   engine_.initialize(ctx, sim_.grid(),
                                      ses_shell::app_engine_blobs(sim_.grid().x.n),
-                                     sim_.propagator().half_potential_phase(),
-                                     sim_.propagator().kinetic_phase(),
+                                     sim_.potential(), sim_.dt(),
                                      sim_.psi().data());
         if (!gpu_ok_) {
             return;

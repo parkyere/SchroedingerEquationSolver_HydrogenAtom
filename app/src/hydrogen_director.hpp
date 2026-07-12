@@ -111,8 +111,7 @@ public:
         gpu_ok_ = device_ok &&
                   engine_.initialize(ctx, sim_.grid(),
                                      ses_shell::app_engine_blobs(sim_.grid().x.n),
-                                     sim_.propagator().half_potential_phase(),
-                                     sim_.propagator().kinetic_phase(),
+                                     sim_.potential(), sim_.dt(),
                                      sim_.psi().data());
         if (gpu_ok_) {
             // Atlas precision from free VRAM: a resident fp32 manifold
@@ -912,10 +911,9 @@ private:
                                                       bfield_axis_};
                 v = mprop.effective_potential();
             }
-            const ses::SplitOperator3D aug{g, v, sim_.dt()};
-            engine_.set_half_potential(aug.half_potential_phase());
+            engine_.set_potential(v);
         } else {
-            engine_.set_half_potential(sim_.propagator().half_potential_phase());
+            engine_.set_potential(sim_.potential());
         }
     }
 

@@ -39,6 +39,8 @@
 #include <core/wavepacket.hpp>
 
 #include <phase_multiply_spv.h>
+#include <half_mul_spv.h>
+#include <kin_mul_spv.h>
 #include <conj_scale_spv.h>
 #include <scale_spv.h>
 #include <norm_peak_spv.h>
@@ -1083,6 +1085,10 @@ ses_vk::EngineKernels engine_blobs_8() {
     ses_vk::EngineKernels b;
     b.mul = k_phase_multiply_spv;
     b.mul_size = k_phase_multiply_spv_size;
+    b.half_mul = k_half_mul_spv;
+    b.half_mul_size = k_half_mul_spv_size;
+    b.kin_mul = k_kin_mul_spv;
+    b.kin_mul_size = k_kin_mul_spv_size;
     b.conj = k_conj_scale_spv;
     b.conj_size = k_conj_scale_spv_size;
     b.fft = k_fft_line8_spv;
@@ -1135,8 +1141,7 @@ bool check_engine_step(ses_vk::DeviceContext& ctx) {
                                                  ses::Vec3d{0.0, 0.5, 0.0});
 
     ses_vk::Engine engine;
-    if (!engine.initialize(ctx, g, engine_blobs_8(), cpu_prop.half_potential_phase(),
-                           cpu_prop.kinetic_phase(), psi0.data())) {
+    if (!engine.initialize(ctx, g, engine_blobs_8(), v, dt, psi0.data())) {
         std::printf("engine 20 steps (raw Vulkan): engine init FAIL\n");
         return false;
     }
@@ -1200,8 +1205,7 @@ bool check_native_vkfft_perf(ses_vk::DeviceContext& ctx) {
     b.fft = k_fft_line64_spv;
     b.fft_size = k_fft_line64_spv_size;
     ses_vk::Engine engine;
-    if (!engine.initialize(ctx, g, b, prop.half_potential_phase(),
-                           prop.kinetic_phase(), psi0.data())) {
+    if (!engine.initialize(ctx, g, b, v, 0.02, psi0.data())) {
         std::printf("native vkfft perf: engine init FAIL\n");
         return false;
     }
@@ -1243,9 +1247,7 @@ bool check_engine_relax(ses_vk::DeviceContext& ctx) {
         g, ses::Vec3d{1.0, 0.0, 0.0}, ses::Vec3d{1.5, 1.5, 1.5}, ses::Vec3d{});
 
     ses_vk::Engine engine;
-    if (!engine.initialize(ctx, g, engine_blobs_8(),
-                           real_prop.half_potential_phase(),
-                           real_prop.kinetic_phase(), psi0.data())) {
+    if (!engine.initialize(ctx, g, engine_blobs_8(), v, 0.02, psi0.data())) {
         std::printf("relax 50 steps (raw Vulkan): engine init FAIL\n");
         return false;
     }
@@ -1303,9 +1305,7 @@ bool check_engine_deflation(ses_vk::DeviceContext& ctx) {
         g, ses::Vec3d{1.0, 0.5, 0.0}, ses::Vec3d{1.2, 1.2, 1.2}, ses::Vec3d{});
 
     ses_vk::Engine engine;
-    if (!engine.initialize(ctx, g, engine_blobs_8(),
-                           real_prop.half_potential_phase(),
-                           real_prop.kinetic_phase(), guess.data())) {
+    if (!engine.initialize(ctx, g, engine_blobs_8(), v, 0.02, guess.data())) {
         std::printf("deflation (raw Vulkan): engine init FAIL\n");
         return false;
     }
@@ -1401,9 +1401,7 @@ bool check_engine_driven(ses_vk::DeviceContext& ctx) {
                                                  ses::Vec3d{0.0, 0.5, 0.0});
 
     ses_vk::Engine engine;
-    if (!engine.initialize(ctx, g, engine_blobs_8(),
-                           cpu_prop.half_potential_phase(),
-                           cpu_prop.kinetic_phase(), psi0.data())) {
+    if (!engine.initialize(ctx, g, engine_blobs_8(), v, dt, psi0.data())) {
         std::printf("driven 20 steps (raw Vulkan): engine init FAIL\n");
         return false;
     }
@@ -1451,9 +1449,7 @@ bool check_engine_magnetic(ses_vk::DeviceContext& ctx) {
 
     const ses::SplitOperator3D base{g, v, dt};
     ses_vk::Engine engine;
-    if (!engine.initialize(ctx, g, engine_blobs_8(),
-                           base.half_potential_phase(), base.kinetic_phase(),
-                           psi0.data())) {
+    if (!engine.initialize(ctx, g, engine_blobs_8(), v, dt, psi0.data())) {
         std::printf("magnetic (raw Vulkan): engine init FAIL\n");
         return false;
     }
@@ -1488,7 +1484,7 @@ bool check_engine_magnetic(ses_vk::DeviceContext& ctx) {
         const ses::MagneticPropagator3D mprop{g, v, dt, b, fa};
         const ses::SplitOperator3D core_diamag{g, mprop.effective_potential(),
                                                dt};
-        engine.set_half_potential(core_diamag.half_potential_phase());
+        engine.set_potential(mprop.effective_potential());
         engine.upload_state(psi0.data());
         engine.magnetic_step(fa, 0.5 * b * (0.5 * dt), 20);
         if (!engine.readback(gpu_out)) {
@@ -1530,9 +1526,7 @@ bool check_engine_synth(ses_vk::DeviceContext& ctx) {
     ses::Field3D seed = ses::gaussian_wavepacket(
         g, ses::Vec3d{}, ses::Vec3d{1.5, 1.5, 1.5}, ses::Vec3d{});
     ses_vk::Engine engine;
-    if (!engine.initialize(ctx, g, engine_blobs_8(),
-                           prop.half_potential_phase(), prop.kinetic_phase(),
-                           seed.data())) {
+    if (!engine.initialize(ctx, g, engine_blobs_8(), v, 0.02, seed.data())) {
         std::printf("orbital synthesis (raw Vulkan): engine init FAIL\n");
         return false;
     }
@@ -1588,9 +1582,7 @@ bool check_engine_force(ses_vk::DeviceContext& ctx) {
                                                  ses::Vec3d{1.2, 1.2, 1.2},
                                                  ses::Vec3d{});
     ses_vk::Engine engine;
-    if (!engine.initialize(ctx, g, engine_blobs_8(),
-                           prop.half_potential_phase(), prop.kinetic_phase(),
-                           psi0.data())) {
+    if (!engine.initialize(ctx, g, engine_blobs_8(), v, 0.02, psi0.data())) {
         std::printf("mean force (raw Vulkan): engine init FAIL\n");
         return false;
     }
@@ -1658,9 +1650,7 @@ bool check_engine_project(ses_vk::DeviceContext& ctx) {
     ses::Field3D seed = ses::gaussian_wavepacket(
         g, ses::Vec3d{}, ses::Vec3d{1.5, 1.5, 1.5}, ses::Vec3d{});
     ses_vk::Engine engine;
-    if (!engine.initialize(ctx, g, engine_blobs_8(),
-                           prop.half_potential_phase(), prop.kinetic_phase(),
-                           seed.data())) {
+    if (!engine.initialize(ctx, g, engine_blobs_8(), v, 0.02, seed.data())) {
         std::printf("orbital-free projection (raw Vulkan): engine init FAIL\n");
         return false;
     }
@@ -1731,9 +1721,7 @@ bool check_engine_dipole_between(ses_vk::DeviceContext& ctx) {
     ses::Field3D seed = ses::gaussian_wavepacket(
         g, ses::Vec3d{}, ses::Vec3d{1.5, 1.5, 1.5}, ses::Vec3d{});
     ses_vk::Engine engine;
-    if (!engine.initialize(ctx, g, engine_blobs_8(),
-                           prop.half_potential_phase(), prop.kinetic_phase(),
-                           seed.data())) {
+    if (!engine.initialize(ctx, g, engine_blobs_8(), v, 0.02, seed.data())) {
         std::printf("dipole_between (raw Vulkan): engine init FAIL\n");
         return false;
     }
@@ -1819,9 +1807,7 @@ bool check_engine_fp16_consumers(ses_vk::DeviceContext& ctx) {
                                                  ses::Vec3d{1.4, 1.4, 1.4},
                                                  ses::Vec3d{});
     ses_vk::Engine engine;
-    if (!engine.initialize(ctx, g, engine_blobs_8(),
-                           prop.half_potential_phase(), prop.kinetic_phase(),
-                           psi0.data())) {
+    if (!engine.initialize(ctx, g, engine_blobs_8(), v, 0.02, psi0.data())) {
         std::printf("fp16 consumers (raw Vulkan): engine init FAIL\n");
         return false;
     }
@@ -1882,9 +1868,7 @@ bool check_engine_bridge(ses_vk::DeviceContext& ctx) {
                                                  ses::Vec3d{1.2, 1.2, 1.2},
                                                  ses::Vec3d{0.0, 0.5, 0.0});
     ses_vk::Engine engine;
-    if (!engine.initialize(ctx, g, engine_blobs_8(),
-                           prop.half_potential_phase(), prop.kinetic_phase(),
-                           psi0.data())) {
+    if (!engine.initialize(ctx, g, engine_blobs_8(), v, 0.02, psi0.data())) {
         std::printf("bridge (raw Vulkan): engine init FAIL\n");
         return false;
     }
