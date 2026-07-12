@@ -72,6 +72,25 @@ inline std::vector<double> soft_coulomb_potential(const Grid3D& g, double Z, dou
 // -Z * this / h.
 inline constexpr double kCoulombCellAverage = 2.3800774;
 
+// Rectangular barrier slab: V = v0 on the half-open x-slab [x_lo, x_hi),
+// 0 elsewhere; y/z-independent (the tunneling scenario's potential).
+inline std::vector<double> barrier_potential(const Grid3D& g, double v0,
+                                             double x_lo, double x_hi) {
+    std::vector<double> v(static_cast<std::size_t>(g.size()), 0.0);
+    for (int i = 0; i < g.x.n; ++i) {
+        const double x = g.x.coord(i);
+        if (x < x_lo || x >= x_hi) {
+            continue;
+        }
+        for (int k = 0; k < g.z.n; ++k) {
+            for (int j = 0; j < g.y.n; ++j) {
+                v[static_cast<std::size_t>(g.flat(i, j, k))] = v0;
+            }
+        }
+    }
+    return v;
+}
+
 // V(r) = -Z / |r - c|, bare Coulomb, with only the singular nucleus cell
 // replaced by the analytic cell average -Z * kCoulombCellAverage / h (see
 // docs/ARCHITECTURE.md for why not soft-Coulomb). Assumes cubic cells and the
