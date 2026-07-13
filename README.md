@@ -16,20 +16,21 @@ framework-free Vulkan renderer.
 | Decision | Choice |
 |---|---|
 | Language / build | C++20, CMake, pinned vcpkg submodule (static deps) |
-| GUI shell | **Qt 6** — window, input, widgets, and ONE textured-triangle blit of the renderer's image; nothing else |
+| GUI shell | **SDL3** — window, input, and the Vulkan surface; **Dear ImGui** (vendored submodule) draws the control panel; the shell owns its device and swapchain outright |
 | GPU compute + rendering | **Framework-free Vulkan** (`ses_vk`: volk + VMA + VkFFT), shaders offline-baked to SPIR-V by glslangValidator |
 | Physics core | CPU double-precision truth in `core/`, no GPU/GUI dependencies |
 | Time propagator | **Split-operator (Fourier)** — hand-written FFT on the CPU core; VkFFT on the GPU, with hand-rolled line-FFT kernels kept as a verified alternative |
-| Reinvention boundary | **Purist** — hand-roll math, FFT, physics, render logic; reuse only Qt (shell), GoogleTest, and vendored Vulkan infrastructure (volk / VMA / VkFFT / glslang) |
+| Reinvention boundary | **Purist** — hand-roll math, FFT, physics, render logic (incl. the swapchain); reuse only SDL3 (window/input), Dear ImGui (UI), GoogleTest, and vendored Vulkan infrastructure (volk / VMA / VkFFT / glslang) |
 | Units | Atomic units (ℏ = mₑ = e = 1) |
-| Testing | **Strict TDD** + Humble Object; a zero-Qt GPU oracle binary (`sesolver_vkcheck`) verifies every kernel |
+| Testing | **Strict TDD** + Humble Object; a windowless GPU oracle binary (`sesolver_vkcheck`) verifies every kernel |
 
 ## Layout
 
 ```
-core/    Pure numerical/physics core. NO Qt, NO GPU. Fully unit-tested.
-app/     Qt shell (window/input/UI) + ses_vk (framework-free Vulkan engine
-         and renderer) + sesolver_vkcheck (zero-Qt GPU test oracle).
+core/    Pure numerical/physics core. NO GUI, NO GPU. Fully unit-tested.
+app/     SDL3 shell (window/input/main loop/swapchain + ImGui panel) + ses_vk
+         (framework-free Vulkan engine and renderer) + sesolver_vkcheck
+         (windowless GPU test oracle).
 tests/   GoogleTest suite driving core/, test-first.
 bench/   Manual micro-benchmark.
 docs/    Architecture and TDD rules.
@@ -37,10 +38,11 @@ tools/   Git hooks (TDD commit-discipline guard) + CMake helpers.
 ```
 
 The hard seams: **`core` depends on nothing**; `ses_vk` depends on `core` +
-Vulkan infrastructure only (proven by `sesolver_vkcheck`, which links zero Qt);
-the Qt shell depends on both, and only raw Khronos handles cross the
-shell ↔ `ses_vk` boundary. The physics is trivially testable, the GPU engine is
-testable without a GUI, and Qt stays a thin, replaceable shell.
+Vulkan infrastructure only (proven by `sesolver_vkcheck`, which links no
+windowing at all); the SDL3 shell depends on both, and only raw Khronos handles
+cross the shell ↔ `ses_vk` boundary. The physics is trivially testable, the GPU
+engine is testable without a GUI, and the shell stays thin and replaceable
+(this seam already survived one full swap: Qt → SDL3).
 
 ## Prerequisites
 
@@ -48,9 +50,11 @@ testable without a GUI, and Qt stays a thin, replaceable shell.
 - A C++20 compiler (MSVC 2022+, GCC ≥ 11, or Clang ≥ 14)
 - A Vulkan 1.1+ GPU/driver — needed to RUN the app and `sesolver_vkcheck`;
   `core` + `tests` need none.
-- No system Qt: all dependencies, static Qt included, come from the
-  `external/vcpkg` submodule. The FIRST configure builds Qt from source
-  (slow once, then binary-cached).
+- No system libraries: all dependencies come from the `external/vcpkg`
+  submodule (SDL3, Vulkan infra, gtest — all small; the first configure takes
+  minutes, then binary-cached). Dear ImGui is the `external/imgui` submodule,
+  compiled into the app (the vcpkg port's vulkan feature would link the
+  vulkan-1 import library, which is forbidden in the volk world).
 - Network access on first configure (vcpkg fetches sources; without the vcpkg
   toolchain, GoogleTest falls back to CMake `FetchContent`).
 
@@ -66,11 +70,11 @@ cmake --build --preset msvc-release
 ctest --preset msvc-release
 ```
 
-Linux: the same flow with the `linux-release` preset (Qt's xcb platform plugin
-needs the X11 dev stack: `libx11-dev libxkbcommon-dev libfontconfig1-dev
-'^libxcb.*-dev'`). The routinely exercised configuration is Windows/MSVC.
+Linux: the same flow with the `linux-release` preset (SDL3 wants the X11 /
+Wayland dev stacks for its video backends). The routinely exercised
+configuration is Windows/MSVC.
 
-Lightweight core-only loop (no vcpkg, no Qt, no GPU):
+Lightweight core-only loop (no vcpkg, no GUI, no GPU):
 
 ```sh
 cmake -S . -B build -DSES_BUILD_APP=OFF
@@ -154,9 +158,9 @@ occupancy-based empty-space skipping, an extinction self-shadow volume, and
 dual-Kawase bloom under an ACES tonemap.
 
 Verification: all shader math is transcribed from the unit-tested CPU double
-core. `sesolver_vkcheck` (zero Qt) drives every GPU kernel and engine path
+core. `sesolver_vkcheck` (windowless) drives every GPU kernel and engine path
 against CPU oracles and runs inside `ctest`; the demo arcs regress headlessly
 via `--selftest-decay` / `--selftest-rabi` / `--selftest-cascade` /
 `--selftest-manifold` / `--selftest-energy` / `--selftest-efield` /
-`--selftest-magnetic`, and `--dump-frame` / `--dump-frame-near` verify the
-render path end to end.
+`--selftest-magnetic` / `--selftest-tunnel`, and `--dump-frame` /
+`--dump-frame-near` verify the render path end to end.

@@ -22,35 +22,39 @@ research-grade mean-field (DFT) project. We stay single-electron on purpose.
 
 ```
                  +-------------------+
- tests/ -------->|   sesolver_core   |   pure physics: no Qt, no GPU,
+ tests/ -------->|   sesolver_core   |   pure physics: no GUI, no GPU,
  (gtest)         |   fully testable  |   fully unit-tested
                  +-------------------+
                     ^             ^
                     |             |
  +---------------------+      +--------------------------+
- |       ses_vk        |<-----|      app/ Qt shell       |
- | framework-free      |      | window + input + UI +    |
- | Vulkan compute AND  |      | ONE blit of the rendered |
- | rendering           |      | image ("Humble Object")  |
- +---------------------+      +--------------------------+
-           ^
+ |       ses_vk        |<-----|     app/ SDL3 shell      |
+ | framework-free      |      | window + input + main    |
+ | Vulkan compute AND  |      | loop + OWN swapchain +   |
+ | rendering           |      | ImGui panel ("Humble     |
+ +---------------------+      | Object")                 |
+           ^                  +--------------------------+
            |
- sesolver_vkcheck  (zero-Qt GPU oracle, runs inside ctest)
+ sesolver_vkcheck  (windowless GPU oracle, runs inside ctest)
 ```
 
-- **`core` depends on nothing** (no Qt, no GPU, no windowing). Every behavior
+- **`core` depends on nothing** (no GUI, no GPU, no windowing). Every behavior
   has an analytic or golden oracle and is unit-tested, test-first.
 - **`ses_vk`** (`app/src/vk_*.hpp`) is the GPU engine and scene renderer:
   framework-free Vulkan on top of `core` plus vendored infrastructure only
-  (volk, VMA, VkFFT). It contains zero Qt — proven by `sesolver_vkcheck`,
-  which links no Qt and drives every kernel and engine path against the CPU
-  double core inside ctest.
-- **The Qt shell is thin and replaceable**: window, input, widgets/UI, and one
-  fullscreen-triangle blit of the renderer's image. Only raw Khronos handles
-  cross the shell <-> `ses_vk` seam, so swapping Qt for another windowing
-  layer touches the shell alone. The shell holds **no domain logic**; anything
-  worth testing is pushed down into `core` as pure data/geometry first (e.g.
-  marching-cubes vertex generation, transfer-function math, camera matrices).
+  (volk, VMA, VkFFT). It links no windowing at all — proven by
+  `sesolver_vkcheck`, which drives every kernel and engine path against the
+  CPU double core inside ctest.
+- **The shell is thin and replaceable**: SDL3 gives the window, input, and the
+  Vulkan surface; the shell itself owns the device (the same
+  `DeviceContext::create` path vkcheck exercises), the swapchain + one
+  fullscreen-triangle pass sampling the renderer's image (`vk_present.hpp`),
+  and the Dear ImGui control panel riding that pass. Only raw Khronos handles
+  cross the shell <-> `ses_vk` seam — the seam already survived one full swap
+  (Qt/QRhi → SDL3) without touching a director or engine line. The shell holds
+  **no domain logic**; anything worth testing is pushed down into `core` as
+  pure data/geometry first (e.g. marching-cubes vertex generation,
+  transfer-function math, camera matrices).
 - Dependency direction points **inward**: `app → ses_vk → core`,
   `tests → core`. `core` never points outward.
 
@@ -71,10 +75,15 @@ Hand-written (the learning lives here):
 - potentials (harmonic, regularized bare Coulomb)
 - visualization geometry/color math (marching cubes, transfer functions)
 - all Vulkan rendering/compute logic: the raymarched volume renderer, the HDR
-  post chain, and every pipeline, descriptor, and barrier in `ses_vk`
+  post chain, the swapchain/present layer, and every pipeline, descriptor,
+  and barrier in `ses_vk` and the shell
 
 Reused (pure plumbing, not the learning target):
-- **Qt 6** — window, input, widgets/UI, and the one-blit presentation only
+- **SDL3** — window, input, and the Vulkan surface only
+- **Dear ImGui** (vendored `external/imgui` submodule, compiled into the app
+  with `IMGUI_IMPL_VULKAN_USE_VOLK` — the vcpkg port's vulkan feature would
+  link the vulkan-1 import library, forbidden in the volk world) — the
+  immediate-mode control panel
 - **GoogleTest** — test harness
 - **Vendored Vulkan infrastructure** — volk (loader), VMA (allocation),
   VkFFT (the production GPU FFT), glslang (offline GLSL → SPIR-V bake)
@@ -84,8 +93,9 @@ remains hand-written and IS the truth oracle, the hand-rolled GPU line-FFT
 kernels remain verified as the learning artifact, and VkFFT is production
 plumbing chosen for speed.
 
-Explicitly *not* reused: GLM (we hand-roll math), GLFW/SDL (Qt is the shell),
-FFTW (the CPU FFT is hand-rolled), Eigen/BLAS/LAPACK.
+Explicitly *not* reused: GLM (we hand-roll math), Qt (retired — it was the
+original shell, replaced by SDL3 + the hand-rolled swapchain), FFTW (the CPU
+FFT is hand-rolled), Eigen/BLAS/LAPACK.
 
 ## Numerical decisions
 
@@ -131,5 +141,5 @@ analytic oracle as its red test:
 
 `CMakeLists.txt` (root) → `core/` (always) → `tests/` (if `SES_BUILD_TESTS`) →
 `bench/` (if `SES_BUILD_BENCH`, the `sesolver_bench` micro-benchmark) →
-`app/` (if `SES_BUILD_APP` **and** Qt6 found). The app and bench are optional
-so the TDD loop never requires a Qt toolchain.
+`app/` (if `SES_BUILD_APP` **and** SDL3 found). The app and bench are optional
+so the TDD loop never requires a GUI toolchain.

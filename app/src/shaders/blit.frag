@@ -1,6 +1,6 @@
 #version 450
 
-// Sample the ses_vk scene image (imported via QRhiTexture::createFrom).
+// Sample the ses_vk scene image (SHADER_READ_ONLY at hand-off).
 layout(location = 0) in vec2 v_uv;
 layout(location = 0) out vec4 frag_color;
 layout(binding = 0) uniform sampler2D scene;

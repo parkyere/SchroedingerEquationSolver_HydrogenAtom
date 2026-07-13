@@ -1,26 +1,28 @@
 # ---------------------------------------------------------------------------
-# sesolver_app : the Qt GUI shell ("Humble Object").
+# sesolver_app : the SDL3 GUI shell ("Humble Object").
 #
 # This layer holds NO domain logic. It links sesolver_core, owns the window /
-# QRhiWidget (Qt provides the Vulkan device and ONE fullscreen blit of the
-# ses_vk scene image), and is verified manually rather than by unit tests
-# (the chosen Humble Object pattern) -- plus the --selftest-* arcs.
+# input / main loop (SDL3), the Vulkan device (DeviceContext::create -- the
+# same owning path sesolver_vkcheck exercises headless), the swapchain
+# (vk_present.hpp), and the Dear ImGui control panel. It is verified manually
+# rather than by unit tests (the chosen Humble Object pattern) -- plus the
+# --selftest-* arcs.
 #
-# Reuse boundary (purist): Qt provides ONLY the window, the Vulkan device
-# layer, and UI. All math, FFT, physics, and rendering logic are hand-written
-# (ses_vk: volk + VMA + offline-baked SPIR-V).
+# Reuse boundary (purist): SDL3 provides ONLY the window, input, and the
+# Vulkan surface; Dear ImGui (vendored submodule) the immediate-mode UI. All
+# math, FFT, physics, and rendering logic are hand-written (ses_vk: volk +
+# VMA + offline-baked SPIR-V).
 # ---------------------------------------------------------------------------
-set(CMAKE_AUTOMOC ON)
-set(CMAKE_AUTORCC ON)
-set(CMAKE_AUTOUIC ON)
-
-# The shell runs on QRhi/Vulkan (QRhiWidget + the blit): the private QRhi
-# module, the qsb shader baker, and the Vulkan headers are REQUIRED (vcpkg
-# manifest provides all three). NOTE: with the vcpkg Qt, Qt6::GuiPrivate must
-# be requested by name -- find_package(Qt6 COMPONENTS Gui) alone does not
-# create the target.
-find_package(Qt6 REQUIRED COMPONENTS ShaderTools GuiPrivate)
+find_package(SDL3 CONFIG REQUIRED)
 find_package(VulkanHeaders CONFIG REQUIRED)  # vcpkg port: Vulkan::Headers
+find_package(volk CONFIG REQUIRED)
+find_package(VulkanMemoryAllocator CONFIG REQUIRED)
+find_program(SES_GLSLANG_VALIDATOR glslangValidator
+    HINTS "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/tools/glslang")
+if(NOT SES_GLSLANG_VALIDATOR)
+    message(FATAL_ERROR "glslangValidator not found (vcpkg manifest dep; "
+        "is glslang[tools] on?). The ses_vk shaders bake offline to SPIR-V.")
+endif()
 
 # VkFFT: header-only FFT + its runtime shader compiler (glslang). Optional --
 # when absent the engine compiles without SES_HAVE_VKFFT and stays on the
@@ -52,183 +54,146 @@ function(ses_enable_vkfft target)
     endif()
 endfunction()
 
+# ---------------------------------------------------------------------------
+# Offline SPIR-V baking: every ses_vk compute kernel and render shader is
+# compiled by glslangValidator at build time and embedded as a C array via
+# tools/cmake/bin2h.cmake. The engine has no resource system.
+# ---------------------------------------------------------------------------
+set(_ses_vk_spv_dir "${CMAKE_CURRENT_BINARY_DIR}/vk_spv")
+file(MAKE_DIRECTORY "${_ses_vk_spv_dir}")
+set(_ses_vk_headers "")
+foreach(_k IN ITEMS phase_multiply scale norm_peak inner_product
+        dipole_kick mean_force dipole pack_half unpack_half conj_scale
+        shear axpy copy_state synth project_deposit
+        bridge_store bridge_load
+        accum bloom_down bloom_up compose particles
+        occupancy occ_dilate shadow half_mul kin_mul damp_mul
+        fft_line8 fft_line64 fft_line256)
+    set(_src "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${_k}.comp")
+    set(_spv "${_ses_vk_spv_dir}/${_k}.spv")
+    set(_hdr "${_ses_vk_spv_dir}/${_k}_spv.h")
+    add_custom_command(
+        OUTPUT "${_hdr}"
+        BYPRODUCTS "${_spv}"
+        COMMAND "${SES_GLSLANG_VALIDATOR}" -V --target-env vulkan1.1
+                -o "${_spv}" "${_src}"
+        COMMAND "${CMAKE_COMMAND}" "-DIN=${_spv}" "-DOUT=${_hdr}"
+                "-DNAME=k_${_k}_spv"
+                -P "${CMAKE_SOURCE_DIR}/tools/cmake/bin2h.cmake"
+        DEPENDS "${_src}" "${CMAKE_SOURCE_DIR}/tools/cmake/bin2h.cmake"
+        COMMENT "glslangValidator: ${_k}.comp -> SPIR-V header"
+        VERBATIM)
+    list(APPEND _ses_vk_headers "${_hdr}")
+endforeach()
+# Render + presentation shader pairs (the blit pair feeds the shell's own
+# swapchain pass -- what Qt's qsb bake used to serve). Dots in the stage
+# extension are sanitized out of the symbol name.
+foreach(_k IN ITEMS mesh.vert mesh.frag volume.vert volume.frag
+        flow.vert flow.frag blit.vert blit.frag)
+    string(REPLACE "." "_" _sym "${_k}")
+    set(_src "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${_k}")
+    set(_spv "${_ses_vk_spv_dir}/${_sym}.spv")
+    set(_hdr "${_ses_vk_spv_dir}/${_sym}_spv.h")
+    add_custom_command(
+        OUTPUT "${_hdr}"
+        BYPRODUCTS "${_spv}"
+        COMMAND "${SES_GLSLANG_VALIDATOR}" -V --target-env vulkan1.1
+                -o "${_spv}" "${_src}"
+        COMMAND "${CMAKE_COMMAND}" "-DIN=${_spv}" "-DOUT=${_hdr}"
+                "-DNAME=k_${_sym}_spv"
+                -P "${CMAKE_SOURCE_DIR}/tools/cmake/bin2h.cmake"
+        DEPENDS "${_src}" "${CMAKE_SOURCE_DIR}/tools/cmake/bin2h.cmake"
+        COMMENT "glslangValidator: ${_k} -> SPIR-V header"
+        VERBATIM)
+    list(APPEND _ses_vk_headers "${_hdr}")
+endforeach()
+# One generation rule shared by every ses_vk consumer (the app's engine
+# and the vkcheck harness) -- targets depend on this, not on the files.
+add_custom_target(ses_spv_headers DEPENDS ${_ses_vk_headers})
+
+# ---------------------------------------------------------------------------
+# Dear ImGui: the vendored submodule (external/imgui), compiled INTO the app.
+# NOT the vcpkg port -- its vulkan-binding feature links the vulkan-1 import
+# library, which is forbidden in the volk world (see the NOTE above).
+# IMGUI_IMPL_VULKAN_USE_VOLK makes the backend ride volk's loader instead.
+# ---------------------------------------------------------------------------
+set(SES_IMGUI_DIR "${CMAKE_SOURCE_DIR}/external/imgui")
+if(NOT EXISTS "${SES_IMGUI_DIR}/imgui.cpp")
+    message(FATAL_ERROR "external/imgui submodule missing -- run "
+        "'git submodule update --init external/imgui'.")
+endif()
+add_library(ses_imgui STATIC
+    "${SES_IMGUI_DIR}/imgui.cpp"
+    "${SES_IMGUI_DIR}/imgui_draw.cpp"
+    "${SES_IMGUI_DIR}/imgui_tables.cpp"
+    "${SES_IMGUI_DIR}/imgui_widgets.cpp"
+    "${SES_IMGUI_DIR}/backends/imgui_impl_sdl3.cpp"
+    "${SES_IMGUI_DIR}/backends/imgui_impl_vulkan.cpp")
+target_include_directories(ses_imgui SYSTEM PUBLIC
+    "${SES_IMGUI_DIR}" "${SES_IMGUI_DIR}/backends")
+target_compile_definitions(ses_imgui PUBLIC IMGUI_IMPL_VULKAN_USE_VOLK)
+target_link_libraries(ses_imgui PUBLIC volk::volk SDL3::SDL3)
+target_compile_features(ses_imgui PRIVATE cxx_std_20)
+
+# ---------------------------------------------------------------------------
+# The app.
+# ---------------------------------------------------------------------------
 add_executable(sesolver_app
     src/main.cpp
 )
 # GUI subsystem on Windows for optimized builds so double-clicking the exe
-# does not spawn a companion console window (closing it would kill the app).
-# Debug keeps the console so qCritical logs stay visible outside a
-# debugger; fatal errors also surface via QMessageBox either way.
+# does not spawn a companion console window (closing it would kill the app);
+# SDL_main.h provides the WinMain adapter. Debug keeps the console so
+# diagnostics stay visible outside a debugger.
 set_target_properties(sesolver_app PROPERTIES
     WIN32_EXECUTABLE "$<CONFIG:Release,RelWithDebInfo,MinSizeRel>"
 )
+add_dependencies(sesolver_app ses_spv_headers)
+target_include_directories(sesolver_app PRIVATE "${_ses_vk_spv_dir}")
 target_link_libraries(sesolver_app
     PRIVATE
         sesolver_core
-        Qt6::Core
-        Qt6::Gui
-        Qt6::GuiPrivate
-        Qt6::Widgets
+        SDL3::SDL3
+        ses_imgui
+        volk::volk
+        GPUOpen::VulkanMemoryAllocator
         Vulkan::Headers
         ses_warnings
 )
 target_compile_features(sesolver_app PRIVATE cxx_std_20)
 ses_enable_vkfft(sesolver_app)
 
-# qsb bakes ONLY the blit pair: the scene renders in ses_vk; Qt's whole
-# remaining draw is one fullscreen textured triangle.
-qt6_add_shaders(sesolver_app "app_shaders"
-    PREFIX "/shaders"
-    NOGLSL NOHLSL NOMSL
-    FILES
-        src/shaders/blit.vert
-        src/shaders/blit.frag
-    OUTPUTS
-        blit.vert.qsb
-        blit.frag.qsb)
-
-# Static Qt (the vcpkg x64-windows-static / x64-linux triplets) does NOT load
-# plugins at runtime -- the platform plugin must be linked in, or the executable
-# aborts with "no Qt platform plugin could be initialized". Collect the platform
-# plugin (qwindows on Windows, xcb on Linux/X11) and import it into every GUI
-# executable when Qt6 is a static build; a shared Qt loads plugins itself, so the
-# guard makes this a no-op there.
-get_target_property(_ses_qt_core_type Qt6::Core TYPE)
-set(_ses_qt_platform_plugins "")
-if(_ses_qt_core_type STREQUAL "STATIC_LIBRARY")
-    if(TARGET Qt6::QWindowsIntegrationPlugin)
-        list(APPEND _ses_qt_platform_plugins Qt6::QWindowsIntegrationPlugin)
-    endif()
-    if(TARGET Qt6::QXcbIntegrationPlugin)
-        list(APPEND _ses_qt_platform_plugins Qt6::QXcbIntegrationPlugin)
-    endif()
-endif()
-if(_ses_qt_platform_plugins)
-    qt6_import_plugins(sesolver_app INCLUDE ${_ses_qt_platform_plugins})
-endif()
-
-# Qt DLLs must be findable when ctest launches the harness.
-get_target_property(_qt6_core_dll Qt6::Core LOCATION)
-get_filename_component(_qt6_bin_dir "${_qt6_core_dll}" DIRECTORY)
-
 # ---------------------------------------------------------------------------
-# sesolver_vkcheck: THE GPU verification harness. NO Qt anywhere in this
-# binary: volk loads the loader, VMA allocates, and the Vulkan-GLSL kernel
-# sources are baked to plain SPIR-V offline by glslangValidator (the glslang
-# port's "tools" feature) and embedded as C arrays via
+# sesolver_vkcheck: THE GPU verification harness. NO windowing anywhere in
+# this binary: volk loads the loader, VMA allocates, and the Vulkan-GLSL
+# kernel sources are baked to plain SPIR-V offline by glslangValidator (the
+# glslang port's "tools" feature) and embedded as C arrays via
 # tools/cmake/bin2h.cmake. Every check pins a CPU double-precision reference
 # value and tolerance. ctest: label "gpu", exit 77 = SKIP without a Vulkan
 # device; SES_VK_VALIDATION=1 turns on the validation layers and fails the
 # run on any layer error.
 # ---------------------------------------------------------------------------
-find_package(volk CONFIG QUIET)
-find_package(VulkanMemoryAllocator CONFIG QUIET)
-find_program(SES_GLSLANG_VALIDATOR glslangValidator
-    HINTS "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/tools/glslang")
-if(TARGET volk::volk AND TARGET GPUOpen::VulkanMemoryAllocator
-        AND SES_GLSLANG_VALIDATOR)
-    set(_ses_vk_spv_dir "${CMAKE_CURRENT_BINARY_DIR}/vk_spv")
-    file(MAKE_DIRECTORY "${_ses_vk_spv_dir}")
-    set(_ses_vk_headers "")
-    foreach(_k IN ITEMS phase_multiply scale norm_peak inner_product
-            dipole_kick mean_force dipole pack_half unpack_half conj_scale
-            shear axpy copy_state synth project_deposit
-            bridge_store bridge_load
-            accum bloom_down bloom_up compose particles
-            occupancy occ_dilate shadow half_mul kin_mul damp_mul
-            fft_line8 fft_line64 fft_line256)
-        set(_src "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${_k}.comp")
-        set(_spv "${_ses_vk_spv_dir}/${_k}.spv")
-        set(_hdr "${_ses_vk_spv_dir}/${_k}_spv.h")
-        add_custom_command(
-            OUTPUT "${_hdr}"
-            BYPRODUCTS "${_spv}"
-            COMMAND "${SES_GLSLANG_VALIDATOR}" -V --target-env vulkan1.1
-                    -o "${_spv}" "${_src}"
-            COMMAND "${CMAKE_COMMAND}" "-DIN=${_spv}" "-DOUT=${_hdr}"
-                    "-DNAME=k_${_k}_spv"
-                    -P "${CMAKE_SOURCE_DIR}/tools/cmake/bin2h.cmake"
-            DEPENDS "${_src}" "${CMAKE_SOURCE_DIR}/tools/cmake/bin2h.cmake"
-            COMMENT "glslangValidator: ${_k}.comp -> SPIR-V header"
-            VERBATIM)
-        list(APPEND _ses_vk_headers "${_hdr}")
-    endforeach()
-    # Render shader pairs for the raw-Vulkan scene renderer. Dots in
-    # the stage extension are sanitized out of the symbol name.
-    foreach(_k IN ITEMS mesh.vert mesh.frag volume.vert volume.frag
-            flow.vert flow.frag)
-        string(REPLACE "." "_" _sym "${_k}")
-        set(_src "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${_k}")
-        set(_spv "${_ses_vk_spv_dir}/${_sym}.spv")
-        set(_hdr "${_ses_vk_spv_dir}/${_sym}_spv.h")
-        add_custom_command(
-            OUTPUT "${_hdr}"
-            BYPRODUCTS "${_spv}"
-            COMMAND "${SES_GLSLANG_VALIDATOR}" -V --target-env vulkan1.1
-                    -o "${_spv}" "${_src}"
-            COMMAND "${CMAKE_COMMAND}" "-DIN=${_spv}" "-DOUT=${_hdr}"
-                    "-DNAME=k_${_sym}_spv"
-                    -P "${CMAKE_SOURCE_DIR}/tools/cmake/bin2h.cmake"
-            DEPENDS "${_src}" "${CMAKE_SOURCE_DIR}/tools/cmake/bin2h.cmake"
-            COMMENT "glslangValidator: ${_k} -> SPIR-V header"
-            VERBATIM)
-        list(APPEND _ses_vk_headers "${_hdr}")
-    endforeach()
-    # One generation rule shared by every ses_vk consumer (the app's engine
-    # and the vkcheck harness) -- targets depend on this, not on the files.
-    add_custom_target(ses_spv_headers DEPENDS ${_ses_vk_headers})
-
-    # The app's compute engine is ses_vk: raw Vulkan on the
-    # QRhiWidget-adopted device, kernels from the offline-baked SPIR-V.
-    add_dependencies(sesolver_app ses_spv_headers)
-    target_include_directories(sesolver_app PRIVATE "${_ses_vk_spv_dir}")
-    target_link_libraries(sesolver_app PRIVATE
-        volk::volk GPUOpen::VulkanMemoryAllocator)
-
-    add_executable(sesolver_vkcheck src/vkcheck_main.cpp)
-    add_dependencies(sesolver_vkcheck ses_spv_headers)
-    # A deliberately Qt-free binary: no moc/rcc/uic passes, and
-    # _CRT_SECURE_NO_WARNINGS keeps MSVC quiet about std::getenv (the
-    # SES_VK_VALIDATION toggle; reading it is race-free here).
-    set_target_properties(sesolver_vkcheck PROPERTIES
-        AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
-    if(MSVC)
-        target_compile_definitions(sesolver_vkcheck PRIVATE _CRT_SECURE_NO_WARNINGS)
-    endif()
-    target_include_directories(sesolver_vkcheck PRIVATE "${_ses_vk_spv_dir}")
-    target_link_libraries(sesolver_vkcheck PRIVATE
-        sesolver_core
-        volk::volk
-        GPUOpen::VulkanMemoryAllocator
-        ses_warnings)
-    target_compile_features(sesolver_vkcheck PRIVATE cxx_std_20)
-    # Native VkFFT: the plan runs on the engine's own device/queue, recorded
-    # straight into its primary command buffers (volk's canonical-name
-    # pointers satisfy header-only VkFFT; no vulkan-1 import lib -- see the
-    # volk NOTE above ses_enable_vkfft).
-    ses_enable_vkfft(sesolver_vkcheck volk)
-    add_test(NAME VkCheck COMMAND sesolver_vkcheck)
-    set_tests_properties(VkCheck PROPERTIES
-        LABELS "gpu"
-        SKIP_RETURN_CODE 77)
-    message(STATUS "Framework-free harness 'sesolver_vkcheck' enabled.")
-else()
-    # The app's compute engine is ses_vk -- these are hard requirements
-    # (the vcpkg manifest provides all three on every platform).
-    message(FATAL_ERROR "sesolver_app needs volk + vulkan-memory-allocator "
-        "+ glslangValidator (vcpkg manifest deps; is glslang[tools] on?).")
+add_executable(sesolver_vkcheck src/vkcheck_main.cpp)
+add_dependencies(sesolver_vkcheck ses_spv_headers)
+# _CRT_SECURE_NO_WARNINGS keeps MSVC quiet about std::getenv (the
+# SES_VK_VALIDATION toggle; reading it is race-free here).
+if(MSVC)
+    target_compile_definitions(sesolver_vkcheck PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
-
-# Stage the Qt runtime next to the app after every build, so it launches
-# from the IDE or Explorer without Qt on PATH (the classic missing-
-# Qt6Widgets.dll failure when pressing F5 in Visual Studio). Skipped for a
-# static Qt build -- there are no Qt DLLs to deploy.
-if(WIN32 AND NOT _ses_qt_core_type STREQUAL "STATIC_LIBRARY")
-    find_program(SES_WINDEPLOYQT windeployqt HINTS "${_qt6_bin_dir}")
-    if(SES_WINDEPLOYQT)
-        add_custom_command(TARGET sesolver_app POST_BUILD
-            COMMAND "${SES_WINDEPLOYQT}" --no-translations
-                    "$<TARGET_FILE:sesolver_app>"
-            COMMENT "windeployqt: staging the Qt runtime next to sesolver_app")
-    endif()
-endif()
+target_include_directories(sesolver_vkcheck PRIVATE "${_ses_vk_spv_dir}")
+target_link_libraries(sesolver_vkcheck PRIVATE
+    sesolver_core
+    volk::volk
+    GPUOpen::VulkanMemoryAllocator
+    ses_warnings)
+target_compile_features(sesolver_vkcheck PRIVATE cxx_std_20)
+# Native VkFFT: the plan runs on the engine's own device/queue, recorded
+# straight into its primary command buffers (volk's canonical-name
+# pointers satisfy header-only VkFFT; no vulkan-1 import lib -- see the
+# volk NOTE above ses_enable_vkfft).
+ses_enable_vkfft(sesolver_vkcheck)
+add_test(NAME VkCheck COMMAND sesolver_vkcheck)
+set_tests_properties(VkCheck PROPERTIES
+    LABELS "gpu"
+    SKIP_RETURN_CODE 77)
+message(STATUS "Framework-free harness 'sesolver_vkcheck' enabled.")

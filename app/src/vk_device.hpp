@@ -86,7 +86,8 @@ struct DeviceContext {
     DeviceContext& operator=(const DeviceContext&) = delete;
     ~DeviceContext() { destroy(); }
 
-    // ADOPT externally supplied handles (the GUI's QRhi-owned device): the
+    // ADOPT externally supplied handles (a host framework's device; the Qt
+    // shell used this before the app owned its device via create_*): the
     // core code stays framework-free -- these are Khronos-standard handles,
     // dependency-injected. The context creates its OWN VmaAllocator on the
     // shared device (never touch the owner's) and destroys only what it
@@ -125,15 +126,24 @@ struct DeviceContext {
 
     // Self-create the whole chain (headless path).
     Boot create(bool want_validation) {
+        const Boot inst = create_instance(want_validation, {});
+        return inst == Boot::ok ? create_device(VK_NULL_HANDLE) : inst;
+    }
+
+    // Instance half of the owning path. `extra_exts` carries the window
+    // system's surface extensions (SDL_Vulkan_GetInstanceExtensions) -- the
+    // GUI shell creates its VkSurfaceKHR between this and create_device().
+    Boot create_instance(bool want_validation,
+                         const std::vector<const char*>& extra_exts) {
         if (volkInitialize() != VK_SUCCESS) {
             return Boot::no_driver;  // no vulkan-1 runtime on this machine
         }
 
-        // Instance. Validation layer + debug-utils only when asked AND the
-        // layer is actually discoverable (else proceed without, with a note).
+        // Validation layer + debug-utils only when asked AND the layer is
+        // actually discoverable (else proceed without, with a note).
         const char* kValidationLayer = "VK_LAYER_KHRONOS_validation";
         std::vector<const char*> layers;
-        std::vector<const char*> exts;
+        std::vector<const char*> exts{extra_exts};
         if (want_validation) {
             std::uint32_t count = 0;
             vkEnumerateInstanceLayerProperties(&count, nullptr);
@@ -188,7 +198,13 @@ struct DeviceContext {
                 messenger = VK_NULL_HANDLE;  // non-fatal: layer still logs
             }
         }
+        return Boot::ok;
+    }
 
+    // Device half of the owning path. A non-null `present_surface` makes
+    // this a PRESENTING device: the queue family must support presenting to
+    // it and VK_KHR_swapchain is enabled (the headless checks pass null).
+    Boot create_device(VkSurfaceKHR present_surface) {
         // Physical device: prefer the first discrete GPU, else the first
         // anything.
         std::uint32_t dev_count = 0;
@@ -212,8 +228,10 @@ struct DeviceContext {
         std::memcpy(device_name, props.deviceName, sizeof(device_name));
 
         // Queue family: first with compute, preferring one that also has
-        // graphics (the adopted GUI queue is a combined family, and the
-        // engine's image barriers use fragment stages).
+        // graphics (the engine's image barriers use fragment stages) and --
+        // when presenting -- one that can present to the surface. On desktop
+        // hardware the combined graphics family presents, so the preferences
+        // coincide.
         std::uint32_t qf_count = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(phys_dev, &qf_count, nullptr);
         std::vector<VkQueueFamilyProperties> qf(qf_count);
@@ -221,12 +239,21 @@ struct DeviceContext {
         bool found = false;
         for (std::uint32_t i = 0; i < qf_count; ++i) {
             const VkQueueFlags flags = qf[i].queueFlags;
-            if ((flags & VK_QUEUE_COMPUTE_BIT) != 0) {
-                queue_family = i;
-                found = true;
-                if ((flags & VK_QUEUE_GRAPHICS_BIT) != 0) {
-                    break;  // combined family preferred
+            if ((flags & VK_QUEUE_COMPUTE_BIT) == 0) {
+                continue;
+            }
+            if (present_surface != VK_NULL_HANDLE) {
+                VkBool32 can_present = VK_FALSE;
+                vkGetPhysicalDeviceSurfaceSupportKHR(phys_dev, i, present_surface,
+                                                     &can_present);
+                if (can_present != VK_TRUE) {
+                    continue;
                 }
+            }
+            queue_family = i;
+            found = true;
+            if ((flags & VK_QUEUE_GRAPHICS_BIT) != 0) {
+                break;  // combined family preferred
             }
         }
         if (!found) {
@@ -239,10 +266,15 @@ struct DeviceContext {
         qci.queueFamilyIndex = queue_family;
         qci.queueCount = 1;
         qci.pQueuePriorities = &prio;
+        const char* kSwapchainExt = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
         VkDeviceCreateInfo dci{};
         dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
         dci.queueCreateInfoCount = 1;
         dci.pQueueCreateInfos = &qci;
+        if (present_surface != VK_NULL_HANDLE) {
+            dci.enabledExtensionCount = 1;
+            dci.ppEnabledExtensionNames = &kSwapchainExt;
+        }
         if (vkCreateDevice(phys_dev, &dci, nullptr, &device) != VK_SUCCESS) {
             return Boot::error;
         }

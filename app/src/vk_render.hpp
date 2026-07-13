@@ -766,7 +766,9 @@ private:
                                VK_IMAGE_ASPECT_COLOR_BIT, &bloom_[1], qw, qh) ||
             !create_attachment(VK_FORMAT_R16G16B16A16_SFLOAT, post_usage,
                                VK_IMAGE_ASPECT_COLOR_BIT, &bloom_[2], ew, eh) ||
-            !create_attachment(VK_FORMAT_R8G8B8A8_UNORM, post_usage,
+            // TRANSFER_SRC: the shell's --dump-frame readback copies from it.
+            !create_attachment(VK_FORMAT_R8G8B8A8_UNORM,
+                               post_usage | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                                VK_IMAGE_ASPECT_COLOR_BIT, &present_, width_,
                                height_)) {
             return false;

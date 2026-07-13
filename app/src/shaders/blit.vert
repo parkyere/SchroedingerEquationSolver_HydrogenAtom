@@ -1,8 +1,8 @@
 #version 450
 
-// Fullscreen-triangle blit: the ONLY geometry Qt still draws. The scene
+// Fullscreen-triangle blit: the shell's swapchain pass. The scene
 // itself is rendered by ses_vk into an offscreen image; this pass samples it
-// 1:1 into the QRhiWidget's backing texture.
+// 1:1 into the swapchain image (Dear ImGui rides the same pass after it).
 layout(location = 0) out vec2 v_uv;
 
 void main() {
