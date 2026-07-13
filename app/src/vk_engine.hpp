@@ -58,6 +58,8 @@ struct EngineKernels {
     std::size_t kin_mul_size = 0;
     const unsigned char* damp = nullptr;      // damp_mul.comp (real absorber)
     std::size_t damp_size = 0;
+    const unsigned char* pd = nullptr;  // phase_damp_mul.comp (fused V+mask;
+    std::size_t pd_size = 0;            // optional: absent => separate passes)
     std::size_t mul_size = 0;
     const unsigned char* conj = nullptr;   // conj_scale.comp
     std::size_t conj_size = 0;
@@ -271,12 +273,28 @@ public:
         }
         staging_bytes_ = field_bytes_;
 
+        // Optional fused V+mask kernel: absent blob => step() falls back to
+        // separate half-kick + damp passes.
+        if (blobs.pd != nullptr) {
+            if (!phase_damp_.create(ctx, blobs.pd, blobs.pd_size,
+                                    {{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
+                                     {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
+                                     {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
+                                     {3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER}})) {
+                return false;
+            }
+            pd_kernel_ok_ = true;
+        }
+
         // std140 parameter blocks, written once into host-mapped UBOs (every
         // submission fence-waits, so no in-flight aliasing; the scale UBO is
         // the only one rewritten, between submissions).
         const MulParams muln{static_cast<std::uint32_t>(cells_), 0, 0, 0};
         const HalfMulParams halfp{static_cast<std::uint32_t>(cells_),
                                   static_cast<float>(-0.5 * dt), 0.0f, 0.0f};
+        // Full kick -dt: batch-interior half-kick pairs merged (see step()).
+        const HalfMulParams fullp{static_cast<std::uint32_t>(cells_),
+                                  static_cast<float>(-dt), 0.0f, 0.0f};
         const KinMulParams kinp{static_cast<std::uint32_t>(cells_), grid.x.n,
                                 grid.y.n, static_cast<float>(-0.5 * dt)};
         const ConjParams conj1{static_cast<std::uint32_t>(cells_), 1.0f, 0.0f,
@@ -295,6 +313,7 @@ public:
                                1.0f / static_cast<float>(n_), 0.0f, 0.0f};
         const ShearParams shear_zero{};
         if (!write_ubo(&halfp_ubo_, &halfp, sizeof(halfp)) ||
+            !write_ubo(&fullp_ubo_, &fullp, sizeof(fullp)) ||
             !write_ubo(&kinp_ubo_, &kinp, sizeof(kinp)) ||
             !write_ubo(&muln_ubo_, &muln, sizeof(muln)) ||
             !write_ubo(&conj1_ubo_, &conj1, sizeof(conj1)) ||
@@ -341,6 +360,16 @@ public:
                                 VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                                 halfp_ubo_.buf, sizeof(HalfMulParams));
         }
+        fullv_set_ = arena_.allocate(*ctx_, half_mul_.set_layout());
+        if (fullv_set_ != VK_NULL_HANDLE) {
+            arena_.write_buffer(*ctx_, fullv_set_, 0,
+                                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, psi_.buf);
+            arena_.write_buffer(*ctx_, fullv_set_, 1,
+                                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, v_buf_.buf);
+            arena_.write_buffer(*ctx_, fullv_set_, 2,
+                                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                                fullp_ubo_.buf, sizeof(HalfMulParams));
+        }
         kin3_set_ = arena_.allocate(*ctx_, kin_mul_.set_layout());
         if (kin3_set_ != VK_NULL_HANDLE) {
             arena_.write_buffer(*ctx_, kin3_set_, 0,
@@ -386,7 +415,8 @@ public:
         synth_any_set_ = arena_.allocate(*ctx_, synth_.set_layout());
         norm_any_set_ = arena_.allocate(*ctx_, norm_.set_layout());
         scale_any_set_ = arena_.allocate(*ctx_, scale_.set_layout());
-        if (halfv_set_ == VK_NULL_HANDLE || kin3_set_ == VK_NULL_HANDLE ||
+        if (halfv_set_ == VK_NULL_HANDLE || fullv_set_ == VK_NULL_HANDLE ||
+            kin3_set_ == VK_NULL_HANDLE ||
             conj1_set_ == VK_NULL_HANDLE || conjN_set_ == VK_NULL_HANDLE ||
             fft_set_[0] == VK_NULL_HANDLE || fft_set_[1] == VK_NULL_HANDLE ||
             fft_set_[2] == VK_NULL_HANDLE || scale_set_ == VK_NULL_HANDLE ||
@@ -430,9 +460,27 @@ public:
             return;
         }
         Recorder r{shot.cb(), true};
-        for (int s = 0; s < nsteps; ++s) {
-            run_step_body(r, half_mul_, halfv_set_, kin_mul_, kin3_set_);
-            record_absorb(r, absorb);
+        // Strang batch with interior FULL kicks: e^{-iVdt/2} (kin e^{-iVdt})^
+        // {n-1} kin e^{-iVdt/2} -- the operator product is IDENTICAL to
+        // per-step half-kick pairs, one elementwise pass fewer per step.
+        // With absorb the mask rides the trailing kick of every step (fused
+        // kernel; diagonal factors commute exactly, per-step damping rate
+        // unchanged). Fallback without the fused kernel: separate passes.
+        const bool fuse = absorb && pd_half_set_ != VK_NULL_HANDLE;
+        if (nsteps > 0) {
+            r.dispatch(half_mul_, halfv_set_, mul_groups_);
+            for (int s = 0; s < nsteps; ++s) {
+                record_kin_body(r);
+                const bool last = s + 1 == nsteps;
+                if (fuse) {
+                    r.dispatch(phase_damp_, last ? pd_half_set_ : pd_full_set_,
+                               mul_groups_);
+                } else {
+                    r.dispatch(half_mul_, last ? halfv_set_ : fullv_set_,
+                               mul_groups_);
+                    record_absorb(r, absorb);
+                }
+            }
         }
         record_bridge_tail(shot.cb(), bridge);
         shot.submit_and_wait(*ctx_);
@@ -515,6 +563,34 @@ public:
             arena_.write_buffer(*ctx_, damp_set_, 2,
                                 VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                                 muln_ubo_.buf, sizeof(MulParams));
+        }
+        // Fused V+mask sets (step()'s fast path): full kick for interior
+        // steps, half kick for the batch tail.
+        if (pd_kernel_ok_ && pd_full_set_ == VK_NULL_HANDLE) {
+            pd_full_set_ = arena_.allocate(*ctx_, phase_damp_.set_layout());
+            pd_half_set_ = arena_.allocate(*ctx_, phase_damp_.set_layout());
+            if (pd_full_set_ == VK_NULL_HANDLE ||
+                pd_half_set_ == VK_NULL_HANDLE) {
+                pd_full_set_ = VK_NULL_HANDLE;
+                pd_half_set_ = VK_NULL_HANDLE;  // fallback path stays valid
+                return true;
+            }
+            const auto wire = [this](VkDescriptorSet set, const Buffer& ubo) {
+                arena_.write_buffer(*ctx_, set, 0,
+                                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                    psi_.buf);
+                arena_.write_buffer(*ctx_, set, 1,
+                                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                    v_buf_.buf);
+                arena_.write_buffer(*ctx_, set, 2,
+                                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                    damp_buf_.buf);
+                arena_.write_buffer(*ctx_, set, 3,
+                                    VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, ubo.buf,
+                                    sizeof(HalfMulParams));
+            };
+            wire(pd_full_set_, fullp_ubo_);
+            wire(pd_half_set_, halfp_ubo_);
         }
         return true;
     }
@@ -1322,6 +1398,7 @@ public:
         half_mul_.destroy(*ctx_);
         kin_mul_.destroy(*ctx_);
         damp_.destroy(*ctx_);
+        phase_damp_.destroy(*ctx_);
         ctx_->destroy_buffer(&relax_kin_);
         ctx_->destroy_buffer(&relax_half_);
         ctx_->destroy_buffer(&decode_scratch_[1]);
@@ -1359,6 +1436,7 @@ public:
         ctx_->destroy_buffer(&ky2_buf_);
         ctx_->destroy_buffer(&kz2_buf_);
         ctx_->destroy_buffer(&halfp_ubo_);
+        ctx_->destroy_buffer(&fullp_ubo_);
         ctx_->destroy_buffer(&kinp_ubo_);
         ctx_->destroy_buffer(&damp_buf_);
         ctx_->destroy_buffer(&psi_);
@@ -2032,6 +2110,24 @@ private:
         record_shear(r, 0, b);
     }
 
+    // FFT . kin . IFFT -- the kinetic body of one Strang step; the potential
+    // kicks around it are recorded by the caller (step()'s fused batching).
+    void record_kin_body(Recorder& r) {
+#ifdef SES_HAVE_VKFFT
+        if (vkfft_active()) {
+            record_vkfft(r, -1);  // forward
+            r.dispatch(kin_mul_, kin3_set_, mul_groups_);
+            record_vkfft(r, 1);   // inverse, normalized 1/N by the plan
+            return;
+        }
+#endif
+        fft3(r);
+        r.dispatch(kin_mul_, kin3_set_, mul_groups_);
+        r.dispatch(conj_, conj1_set_, mul_groups_);
+        fft3(r);
+        r.dispatch(conj_, conjN_set_, mul_groups_);
+    }
+
     // halfV . IFFT . kin . FFT . halfV. With VkFFT active the two whole-3D
     // transforms are single VkFFTAppend blocks (coalesced transposes; the
     // inverse carries the 1/N normalize), replacing six line-FFT dispatches
@@ -2206,6 +2302,7 @@ private:
     Kernel half_mul_;
     Kernel kin_mul_;
     Kernel damp_;
+    Kernel phase_damp_;  // fused V+mask (optional; pd_kernel_ok_)
     Kernel conj_;
     Kernel fft_;
     Kernel norm_;
@@ -2241,6 +2338,7 @@ private:
     Buffer ky2_buf_{};
     Buffer kz2_buf_{};
     Buffer halfp_ubo_{};
+    Buffer fullp_ubo_{};  // coef = -dt (interior full kick)
     Buffer kinp_ubo_{};
     Buffer damp_buf_{};  // real absorber mask, R32
     double dt_step_ = 0.0;
@@ -2272,8 +2370,12 @@ private:
     Buffer relax_kin_{};
 
     VkDescriptorSet halfv_set_ = VK_NULL_HANDLE;
+    VkDescriptorSet fullv_set_ = VK_NULL_HANDLE;
     VkDescriptorSet kin3_set_ = VK_NULL_HANDLE;
     VkDescriptorSet damp_set_ = VK_NULL_HANDLE;
+    VkDescriptorSet pd_full_set_ = VK_NULL_HANDLE;  // fused V+mask, coef -dt
+    VkDescriptorSet pd_half_set_ = VK_NULL_HANDLE;  // fused V+mask, coef -dt/2
+    bool pd_kernel_ok_ = false;
     VkDescriptorSet conj1_set_ = VK_NULL_HANDLE;
     VkDescriptorSet conjN_set_ = VK_NULL_HANDLE;
     VkDescriptorSet fft_set_[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE,

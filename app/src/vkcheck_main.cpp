@@ -42,6 +42,7 @@
 #include <half_mul_spv.h>
 #include <kin_mul_spv.h>
 #include <damp_mul_spv.h>
+#include <phase_damp_mul_spv.h>
 #include <conj_scale_spv.h>
 #include <scale_spv.h>
 #include <norm_peak_spv.h>
@@ -1116,6 +1117,8 @@ ses_vk::EngineKernels engine_blobs_8() {
     b.kin_mul_size = k_kin_mul_spv_size;
     b.damp = k_damp_mul_spv;
     b.damp_size = k_damp_mul_spv_size;
+    b.pd = k_phase_damp_mul_spv;
+    b.pd_size = k_phase_damp_mul_spv_size;
     b.conj = k_conj_scale_spv;
     b.conj_size = k_conj_scale_spv_size;
     b.fft = k_fft_line8_spv;
