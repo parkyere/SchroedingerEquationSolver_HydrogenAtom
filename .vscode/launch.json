@@ -22,7 +22,7 @@
             "cwd": "${workspaceFolder}/out/build/linux-clang22/app",
             "environment": [],
             "MIMode": "gdb",
-            "miDebuggerPath": "gdb",
+            "miDebuggerPath": "${workspaceFolder}/tools/gdb-vscode.sh",
             "preLaunchTask": "cmake-build-app",
             "setupCommands": [
                 {
@@ -46,7 +46,7 @@
             "cwd": "${workspaceFolder}/out/build/linux-clang22/app",
             "environment": [],
             "MIMode": "gdb",
-            "miDebuggerPath": "gdb",
+            "miDebuggerPath": "${workspaceFolder}/tools/gdb-vscode.sh",
             "logging": {
                 "engineLogging": true,
                 "trace": true,
