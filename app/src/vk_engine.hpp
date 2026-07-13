@@ -769,8 +769,12 @@ public:
         shot.destroy(*ctx_);
     }
 
-    struct Recorder;  // defined below (batch-recording helper)
+private:
+    // Forward declaration must match the definition's access (clang enforces
+    // [class.access.spec]; the definition lives in the private section).
+    struct Recorder;
 
+public:
     // psi <- psi * mask: the absorbing-boundary damp, recorded once PER STEP
     // so the absorption rate cannot depend on how steps are batched.
     void record_absorb(Recorder& r, bool absorb) {
