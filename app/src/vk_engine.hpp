@@ -907,47 +907,29 @@ public:
     }
 
     // ---- semiclassical radiation (Ehrenfest mean force) -----------------
-    // Upload grad V (central differences on the periodic grid, packed vec4)
-    // so mean_force can reduce against it.
+    // Upload the scalar potential (R32) for mean_force: the kernel takes the
+    // periodic central differences IN-SHADER, so no 16 B/cell gradient field
+    // is stored (it was 4x this buffer's footprint; the samples are the same
+    // formula, just computed at read time from cache-hot neighbor taps).
     bool set_potential_gradient(const std::vector<double>& v) {
-        const int nx = grid_.x.n;
-        const int ny = grid_.y.n;
-        const int nz = grid_.z.n;
-        const double i2hx = 1.0 / (2.0 * grid_.x.spacing());
-        const double i2hy = 1.0 / (2.0 * grid_.y.spacing());
-        const double i2hz = 1.0 / (2.0 * grid_.z.spacing());
-        std::vector<float> packed(4 * cells_, 0.0f);
-        for (int k = 0; k < nz; ++k) {
-            const int kp = (k + 1) % nz;
-            const int km = (k - 1 + nz) % nz;
-            for (int j = 0; j < ny; ++j) {
-                const int jp = (j + 1) % ny;
-                const int jm = (j - 1 + ny) % ny;
-                for (int i = 0; i < nx; ++i) {
-                    const int ip = (i + 1) % nx;
-                    const int im = (i - 1 + nx) % nx;
-                    const std::size_t idx =
-                        static_cast<std::size_t>(grid_.flat(i, j, k));
-                    packed[4 * idx + 0] = static_cast<float>(
-                        (v[static_cast<std::size_t>(grid_.flat(ip, j, k))] -
-                         v[static_cast<std::size_t>(grid_.flat(im, j, k))]) *
-                        i2hx);
-                    packed[4 * idx + 1] = static_cast<float>(
-                        (v[static_cast<std::size_t>(grid_.flat(i, jp, k))] -
-                         v[static_cast<std::size_t>(grid_.flat(i, jm, k))]) *
-                        i2hy);
-                    packed[4 * idx + 2] = static_cast<float>(
-                        (v[static_cast<std::size_t>(grid_.flat(i, j, kp))] -
-                         v[static_cast<std::size_t>(grid_.flat(i, j, km))]) *
-                        i2hz);
-                }
-            }
-        }
-        if (grad_buf_.buf == VK_NULL_HANDLE) {
-            if (!ctx_->create_device_buffer(4 * cells_ * sizeof(float),
-                                            &grad_buf_) ||
+        if (force_v_buf_.buf == VK_NULL_HANDLE) {
+            struct alignas(16) ForceParams {
+                std::uint32_t n, nx, ny, nz;
+                float inv_2h[4];
+            };
+            const ForceParams fp{
+                static_cast<std::uint32_t>(cells_),
+                static_cast<std::uint32_t>(grid_.x.n),
+                static_cast<std::uint32_t>(grid_.y.n),
+                static_cast<std::uint32_t>(grid_.z.n),
+                {static_cast<float>(1.0 / (2.0 * grid_.x.spacing())),
+                 static_cast<float>(1.0 / (2.0 * grid_.y.spacing())),
+                 static_cast<float>(1.0 / (2.0 * grid_.z.spacing())), 0.0f}};
+            if (!ctx_->create_device_buffer(cells_ * sizeof(float),
+                                            &force_v_buf_) ||
                 !ctx_->create_device_buffer(4 * kGroups * sizeof(float),
-                                            &force_partials_)) {
+                                            &force_partials_) ||
+                !write_ubo(&force_ubo_, &fp, sizeof(fp))) {
                 return false;
             }
             force_set_ = arena_.allocate(*ctx_, force_.set_layout());
@@ -958,13 +940,17 @@ public:
             arena_.write_buffer(*ctx_, force_set_, 0, storage, psi_.buf);
             arena_.write_buffer(*ctx_, force_set_, 1,
                                 VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                                muln_ubo_.buf, sizeof(MulParams));
+                                force_ubo_.buf, sizeof(ForceParams));
             arena_.write_buffer(*ctx_, force_set_, 2, storage,
                                 force_partials_.buf);
-            arena_.write_buffer(*ctx_, force_set_, 4, storage, grad_buf_.buf);
+            arena_.write_buffer(*ctx_, force_set_, 4, storage,
+                                force_v_buf_.buf);
         }
-        return upload_raw(grad_buf_, packed.data(),
-                          packed.size() * sizeof(float));
+        std::vector<float> vf(cells_);
+        for (std::size_t i = 0; i < cells_; ++i) {
+            vf[i] = static_cast<float>(v[i]);
+        }
+        return upload_raw(force_v_buf_, vf.data(), cells_ * sizeof(float));
     }
 
     // <grad V> = sum |psi|^2 grad V * dV -- the Ehrenfest dipole
@@ -1333,7 +1319,8 @@ public:
         ctx_->destroy_buffer(&dipole_partials_);
         ctx_->destroy_buffer(&dipole_ubo_);
         ctx_->destroy_buffer(&force_partials_);
-        ctx_->destroy_buffer(&grad_buf_);
+        ctx_->destroy_buffer(&force_v_buf_);
+        ctx_->destroy_buffer(&force_ubo_);
         ctx_->destroy_buffer(&radial_buf_);
         ctx_->destroy_buffer(&synth_ubo_);
         ctx_->destroy_buffer(&axpy_ubo_);
@@ -2251,7 +2238,8 @@ private:
     Buffer axpy_ubo_{};
     Buffer synth_ubo_{};
     Buffer radial_buf_{};
-    Buffer grad_buf_{};
+    Buffer force_v_buf_{};  // scalar V for the in-shader mean-force gradient
+    Buffer force_ubo_{};
     Buffer force_partials_{};
     Buffer dipole_ubo_{};
     Buffer dipole_partials_{};

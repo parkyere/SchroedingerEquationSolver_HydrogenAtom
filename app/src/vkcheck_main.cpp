@@ -588,21 +588,38 @@ bool check_dipole_kick(ses_vk::DeviceContext& ctx) {
 // <grad V> = sum |psi|^2 grad V: vec4 field-input reduction (grad V at
 // binding 4), vs a CPU double reference (rel 1e-4).
 bool check_mean_force(ses_vk::DeviceContext& ctx) {
-    const std::size_t n = 20000;
+    // A synthetic PERIODIC 3D grid: the kernel now takes the central
+    // differences of the scalar potential in-shader, so the check feeds V
+    // (not a precomputed gradient) and the CPU reference applies the same
+    // periodic differences in double.
+    const std::uint32_t nx = 40, ny = 25, nz = 20;
+    const std::size_t n = std::size_t(nx) * ny * nz;
+    const double i2h[3] = {1.0 / (2.0 * 0.5), 1.0 / (2.0 * 0.4),
+                           1.0 / (2.0 * 0.25)};
     std::vector<ses::Complex<double>> psi_d(n);
-    std::vector<float> grad_f(4 * n);
-    double cpu[3] = {0.0, 0.0, 0.0};
+    std::vector<double> v_d(n);
     for (std::size_t i = 0; i < n; ++i) {
         const double x = static_cast<double>(i);
         psi_d[i] = ses::Complex<double>{0.4 * std::sin(0.011 * x),
                                         0.3 * std::cos(0.013 * x) + 0.05};
-        const double gx = std::sin(0.007 * x);
-        const double gy = std::cos(0.005 * x) - 0.3;
-        const double gz = 0.2 * std::sin(0.017 * x);
-        grad_f[4 * i + 0] = static_cast<float>(gx);
-        grad_f[4 * i + 1] = static_cast<float>(gy);
-        grad_f[4 * i + 2] = static_cast<float>(gz);
-        grad_f[4 * i + 3] = 0.0f;
+        const std::size_t ix = i % nx, iy = (i / nx) % ny, iz = i / (nx * ny);
+        v_d[i] = std::sin(0.31 * double(ix)) * std::cos(0.17 * double(iy)) +
+                 0.4 * std::sin(0.23 * double(iz)) - 0.2;
+    }
+    double cpu[3] = {0.0, 0.0, 0.0};
+    for (std::size_t i = 0; i < n; ++i) {
+        const std::size_t ix = i % nx, iy = (i / nx) % ny, iz = i / (nx * ny);
+        const std::size_t row = iz * nx * ny + iy * nx;
+        const std::size_t col = iz * nx * ny + ix;
+        const std::size_t pil = iy * nx + ix;
+        const double gx =
+            (v_d[row + (ix + 1) % nx] - v_d[row + (ix + nx - 1) % nx]) * i2h[0];
+        const double gy = (v_d[col + ((iy + 1) % ny) * nx] -
+                           v_d[col + ((iy + ny - 1) % ny) * nx]) *
+                          i2h[1];
+        const double gz = (v_d[pil + ((iz + 1) % nz) * nx * ny] -
+                           v_d[pil + ((iz + nz - 1) % nz) * nx * ny]) *
+                          i2h[2];
         const double d =
             psi_d[i].real() * psi_d[i].real() + psi_d[i].imag() * psi_d[i].imag();
         cpu[0] += d * gx;
@@ -610,28 +627,33 @@ bool check_mean_force(ses_vk::DeviceContext& ctx) {
         cpu[2] += d * gz;
     }
     const std::vector<float> psi_f = to_rg32f(psi_d);
+    std::vector<float> v_f(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        v_f[i] = static_cast<float>(v_d[i]);
+    }
     const VkDeviceSize psi_bytes = psi_f.size() * sizeof(float);
-    const VkDeviceSize grad_bytes = grad_f.size() * sizeof(float);
+    const VkDeviceSize v_bytes = v_f.size() * sizeof(float);
     const int groups = 256;
     const VkDeviceSize part_bytes = 4u * groups * sizeof(float);
 
     struct alignas(16) Params {
-        std::uint32_t n, pad0, pad1, pad2;
+        std::uint32_t n, nx, ny, nz;
+        float inv_2h[4];
     };
     ses_vk::Kernel k;
-    ses_vk::Buffer psi{}, grad{}, partials{}, staging{}, ubo{};
+    ses_vk::Buffer psi{}, vbuf{}, partials{}, staging{}, ubo{};
     Scope s(ctx);
     s.kernels = {&k};
-    s.buffers = {&psi, &grad, &partials, &staging, &ubo};
+    s.buffers = {&psi, &vbuf, &partials, &staging, &ubo};
 
     if (!k.create(ctx, k_mean_force_spv, k_mean_force_spv_size,
                   {{0, kStorage}, {1, kUniform}, {2, kStorage}, {4, kStorage}})) {
         return false;
     }
     if (!ctx.create_device_buffer(psi_bytes, &psi) ||
-        !ctx.create_device_buffer(grad_bytes, &grad) ||
+        !ctx.create_device_buffer(v_bytes, &vbuf) ||
         !ctx.create_device_buffer(part_bytes, &partials) ||
-        !ctx.create_host_buffer(psi_bytes + grad_bytes,
+        !ctx.create_host_buffer(psi_bytes + v_bytes,
                                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
                                     VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                 &staging) ||
@@ -640,9 +662,11 @@ bool check_mean_force(ses_vk::DeviceContext& ctx) {
         return false;
     }
     std::memcpy(staging.mapped, psi_f.data(), psi_bytes);
-    std::memcpy(static_cast<char*>(staging.mapped) + psi_bytes, grad_f.data(),
-                grad_bytes);
-    const Params params{static_cast<std::uint32_t>(n), 0, 0, 0};
+    std::memcpy(static_cast<char*>(staging.mapped) + psi_bytes, v_f.data(),
+                v_bytes);
+    const Params params{static_cast<std::uint32_t>(n), nx, ny, nz,
+                        {static_cast<float>(i2h[0]), static_cast<float>(i2h[1]),
+                         static_cast<float>(i2h[2]), 0.0f}};
     std::memcpy(ubo.mapped, &params, sizeof(params));
     flush(ctx, staging);
     flush(ctx, ubo);
@@ -653,11 +677,11 @@ bool check_mean_force(ses_vk::DeviceContext& ctx) {
     s.arena.write_buffer(ctx, set, 0, kStorage, psi.buf);
     s.arena.write_buffer(ctx, set, 1, kUniform, ubo.buf, sizeof(Params));
     s.arena.write_buffer(ctx, set, 2, kStorage, partials.buf);
-    s.arena.write_buffer(ctx, set, 4, kStorage, grad.buf);
+    s.arena.write_buffer(ctx, set, 4, kStorage, vbuf.buf);
 
     if (!s.shot.begin(ctx)) return false;
     record_uploads(s.shot.cb(), staging,
-                   {{&psi, 0, psi_bytes}, {&grad, psi_bytes, grad_bytes}});
+                   {{&psi, 0, psi_bytes}, {&vbuf, psi_bytes, v_bytes}});
     k.bind(s.shot.cb(), set);
     vkCmdDispatch(s.shot.cb(), groups, 1, 1);
     record_readback(s.shot.cb(), partials, staging, part_bytes);

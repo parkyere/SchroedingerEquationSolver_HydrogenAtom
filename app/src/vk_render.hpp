@@ -1437,18 +1437,25 @@ private:
 
     // The TESTED cyclic phase colormap as a repeating 1D texture (RGBA32F).
     bool create_phase_lut() {
+        // RGBA8: it is a colormap -- 1/255 steps are invisible, and 32-bit
+        // texels filter at FULL rate where the 128-bit RGBA32F ones were
+        // quarter-rate on the raymarch's hottest per-step tap.
         const std::vector<ses::Rgb> lut = ses::phase_lut(kPhaseLutSize);
-        std::vector<float> texels(4 * lut.size());
+        std::vector<std::uint8_t> texels(4 * lut.size());
+        auto quantize = [](double c) {
+            return static_cast<std::uint8_t>(
+                std::lround(std::clamp(c, 0.0, 1.0) * 255.0));
+        };
         for (std::size_t i = 0; i < lut.size(); ++i) {
-            texels[4 * i + 0] = static_cast<float>(lut[i].r);
-            texels[4 * i + 1] = static_cast<float>(lut[i].g);
-            texels[4 * i + 2] = static_cast<float>(lut[i].b);
-            texels[4 * i + 3] = 1.0f;
+            texels[4 * i + 0] = quantize(lut[i].r);
+            texels[4 * i + 1] = quantize(lut[i].g);
+            texels[4 * i + 2] = quantize(lut[i].b);
+            texels[4 * i + 3] = 255;
         }
         VkImageCreateInfo ici{};
         ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         ici.imageType = VK_IMAGE_TYPE_1D;
-        ici.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+        ici.format = VK_FORMAT_R8G8B8A8_UNORM;
         ici.extent = {kPhaseLutSize, 1, 1};
         ici.mipLevels = 1;
         ici.arrayLayers = 1;
@@ -1467,14 +1474,13 @@ private:
         vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
         vci.image = phase_tex_.img;
         vci.viewType = VK_IMAGE_VIEW_TYPE_1D;
-        vci.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+        vci.format = VK_FORMAT_R8G8B8A8_UNORM;
         vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         if (vkCreateImageView(ctx_->device, &vci, nullptr, &phase_tex_.view) !=
             VK_SUCCESS) {
             return false;
         }
-        return upload_image(phase_tex_.img, texels.data(),
-                            texels.size() * sizeof(float),
+        return upload_image(phase_tex_.img, texels.data(), texels.size(),
                             {kPhaseLutSize, 1, 1});
     }
 

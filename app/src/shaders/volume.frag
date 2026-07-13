@@ -98,7 +98,8 @@ void main() {
             t_cur += skip_len;
             continue;
         }
-        for (int k = 0; k < 8 && t_cur < t_stop && fine_budget > 0; ++k) {
+        for (int k = 0; k < 8 && t_cur < t_stop && fine_budget > 0 &&
+                        A < 0.999; ++k) {
             vec3 p = eye.xyz + t_cur * dir;
             vec3 uvw = (p - box_min.xyz) / ext + half_texel;
             vec2 s = texture(psi_tex, uvw).rg;
