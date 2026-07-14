@@ -93,6 +93,7 @@ struct DeviceContext {
     // unchanged). adopt() leaves them false (the owner enabled its features).
     bool feat_timeline_semaphore = false;
     bool feat_synchronization2 = false;
+    bool feat_dynamic_rendering = false;
     bool feat_host_query_reset = false;
     bool feat_storage16 = false;
     float timestamp_period = 1.0f;  // ns per timestamp tick (limits)
@@ -333,6 +334,7 @@ struct DeviceContext {
         feat_timeline_semaphore = probe12.timelineSemaphore == VK_TRUE;
         feat_host_query_reset = probe12.hostQueryReset == VK_TRUE;
         feat_synchronization2 = probe13.synchronization2 == VK_TRUE;
+        feat_dynamic_rendering = probe13.dynamicRendering == VK_TRUE;
         feat_storage16 = probe11.storageBuffer16BitAccess == VK_TRUE;
         timestamp_period = props.limits.timestampPeriod;
         timestamp_valid_bits = qf[compute_family].timestampValidBits;
@@ -340,6 +342,7 @@ struct DeviceContext {
         VkPhysicalDeviceVulkan13Features en13{};
         en13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
         en13.synchronization2 = feat_synchronization2 ? VK_TRUE : VK_FALSE;
+        en13.dynamicRendering = feat_dynamic_rendering ? VK_TRUE : VK_FALSE;
         VkPhysicalDeviceVulkan12Features en12{};
         en12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
         en12.timelineSemaphore = feat_timeline_semaphore ? VK_TRUE : VK_FALSE;

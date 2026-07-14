@@ -2512,11 +2512,13 @@ bool check_engine_bridge(ses_vk::DeviceContext& ctx) {
 // rather than fault later when a fast path uses it.
 bool check_device_features(const ses_vk::DeviceContext& ctx) {
     const bool pass = ctx.feat_timeline_semaphore && ctx.feat_synchronization2 &&
-                      ctx.feat_host_query_reset && ctx.feat_storage16;
+                      ctx.feat_dynamic_rendering && ctx.feat_host_query_reset &&
+                      ctx.feat_storage16;
     std::printf("device feature negotiation (Pascal floor): timeline=%d "
-                "sync2=%d hostQueryReset=%d storage16=%d  [%s]\n",
+                "sync2=%d dynRender=%d hostQueryReset=%d storage16=%d  [%s]\n",
                 ctx.feat_timeline_semaphore ? 1 : 0,
                 ctx.feat_synchronization2 ? 1 : 0,
+                ctx.feat_dynamic_rendering ? 1 : 0,
                 ctx.feat_host_query_reset ? 1 : 0, ctx.feat_storage16 ? 1 : 0,
                 pass ? "PASS" : "FAIL");
     return pass;

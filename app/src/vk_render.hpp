@@ -121,7 +121,7 @@ public:
         if (!arena_.create(ctx, 32, 32, 24, 0, 32, 24)) {
             return false;
         }
-        if (!create_samplers() || !create_ubos() || !create_render_pass() ||
+        if (!create_samplers() || !create_ubos() ||
             !create_pipelines(blobs) || !create_static_geometry() ||
             !create_phase_lut() || !create_post_kernels(blobs) ||
             !create_flow(blobs) || !create_volume_aux(blobs)) {
@@ -158,7 +158,7 @@ public:
         if (w == 0 || h == 0) {
             return false;
         }
-        if (w == width_ && h == height_ && fb_ != VK_NULL_HANDLE) {
+        if (w == width_ && h == height_ && color_.view != VK_NULL_HANDLE) {
             return true;
         }
         vkDeviceWaitIdle(ctx_->device);
@@ -179,7 +179,7 @@ public:
     // Record + submit the whole scene into the offscreen color image; on
     // return the image is in SHADER_READ_ONLY_OPTIMAL for the shell's blit.
     bool render(const FrameInput& in) {
-        if (fb_ == VK_NULL_HANDLE) {
+        if (color_.view == VK_NULL_HANDLE) {
             return false;
         }
         // Converged early-out: once the temporal accumulation saturates
@@ -261,18 +261,61 @@ public:
         }
 
         const float w = in.flash;
-        VkClearValue clears[2]{};
-        clears[0].color = {{0.04f + 0.55f * w, 0.05f + 0.42f * w,
-                            0.09f + 0.18f * w, 1.0f}};
-        clears[1].depthStencil = {1.0f, 0};
-        VkRenderPassBeginInfo rpbi{};
-        rpbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        rpbi.renderPass = rp_;
-        rpbi.framebuffer = fb_;
-        rpbi.renderArea = {{0, 0}, {width_, height_}};
-        rpbi.clearValueCount = 2;
-        rpbi.pClearValues = clears;
-        vkCmdBeginRenderPass(cb, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+        // Dynamic rendering: transition the attachments explicitly (no render
+        // pass to do it). loadOp=CLEAR discards the old color, so UNDEFINED
+        // old-layout is fine, but the previous frame's readers (present sample
+        // + post-chain compute imageLoads, which left it in GENERAL) must
+        // finish first. Depth uses its own barrier (the helper is color-only).
+        ses_vk::image_layout_barrier(
+            cb, color_.img, VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        {
+            VkImageMemoryBarrier2 dib{};
+            dib.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+            dib.srcStageMask = VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+            dib.srcAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            dib.dstStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT;
+            dib.dstAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            dib.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            dib.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            dib.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            dib.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            dib.image = depth_.img;
+            dib.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+            VkDependencyInfo ddep{};
+            ddep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+            ddep.imageMemoryBarrierCount = 1;
+            ddep.pImageMemoryBarriers = &dib;
+            vkCmdPipelineBarrier2(cb, &ddep);
+        }
+        VkRenderingAttachmentInfo color_att{};
+        color_att.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        color_att.imageView = color_.view;
+        color_att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        color_att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        color_att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        color_att.clearValue.color = {{0.04f + 0.55f * w, 0.05f + 0.42f * w,
+                                       0.09f + 0.18f * w, 1.0f}};
+        VkRenderingAttachmentInfo depth_att{};
+        depth_att.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        depth_att.imageView = depth_.view;
+        depth_att.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        depth_att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depth_att.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depth_att.clearValue.depthStencil = {1.0f, 0};
+        VkRenderingInfo rinfo{};
+        rinfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+        rinfo.renderArea = {{0, 0}, {width_, height_}};
+        rinfo.layerCount = 1;
+        rinfo.colorAttachmentCount = 1;
+        rinfo.pColorAttachments = &color_att;
+        rinfo.pDepthAttachment = &depth_att;
+        vkCmdBeginRendering(cb, &rinfo);
 
         set_viewport_scissor(cb, 0, 0, width_, height_, 0.0f, 1.0f);
         const VkDeviceSize zero_off = 0;
@@ -349,7 +392,15 @@ public:
             vkCmdDraw(cb, 18, 1, 0, 0);
         }
 
-        vkCmdEndRenderPass(cb);
+        vkCmdEndRendering(cb);
+        // The render pass used to move color to GENERAL for the post-chain
+        // compute imageLoads on its final subpass dependency; do it explicitly.
+        ses_vk::image_layout_barrier(
+            cb, color_.img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
 
         // Per-frame post parameters, then the post chain in the same cb.
         // Interactive (non-accumulating) frames SKIP the accumulation pass --
@@ -418,10 +469,6 @@ public:
         destroy_layout(vol_pl_);
         mesh_dsl_holder_.destroy(*ctx_);
         vol_dsl_holder_.destroy(*ctx_);
-        if (rp_ != VK_NULL_HANDLE) {
-            vkDestroyRenderPass(ctx_->device, rp_, nullptr);
-            rp_ = VK_NULL_HANDLE;
-        }
         if (samp_3d_ != VK_NULL_HANDLE) {
             vkDestroySampler(ctx_->device, samp_3d_, nullptr);
             samp_3d_ = VK_NULL_HANDLE;
@@ -658,68 +705,6 @@ private:
         return true;
     }
 
-    // Offscreen pass: color RGBA8 (cleared, kept, handed to sampling) +
-    // transient depth. The external dependency on each side orders the
-    // shell's sampling of the previous frame against this frame's clear.
-    bool create_render_pass() {
-        VkAttachmentDescription atts[2]{};
-        atts[0].format = VK_FORMAT_R16G16B16A16_SFLOAT;  // HDR scene
-        atts[0].samples = VK_SAMPLE_COUNT_1_BIT;
-        atts[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        atts[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        atts[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        atts[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        atts[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        atts[0].finalLayout = VK_IMAGE_LAYOUT_GENERAL;  // post chain imageLoads
-        atts[1].format = VK_FORMAT_D32_SFLOAT;
-        atts[1].samples = VK_SAMPLE_COUNT_1_BIT;
-        atts[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        atts[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        atts[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        atts[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        atts[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        atts[1].finalLayout =
-            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-        const VkAttachmentReference color_ref{
-            0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-        const VkAttachmentReference depth_ref{
-            1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
-        VkSubpassDescription sub{};
-        sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        sub.colorAttachmentCount = 1;
-        sub.pColorAttachments = &color_ref;
-        sub.pDepthStencilAttachment = &depth_ref;
-
-        VkSubpassDependency deps[2]{};
-        deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
-        deps[0].dstSubpass = 0;
-        deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-        deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        deps[0].dstStageMask =
-            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-        deps[0].dstAccessMask =
-            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-        deps[1].srcSubpass = 0;
-        deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
-        deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-        deps[1].dstStageMask = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-        deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-        VkRenderPassCreateInfo rpci{};
-        rpci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-        rpci.attachmentCount = 2;
-        rpci.pAttachments = atts;
-        rpci.subpassCount = 1;
-        rpci.pSubpasses = &sub;
-        rpci.dependencyCount = 2;
-        rpci.pDependencies = deps;
-        return vkCreateRenderPass(ctx_->device, &rpci, nullptr, &rp_) ==
-               VK_SUCCESS;
-    }
 
     bool create_target() {
         if (!create_attachment(VK_FORMAT_R16G16B16A16_SFLOAT,
@@ -731,19 +716,6 @@ private:
                                VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
                                VK_IMAGE_ASPECT_DEPTH_BIT, &depth_, width_,
                                height_)) {
-            return false;
-        }
-        const VkImageView views[2] = {color_.view, depth_.view};
-        VkFramebufferCreateInfo fci{};
-        fci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        fci.renderPass = rp_;
-        fci.attachmentCount = 2;
-        fci.pAttachments = views;
-        fci.width = width_;
-        fci.height = height_;
-        fci.layers = 1;
-        if (vkCreateFramebuffer(ctx_->device, &fci, nullptr, &fb_) !=
-            VK_SUCCESS) {
             return false;
         }
         return create_post_chain();
@@ -781,10 +753,6 @@ private:
     }
 
     void destroy_target() {
-        if (fb_ != VK_NULL_HANDLE) {
-            vkDestroyFramebuffer(ctx_->device, fb_, nullptr);
-            fb_ = VK_NULL_HANDLE;
-        }
         ctx_->destroy_image(&color_);
         ctx_->destroy_image(&depth_);
         ctx_->destroy_image(&accum_);
@@ -1126,8 +1094,17 @@ private:
         dynst.dynamicStateCount = 2;
         dynst.pDynamicStates = dyn;
 
+        // Dynamic rendering: the pipeline declares attachment FORMATS instead
+        // of referencing a render pass. Must match create_target's images.
+        const VkFormat color_fmt = VK_FORMAT_R16G16B16A16_SFLOAT;
+        VkPipelineRenderingCreateInfo prci{};
+        prci.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+        prci.colorAttachmentCount = 1;
+        prci.pColorAttachmentFormats = &color_fmt;
+        prci.depthAttachmentFormat = VK_FORMAT_D32_SFLOAT;
         VkGraphicsPipelineCreateInfo gpci{};
         gpci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        gpci.pNext = &prci;
         gpci.stageCount = 2;
         gpci.pStages = stages;
         gpci.pVertexInputState = &vin;
@@ -1139,7 +1116,7 @@ private:
         gpci.pColorBlendState = &cbst;
         gpci.pDynamicState = &dynst;
         gpci.layout = layout;
-        gpci.renderPass = rp_;
+        gpci.renderPass = VK_NULL_HANDLE;
         VkPipeline pipe = VK_NULL_HANDLE;
         if (vkCreateGraphicsPipelines(ctx_->device, VK_NULL_HANDLE, 1, &gpci,
                                       nullptr, &pipe) != VK_SUCCESS) {
@@ -1807,8 +1784,6 @@ private:
     std::uint32_t width_ = 0;
     std::uint32_t height_ = 0;
 
-    VkRenderPass rp_ = VK_NULL_HANDLE;
-    VkFramebuffer fb_ = VK_NULL_HANDLE;
     DeviceContext::Image color_{};  // HDR scene (RGBA16F)
     DeviceContext::Image depth_{};
     // Post chain: temporal accumulation, bloom pyramid, tonemapped present.
