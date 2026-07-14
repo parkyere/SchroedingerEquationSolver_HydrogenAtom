@@ -78,6 +78,23 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
+    // Cross-section render verification: enable the clip plane AND the slice
+    // sheet (z-normal, through the nucleus) and dump the frame -- exercises
+    // both the volume clip path and the slice pipeline end to end.
+    if (shell->has_arg("--dump-frame-slice")) {
+        run_when_manifold_ready(shell, [shell] {
+            shell->debug_prepare_state(k3DZ0);  // a lobed orbital (3d_z2)
+            shell->enable_cross_section_demo();
+            shell->sched().after(2500, [shell] {
+                const bool ok = shell->dump_frame_bmp("frame_dump_slice.bmp");
+                std::fprintf(stderr, "dump-frame-slice: %ux%u  [%s]\n",
+                             shell->frame_width(), shell->frame_height(),
+                             ok ? "PASS" : "FAIL");
+                shell->request_exit(ok ? 0 : 1);
+            });
+        });
+    }
+
     // Decay arc: prepare 2p WITH DECAY OFF (relaxation auto-completes into
     // real time, and an armed 2p would fire its one photon BEFORE the
     // baseline -- the n<=6 seed converges fast enough to lose that race

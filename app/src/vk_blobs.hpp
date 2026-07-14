@@ -42,6 +42,8 @@
 #include <mesh_frag_spv.h>
 #include <volume_vert_spv.h>
 #include <volume_frag_spv.h>
+#include <slice_vert_spv.h>
+#include <slice_frag_spv.h>
 #include <accum_spv.h>
 #include <bloom_down_spv.h>
 #include <bloom_up_spv.h>
@@ -144,6 +146,10 @@ inline ses_vk::RenderKernels app_render_blobs() {
     r.volume_vert_size = k_volume_vert_spv_size;
     r.volume_frag = k_volume_frag_spv;
     r.volume_frag_size = k_volume_frag_spv_size;
+    r.slice_vert = k_slice_vert_spv;
+    r.slice_vert_size = k_slice_vert_spv_size;
+    r.slice_frag = k_slice_frag_spv;
+    r.slice_frag_size = k_slice_frag_spv_size;
     r.accum = k_accum_spv;
     r.accum_size = k_accum_spv_size;
     r.bloom_down = k_bloom_down_spv;

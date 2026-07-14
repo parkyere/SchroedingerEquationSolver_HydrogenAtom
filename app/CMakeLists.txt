@@ -91,6 +91,7 @@ endforeach()
 # swapchain pass -- what Qt's qsb bake used to serve). Dots in the stage
 # extension are sanitized out of the symbol name.
 foreach(_k IN ITEMS mesh.vert mesh.frag volume.vert volume.frag
+        slice.vert slice.frag
         flow.vert flow.frag blit.vert blit.frag)
     string(REPLACE "." "_" _sym "${_k}")
     set(_src "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${_k}")

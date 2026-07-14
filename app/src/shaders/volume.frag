@@ -18,7 +18,11 @@ layout(std140, binding = 0) uniform Ubo {
     float absorbance;
     float proton_radius;
     float jitter_frame;  // temporal rotation of the raymarch jitter
+    vec4 clip;   // .x enable, .y axis(0/1/2), .z sign(+-1), .w offset
+    vec4 slice;  // (slice pass only; here to share the UBO layout)
 };
+
+float comp(vec3 v, int i) { return i == 0 ? v.x : (i == 1 ? v.y : v.z); }
 
 layout(binding = 1) uniform sampler3D psi_tex;
 layout(binding = 2) uniform sampler1D phase_tex;
@@ -57,10 +61,27 @@ void main() {
     if (t.y <= tn) {
         discard;
     }
+    float t_stop = t.y;
+
+    // Clip plane (mirrors ses::clip_ray_interval, core/cross_section.hpp):
+    // keep only the half-space clip.z*(p[axis]-offset) <= 0 so the cut face
+    // reveals the interior. Restrict the ray interval to it.
+    if (clip.x > 0.5) {
+        int ax = int(clip.y + 0.5);
+        float a = clip.z * comp(dir, ax);
+        float b = clip.z * (clip.w - comp(eye.xyz, ax));
+        if (abs(a) < 1e-8) {
+            if (b < 0.0) discard;  // whole ray on the cut side
+        } else {
+            float tp = b / a;
+            if (a > 0.0) t_stop = min(t_stop, tp);  // keep t <= tp
+            else tn = max(tn, tp);                  // keep t >= tp
+        }
+        if (t_stop <= tn) discard;
+    }
 
     // Terminate the march at the proton sphere: cloud IN FRONT still fogs
     // it, cloud BEHIND is correctly occluded.
-    float t_stop = t.y;
     bool hit_proton = false;
     vec2 sp = ray_sphere(eye.xyz, dir);
     if (sp.x <= sp.y && sp.x > tn && sp.x < t_stop) {

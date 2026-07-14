@@ -46,6 +46,10 @@ struct RenderKernels {
     std::size_t volume_vert_size = 0;
     const unsigned char* volume_frag = nullptr;
     std::size_t volume_frag_size = 0;
+    const unsigned char* slice_vert = nullptr;  // cross-section sheet
+    std::size_t slice_vert_size = 0;
+    const unsigned char* slice_frag = nullptr;
+    std::size_t slice_frag_size = 0;
     const unsigned char* accum = nullptr;  // temporal accumulation
     std::size_t accum_size = 0;
     const unsigned char* bloom_down = nullptr;
@@ -93,6 +97,16 @@ public:
         // same interleaved pos3/normal3/color3 layout as the host mesh.
         VkBuffer gpu_mesh_vbuf = VK_NULL_HANDLE;
         VkBuffer gpu_mesh_indirect = VK_NULL_HANDLE;
+        // Cross-section planes (Cloud view). clip cuts away a half-space;
+        // slice paints psi on a plane. axis 0/1/2, offset in Bohr.
+        bool clip_on = false;
+        int clip_axis = 2;
+        int clip_sign = 1;      // +1 hides the +normal half
+        float clip_offset = 0.0f;
+        bool slice_on = false;
+        int slice_axis = 2;
+        float slice_offset = 0.0f;
+        int slice_map = 0;      // 0 density, 1 Re, 2 phase
     };
 
     SceneRenderer() = default;
@@ -273,6 +287,17 @@ public:
                 vkCmdBindVertexBuffers(cb, 0, 1, &cube_vbuf_.buf, &zero_off);
                 vkCmdDraw(cb, 36, 1, 0, 0);
             }
+            // Cross-section sheet over the (possibly clipped) fog: reuses the
+            // volume descriptor set (UBO + psi + phase LUT), 6 procedural
+            // verts. Drawn after the volume so it composites on top.
+            if (in.slice_on && volume_bound_view_ != VK_NULL_HANDLE) {
+                vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                  slice_pipe_);
+                vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        vol_pl_, 0, 1, &volume_set_, 0,
+                                        nullptr);
+                vkCmdDraw(cb, 6, 1, 0, 0);
+            }
             if (in.flow) {  // additive sprites over the cloud
                 vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                   flow_pipe_);
@@ -388,6 +413,7 @@ public:
         ctx_->destroy_buffer(&accum_ubo_);
         destroy_pipe(mesh_pipe_);
         destroy_pipe(volume_pipe_);
+        destroy_pipe(slice_pipe_);
         destroy_layout(mesh_pl_);
         destroy_layout(vol_pl_);
         mesh_dsl_holder_.destroy(*ctx_);
@@ -445,6 +471,8 @@ private:
         float absorbance = 0.0f;
         float proton_radius = 0.0f;
         float jitter_frame = 0.0f;  // temporal raymarch jitter rotation
+        float clip[4] = {0, 2, 1, 0};   // enable, axis, sign, offset
+        float slice[4] = {0, 2, 0, 0};  // enable, axis, offset, map mode
     };
 
     struct DslHolder {
@@ -991,7 +1019,15 @@ private:
             blobs.volume_frag_size, vol_pl_, &cube_bind, &cube_attr, 1,
             /*depth=*/false, VK_CULL_MODE_FRONT_BIT, kBlendPremultiplied,
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
-        return mesh_pipe_ != VK_NULL_HANDLE && volume_pipe_ != VK_NULL_HANDLE;
+        // Cross-section sheet: procedural quad (no vertex input), same UBO +
+        // psi/phase samplers as the volume, drawn double-sided over the fog.
+        slice_pipe_ = build_pipeline(
+            blobs.slice_vert, blobs.slice_vert_size, blobs.slice_frag,
+            blobs.slice_frag_size, vol_pl_, nullptr, nullptr, 0,
+            /*depth=*/false, VK_CULL_MODE_NONE, kBlendPremultiplied,
+            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+        return mesh_pipe_ != VK_NULL_HANDLE && volume_pipe_ != VK_NULL_HANDLE &&
+               slice_pipe_ != VK_NULL_HANDLE;
     }
 
     enum BlendMode { kBlendOff, kBlendPremultiplied, kBlendAdditive };
@@ -1701,6 +1737,14 @@ private:
         // while a moving/evolving scene keeps a STATIC dither (no shimmer --
         // the physics stays smooth on screen, as the smooth field it is).
         vol_u.jitter_frame = in.accumulate ? in.frame_index : 0.0f;
+        vol_u.clip[0] = in.clip_on ? 1.0f : 0.0f;
+        vol_u.clip[1] = static_cast<float>(in.clip_axis);
+        vol_u.clip[2] = static_cast<float>(in.clip_sign);
+        vol_u.clip[3] = in.clip_offset;
+        vol_u.slice[0] = in.slice_on ? 1.0f : 0.0f;
+        vol_u.slice[1] = static_cast<float>(in.slice_axis);
+        vol_u.slice[2] = in.slice_offset;
+        vol_u.slice[3] = static_cast<float>(in.slice_map);
         std::memcpy(volume_ubuf_.mapped, &vol_u, sizeof(vol_u));
 
         vmaFlushAllocation(ctx_->allocator, scene_ubuf_.alloc, 0,
@@ -1833,6 +1877,7 @@ private:
     VkPipelineLayout vol_pl_ = VK_NULL_HANDLE;
     VkPipeline mesh_pipe_ = VK_NULL_HANDLE;
     VkPipeline volume_pipe_ = VK_NULL_HANDLE;
+    VkPipeline slice_pipe_ = VK_NULL_HANDLE;
     VkSampler samp_3d_ = VK_NULL_HANDLE;
     VkSampler samp_1d_ = VK_NULL_HANDLE;
     DescriptorArena arena_;

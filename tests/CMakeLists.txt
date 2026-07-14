@@ -23,6 +23,7 @@ add_executable(sesolver_tests
     camera_test.cpp
     colormap_test.cpp
     complex_test.cpp
+    cross_section_test.cpp
     decay_test.cpp
     deflation_test.cpp
     drive_test.cpp

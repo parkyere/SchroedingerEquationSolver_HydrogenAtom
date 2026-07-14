@@ -359,6 +359,15 @@ public:
         refresh_status();
     }
     int bfield_axis() const { return hydrogen_ ? hydrogen_->bfield_axis() : 2; }
+    // Cross-section controls are only meaningful over the volume cloud.
+    bool cloud_view() const { return director_ && director_->cloud(); }
+    // Selftest hook: turn on both cross-section planes (z-normal, through
+    // the nucleus) -- Re-map slice so lobe signs read clearly.
+    void enable_cross_section_demo() {
+        ui_.slice_on = true;   // slice sheet ONLY (isolates the slice pass)
+        ui_.slice_axis = 2;
+        ui_.slice_map = 0;     // density
+    }
     void set_mcwf_damping(bool on) {
         if (hydrogen_) hydrogen_->set_mcwf_damping(on);
     }
@@ -597,6 +606,22 @@ private:
         // while paused so a still frame can still accumulate.
         in.flow = flow_on_ && in.cloud;
         in.flow_animate = !paused_;
+        // Cross-section planes (Cloud view display state, owned by ui_).
+        in.clip_on = ui_.clip_on;
+        in.clip_axis = ui_.clip_axis;
+        in.clip_sign = ui_.clip_sign;
+        in.clip_offset = ui_.clip_offset;
+        in.slice_on = ui_.slice_on;
+        in.slice_axis = ui_.slice_axis;
+        in.slice_offset = ui_.slice_offset;
+        in.slice_map = ui_.slice_map;
+        // A single scalar that changes whenever any plane control moves, so
+        // the accumulation early-out treats a plane edit as "not static".
+        const double plane_tag =
+            (ui_.clip_on ? 1.0 : 0.0) + 2.0 * ui_.clip_axis +
+            8.0 * ui_.clip_sign + 100.0 * ui_.clip_offset +
+            (ui_.slice_on ? 1000.0 : 0.0) + 4000.0 * ui_.slice_axis +
+            200000.0 * ui_.slice_offset + 30000000.0 * ui_.slice_map;
         // Temporal accumulation: keep averaging only while NOTHING changed
         // (camera, display params, flash, psi volume, animating particles).
         in.frame_index = static_cast<float>(frame_index_++ % 4096);
@@ -606,14 +631,15 @@ private:
             elevation_ == acc_prev_.elevation &&
             distance_ == acc_prev_.distance && in.peak == acc_prev_.peak &&
             absorbance_ == acc_prev_.absorbance && in.flash == 0.0f &&
-            acc_prev_.flash == 0.0f && in.cloud == acc_prev_.cloud;
+            acc_prev_.flash == 0.0f && in.cloud == acc_prev_.cloud &&
+            plane_tag == acc_prev_.plane_tag;
         in.accumulate = scene_static && !(in.flow && in.flow_animate);
         // Occupancy + self-shadow rebuild when the field or the absorbance
         // dial (baked into the shadow transmittance) moved.
         in.volume_changed =
             volume_written || absorbance_ != acc_prev_.absorbance;
         acc_prev_ = {azimuth_, elevation_, distance_, in.peak, absorbance_,
-                     in.flash, in.cloud};
+                     in.flash, in.cloud, plane_tag};
         // The psi display volume: the engine's bridge image on the GPU path;
         // null lets the renderer fall back to its CPU-staged texture.
         in.psi_volume = director_->psi_volume_view();
@@ -674,6 +700,7 @@ private:
                absorbance = 0;
         float flash = 0.0f;
         bool cloud = true;
+        double plane_tag = 0.0;  // cross-section controls fingerprint
     } acc_prev_;
     long long frame_index_ = 0;
     bool flow_on_ = false;  // Key F: probability-current flow particles

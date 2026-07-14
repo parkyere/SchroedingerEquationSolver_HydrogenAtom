@@ -20,7 +20,69 @@ struct UiState {
     float efield = 0.0f;    // au; 0 = off (max 0.1)
     float bfield = 0.0f;    // au; 0 = off (max 0.2)
     int time_scale = 1;     // steps-per-frame multiplier (dt untouched)
+    // Cross-section planes (Cloud view). axis 0/1/2 = x/y/z normal.
+    bool clip_on = false;
+    int clip_axis = 2;
+    int clip_sign = 1;       // +1 hides the +normal half, -1 the other
+    float clip_offset = 0.0f;   // Bohr; 0 = through the nucleus
+    bool slice_on = false;
+    int slice_axis = 2;
+    float slice_offset = 0.0f;
+    int slice_map = 0;       // 0 density, 1 Re(psi), 2 phase
 };
+
+// The x/y/z axis-cycle button shared by the cross-section controls.
+inline void draw_axis_cycle(const char* id, int& axis) {
+    const char* name = axis == 0 ? "x" : (axis == 1 ? "y" : "z");
+    ImGui::PushID(id);
+    if (ImGui::Button(name)) {
+        axis = (axis + 1) % 3;
+    }
+    ImGui::PopID();
+}
+
+// The cross-section section (Cloud view only): a clip plane that cuts the
+// cloud open and a slice sheet that paints psi on the plane.
+template <typename ShellT>
+void draw_cross_section(ShellT& shell, UiState& ui) {
+    (void)shell;
+    const double box = 80.0;  // Bohr half-extent (matches the +-80 grid)
+    ImGui::Checkbox("Clip plane", &ui.clip_on);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Cut the cloud open along a plane through the "
+                          "nucleus to see the interior.");
+    }
+    if (ui.clip_on) {
+        ImGui::SameLine();
+        draw_axis_cycle("clipax", ui.clip_axis);
+        ImGui::SameLine();
+        if (ImGui::Button(ui.clip_sign > 0 ? "side +" : "side -")) {
+            ui.clip_sign = -ui.clip_sign;
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(140.0f);
+        ImGui::SliderFloat("clip @", &ui.clip_offset,
+                           static_cast<float>(-box), static_cast<float>(box),
+                           "%.0f a0");
+    }
+    ImGui::Checkbox("Slice", &ui.slice_on);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Paint psi on a plane through the nucleus -- a "
+                          "cross-section sheet. Nodal planes show as dark "
+                          "bands.");
+    }
+    if (ui.slice_on) {
+        ImGui::SameLine();
+        draw_axis_cycle("sliceax", ui.slice_axis);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(120.0f);
+        ImGui::Combo("map", &ui.slice_map, "Density\0Re(psi)\0Phase\0");
+        ImGui::SetNextItemWidth(220.0f);
+        ImGui::SliderFloat("slice @", &ui.slice_offset,
+                           static_cast<float>(-box), static_cast<float>(box),
+                           "%.0f a0");
+    }
+}
 
 // Performance readout, shared by every scenario panel: rendering fps (ImGui's
 // rolling average) and the ACHIEVED simulated-time rate with its multiple of
@@ -160,6 +222,11 @@ void draw_hydrogen_panel(ShellT& shell, UiState& ui) {
     }
 
     ImGui::Separator();
+    // Cross-section planes: only meaningful over the volume cloud.
+    if (shell.cloud_view()) {
+        draw_cross_section(shell, ui);
+        ImGui::Separator();
+    }
     ImGui::PushTextWrapPos(0.0f);
     ImGui::TextUnformatted(shell.status_text().c_str());
     ImGui::PopTextWrapPos();
