@@ -608,6 +608,83 @@ public:
         }
     }
 
+    // Item 0b: per-stage GPU timing of ONE representative propagation step on
+    // the VkFFT hot path -- kick, forward FFT, kinetic multiply, inverse FFT --
+    // via a timestamp query pool, so the bandwidth-dominant term is measured
+    // DATA, not a model. Only meaningful when vkfft_active(); returns
+    // {valid=false} otherwise. Records its OWN one-shot command buffer, so the
+    // normal step path is never touched and stays byte-identical.
+    struct StepProfile {
+        double kick_ms = 0.0;
+        double fwd_fft_ms = 0.0;
+        double kin_mul_ms = 0.0;
+        double inv_fft_ms = 0.0;
+        double total_ms = 0.0;
+        bool valid = false;
+    };
+    StepProfile profile_step() {
+        StepProfile p{};
+#ifdef SES_HAVE_VKFFT
+        if (!vkfft_active() || !ensure_profile_pool()) {
+            return p;
+        }
+        // Host-side reset (hostQueryReset, enabled in create_device) -- no
+        // in-flight queries here, so it cannot race the device.
+        vkResetQueryPool(ctx_->device, profile_pool_, 0, kProfileStamps);
+        OneShot shot;
+        if (!shot.begin_compute(*ctx_)) {
+            return p;
+        }
+        VkCommandBuffer cb = shot.cb();
+        Recorder r{cb, true};
+        // Stage boundaries: the RAW barriers between dispatches serialize the
+        // stages, so BOTTOM_OF_PIPE stamps bracket each one cleanly.
+        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, profile_pool_,
+                            0);
+        if (pd_full_set_ != VK_NULL_HANDLE) {
+            r.dispatch(phase_damp_, pd_full_set_, mul_groups_);
+        } else {
+            r.dispatch(half_mul_, fullv_set_, mul_groups_);
+        }
+        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                            profile_pool_, 1);
+        record_vkfft(r, -1);  // forward
+        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                            profile_pool_, 2);
+        r.dispatch(kin_mul_, kin3_set_, mul_groups_);
+        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                            profile_pool_, 3);
+        record_vkfft(r, 1);  // inverse (1/N by the plan)
+        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                            profile_pool_, 4);
+        shot.submit_and_wait(*ctx_);
+        shot.destroy(*ctx_);
+
+        std::uint64_t ts[kProfileStamps] = {};
+        if (vkGetQueryPoolResults(
+                ctx_->device, profile_pool_, 0, kProfileStamps, sizeof(ts), ts,
+                sizeof(std::uint64_t),
+                VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) !=
+            VK_SUCCESS) {
+            return p;
+        }
+        const double period = static_cast<double>(ctx_->timestamp_period);
+        const std::uint32_t vb = ctx_->timestamp_valid_bits;
+        const std::uint64_t mask =
+            vb >= 64 ? ~0ull : ((std::uint64_t{1} << vb) - 1ull);
+        auto ms = [&](std::uint64_t a, std::uint64_t b) {
+            return static_cast<double>((b - a) & mask) * period * 1e-6;
+        };
+        p.kick_ms = ms(ts[0], ts[1]);
+        p.fwd_fft_ms = ms(ts[1], ts[2]);
+        p.kin_mul_ms = ms(ts[2], ts[3]);
+        p.inv_fft_ms = ms(ts[3], ts[4]);
+        p.total_ms = ms(ts[0], ts[4]);
+        p.valid = true;
+#endif  // SES_HAVE_VKFFT
+        return p;
+    }
+
     // Driven Strang steps: kick(t) . step . kick(t+dt), theta = amplitude
     // cos(omega t) dt/2. Per-kick thetas differ within the batch, so the kick
     // parameters live in dynamic-offset slots of ONE host-mapped UBO and the
@@ -1931,6 +2008,10 @@ public:
             async_pool_ = VK_NULL_HANDLE;
             async_cb_ = VK_NULL_HANDLE;
         }
+        if (profile_pool_ != VK_NULL_HANDLE) {
+            vkDestroyQueryPool(ctx_->device, profile_pool_, nullptr);
+            profile_pool_ = VK_NULL_HANDLE;
+        }
         release_vkfft();
         for (State& st : states_) {
             ctx_->destroy_buffer(&st.buf);
@@ -2961,6 +3042,26 @@ private:
             r.dispatch(fft_, fft_set_[a], nn);
         }
     }
+
+    // Item 0b: lazy timestamp query pool for profile_step() (4 stages -> 5
+    // stamps). Created only on first profile, so the normal step path never
+    // touches it. Fails closed when the compute queue lacks HW timestamps.
+    static constexpr std::uint32_t kProfileStamps = 5;
+    bool ensure_profile_pool() {
+        if (profile_pool_ != VK_NULL_HANDLE) {
+            return true;
+        }
+        if (ctx_->timestamp_valid_bits == 0) {
+            return false;
+        }
+        VkQueryPoolCreateInfo qpci{};
+        qpci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        qpci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qpci.queryCount = kProfileStamps;
+        return vkCreateQueryPool(ctx_->device, &qpci, nullptr, &profile_pool_) ==
+               VK_SUCCESS;
+    }
+    VkQueryPool profile_pool_ = VK_NULL_HANDLE;
 
     DeviceContext* ctx_ = nullptr;
     ses::Grid3D grid_{};

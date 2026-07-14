@@ -95,6 +95,8 @@ struct DeviceContext {
     bool feat_synchronization2 = false;
     bool feat_host_query_reset = false;
     bool feat_storage16 = false;
+    float timestamp_period = 1.0f;  // ns per timestamp tick (limits)
+    std::uint32_t timestamp_valid_bits = 0;  // compute-queue width; 0 = no HW timestamps
     char device_name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE] = {};
 
     DeviceContext() = default;
@@ -332,6 +334,8 @@ struct DeviceContext {
         feat_host_query_reset = probe12.hostQueryReset == VK_TRUE;
         feat_synchronization2 = probe13.synchronization2 == VK_TRUE;
         feat_storage16 = probe11.storageBuffer16BitAccess == VK_TRUE;
+        timestamp_period = props.limits.timestampPeriod;
+        timestamp_valid_bits = qf[compute_family].timestampValidBits;
 
         VkPhysicalDeviceVulkan13Features en13{};
         en13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;

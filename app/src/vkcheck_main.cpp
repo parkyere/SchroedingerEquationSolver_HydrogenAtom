@@ -2522,6 +2522,47 @@ bool check_device_features(const ses_vk::DeviceContext& ctx) {
     return pass;
 }
 
+// Item 0b: GPU timestamp instrumentation. profile_step() must return a valid
+// per-stage breakdown of one 256^3 propagation step with strictly-ordered
+// stamps (both FFTs > 0, kick/kin >= 0, total > 0). RED with the stub; GREEN
+// once the query pool + timestamp writes land. Prints the EMPIRICAL
+// decomposition of the bandwidth-bound step (min-of-5, per the bench policy):
+// the FFT pair should dominate, turning the "~75%" model into data.
+bool check_timestamp_profile(ses_vk::DeviceContext& ctx) {
+    const ses::Grid1D axis{-8.0, 8.0, 256};
+    const ses::Grid3D g{axis, axis, axis};
+    const std::vector<double> v = ses::harmonic_potential(g, 1.0, ses::Vec3d{});
+    ses::Field3D psi0 = ses::gaussian_wavepacket(
+        g, ses::Vec3d{1.0, 0.0, 0.0}, ses::Vec3d{2.0, 2.0, 2.0}, ses::Vec3d{});
+    ses_vk::EngineKernels b = engine_blobs_8();
+    b.fft = k_fft_line256_spv;
+    b.fft_size = k_fft_line256_spv_size;
+    ses_vk::Engine engine;
+    if (!engine.initialize(ctx, g, b, v, 0.02, psi0.data())) {
+        std::printf("timestamp profile 256^3: engine init FAIL\n");
+        return false;
+    }
+    ses_vk::Engine::StepProfile best{};
+    for (int i = 0; i < 5; ++i) {  // min-of-N: fastest run is the least-noised
+        const ses_vk::Engine::StepProfile p = engine.profile_step();
+        if (p.valid && (!best.valid || p.total_ms < best.total_ms)) {
+            best = p;
+        }
+    }
+    const bool pass = best.valid && best.fwd_fft_ms > 0.0 &&
+                      best.inv_fft_ms > 0.0 && best.kin_mul_ms >= 0.0 &&
+                      best.kick_ms >= 0.0 && best.total_ms > 0.0;
+    const double fft = best.fwd_fft_ms + best.inv_fft_ms;
+    std::printf(
+        "timestamp profile 256^3 step (raw Vulkan): kick %.3f + fwdFFT %.3f + "
+        "kin_mul %.3f + invFFT %.3f = %.3f ms (FFT pair %.0f%%)  [%s]\n",
+        best.kick_ms, best.fwd_fft_ms, best.kin_mul_ms, best.inv_fft_ms,
+        best.total_ms,
+        best.total_ms > 0.0 ? 100.0 * fft / best.total_ms : 0.0,
+        pass ? "PASS" : "FAIL");
+    return pass;
+}
+
 }  // namespace
 
 int main() {
@@ -2577,6 +2618,7 @@ int main() {
     failures += check_engine_step_async(ctx) ? 0 : 1;
 #ifdef SES_HAVE_VKFFT
     failures += check_native_vkfft_perf(ctx) ? 0 : 1;
+    failures += check_timestamp_profile(ctx) ? 0 : 1;
 #endif
 
     const int verrs = ses_vk::g_validation_errors.load();
