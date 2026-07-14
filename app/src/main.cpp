@@ -268,6 +268,11 @@ public:
                 ses_shell::draw_generic_panel(
                     *this, ui_, {{"Relax to ground (2)", '2'}});
             }
+            // The panel's controls now mutate the director directly (via the
+            // capability seam) without the old per-forwarder refresh, so keep
+            // the status block current here -- otherwise a control changed
+            // while PAUSED (no tick, no title-dirty) would read stale forever.
+            refresh_status();
             ImGui::Render();
             ImDrawData* dd = ImGui::GetDrawData();
             const bool presented = presenter_.present(
@@ -650,6 +655,17 @@ int main(int argc, char* argv[]) {
     if (std::find(args.begin(), args.end(), "--selftest-tunnel") !=
         args.end()) {
         scene = "tunnel";  // the arc drives its own scene
+    } else {
+        // Every other selftest arc drives the hydrogen scene (it reaches the
+        // director through hydrogen()); force it so a mismatched --scene
+        // cannot leave a hydrogen arc dereferencing a null capability. Plain
+        // --dump-frame (no --selftest-) keeps the requested scene.
+        for (const std::string& a : args) {
+            if (a.rfind("--selftest-", 0) == 0) {
+                scene = "hydrogen";
+                break;
+            }
+        }
     }
     std::unique_ptr<ses_shell::ScenarioDirector> director;
     if (scene == "tunnel") {

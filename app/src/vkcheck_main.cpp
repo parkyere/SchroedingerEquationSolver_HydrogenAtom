@@ -2280,42 +2280,77 @@ bool check_engine_reinit(ses_vk::DeviceContext& ctx) {
     const std::vector<double> v =
         ses::soft_coulomb_potential(g, 1.0, 1.0, ses::Vec3d{});
     const double dt = 0.02;
-    const ses::SplitOperator3D cpu_prop{g, v, dt};
+    const std::vector<double> mask = ses::absorbing_mask(g, 2.0);
     ses::Field3D psi0 = ses::gaussian_wavepacket(g, ses::Vec3d{1.0, 0.0, 0.0},
                                                  ses::Vec3d{1.2, 1.2, 1.2},
                                                  ses::Vec3d{0.0, 0.5, 0.0});
-    ses_vk::Engine engine;
-    if (!engine.initialize(ctx, g, engine_blobs_8(), v, dt, psi0.data())) {
-        std::printf("engine reinit (raw Vulkan): first init FAIL\n");
+
+    // The op sequence exercises the LAZY descriptor sets reset_lazy_state
+    // guards: set_absorber (damp_/pd_full_/pd_half_ sets) + write_psi_to_volume
+    // (store_ ping-pong) + a fused absorb+bridge step. A step() with the
+    // default absorb=false/bridge=false would touch only EAGER sets and prove
+    // nothing about the reset.
+    auto run = [&](ses_vk::Engine& e, int nsteps) -> bool {
+        if (!e.set_absorber(mask)) {
+            return false;
+        }
+        e.write_psi_to_volume();
+        e.step(nsteps, /*absorb=*/true, /*bridge=*/true);
+        return true;
+    };
+
+    // Reference: a FRESH engine that ran the sequence once -- the deterministic
+    // fp32 result a correct re-init must reproduce bit-for-bit.
+    ses_vk::Engine ref;
+    if (!ref.initialize(ctx, g, engine_blobs_8(), v, dt, psi0.data()) ||
+        !run(ref, 20)) {
+        std::printf("engine reinit (raw Vulkan): reference FAIL\n");
         return false;
     }
-    engine.step(3);                  // touch lazy volume/absorber paths...
-    (void)engine.norm_and_peak();
-    engine.destroy();                // ...then tear down and rebuild
-    if (!engine.initialize(ctx, g, engine_blobs_8(), v, dt, psi0.data())) {
-        std::printf("engine reinit (raw Vulkan): second init FAIL\n");
+    std::vector<float> ref_out;
+    if (!ref.readback(ref_out)) {
+        std::printf("engine reinit (raw Vulkan): reference readback FAIL\n");
         return false;
     }
-    ses::Field3D cpu = psi0;
-    cpu_prop.step(cpu, 20);
-    engine.step(20);
-    std::vector<float> gpu_out;
-    if (!engine.readback(gpu_out)) {
-        std::printf("engine reinit (raw Vulkan): readback FAIL\n");
+
+    // Subject: run the lazy sequence, tear down, re-init, RE-run it. This
+    // EXERCISES the lazy re-creation paths (a reset bug that makes cycle 2 fail
+    // to re-create, or crash, surfaces here) and, under SES_VK_VALIDATION=1,
+    // the layer flags a bind of a freed cycle-1 descriptor. HONEST LIMIT: with
+    // no validation layer the freed-set bind is UB that VMA masks by reusing
+    // cycle-1's memory for cycle-2's buffers, so the output can COINCIDE --
+    // output comparison alone cannot guarantee the reset is complete (verified:
+    // dropping pd_full_set_ from reset_lazy_state still matched here). Re-adding
+    // vulkan-validationlayers to the vcpkg manifest is what makes this strict.
+    ses_vk::Engine sub;
+    if (!sub.initialize(ctx, g, engine_blobs_8(), v, dt, psi0.data()) ||
+        !run(sub, 3)) {
+        std::printf("engine reinit (raw Vulkan): first cycle FAIL\n");
+        return false;
+    }
+    sub.destroy();
+    if (!sub.initialize(ctx, g, engine_blobs_8(), v, dt, psi0.data()) ||
+        !run(sub, 20)) {
+        std::printf("engine reinit (raw Vulkan): second cycle FAIL\n");
+        return false;
+    }
+    std::vector<float> sub_out;
+    if (!sub.readback(sub_out) || sub_out.size() != ref_out.size()) {
+        std::printf("engine reinit (raw Vulkan): subject readback FAIL\n");
         return false;
     }
     double max_err = 0.0;
-    for (std::size_t i = 0; i < cpu.data().size(); ++i) {
-        max_err =
-            std::max(max_err, std::abs(gpu_out[2 * i] - cpu.data()[i].real()));
-        max_err = std::max(max_err,
-                           std::abs(gpu_out[2 * i + 1] - cpu.data()[i].imag()));
+    for (std::size_t i = 0; i < sub_out.size(); ++i) {
+        max_err = std::max(max_err, static_cast<double>(
+                                        std::abs(sub_out[i] - ref_out[i])));
     }
-    const double tol = 1e-4;
-    const bool pass = max_err < tol;
+    // Deterministic ops on one device -> bitwise equal iff every lazy set was
+    // rebuilt; a stale-bind yields garbage (>> tol) or a device error.
+    const double tol = 1e-6;
+    const bool pass = max_err < tol && sub.volume_view() != VK_NULL_HANDLE;
     std::printf(
-        "engine reinit (init->destroy->init->step, raw Vulkan): max |gpu - "
-        "cpu| = %.3e (tol %.0e)  [%s]\n",
+        "engine reinit (lazy sets: init->run->destroy->init->run vs fresh ref, "
+        "raw Vulkan): max |sub - ref| = %.3e (tol %.0e)  [%s]\n",
         max_err, tol, pass ? "PASS" : "FAIL");
     return pass;
 }
