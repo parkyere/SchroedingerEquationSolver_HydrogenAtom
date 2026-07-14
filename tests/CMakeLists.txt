@@ -26,6 +26,7 @@ add_executable(sesolver_tests
     cross_section_test.cpp
     decay_test.cpp
     deflation_test.cpp
+    degenerate_guards_test.cpp
     drive_test.cpp
     dynamics3_test.cpp
     emission_test.cpp
