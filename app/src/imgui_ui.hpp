@@ -7,6 +7,8 @@
 // as a wrapped status block (it long outgrew a window title). Templated on
 // the shell type so main() stays a shell (same pattern as selftest_arcs.hpp).
 
+#include "scenario.hpp"  // HydrogenApi (the hydrogen panel's control seam)
+
 #include <imgui.h>
 
 #include <initializer_list>
@@ -117,7 +119,7 @@ void draw_time_scale(ShellT& shell, UiState& ui) {
 }
 
 template <typename ShellT>
-void draw_hydrogen_panel(ShellT& shell, UiState& ui) {
+void draw_hydrogen_panel(ShellT& shell, UiState& ui, HydrogenApi& hy) {
     ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(430, 0), ImGuiCond_FirstUseEver);
     ImGui::Begin("Controls", nullptr, ImGuiWindowFlags_NoCollapse);
@@ -127,7 +129,7 @@ void draw_hydrogen_panel(ShellT& shell, UiState& ui) {
     ImGui::SameLine();
     // Honest label: sampling a SINGLE eigenstate is the maximal (n,l,m)
     // measurement, not a bare energy measurement (2s vs 2p are degenerate).
-    if (ImGui::Button("Measure nlm (E)")) shell.measure_energy_now();
+    if (ImGui::Button("Measure nlm (E)")) hy.measure_energy_now();
     ImGui::SameLine();
     if (ImGui::Button("Reset (R)")) shell.reset_simulation();
     ImGui::SameLine();
@@ -135,20 +137,20 @@ void draw_hydrogen_panel(ShellT& shell, UiState& ui) {
 
     // Partial projective measurements: one quantum number, one degenerate
     // subspace -- superpositions inside it survive the collapse.
-    if (ImGui::Button("Measure n")) shell.measure_n_shell_now();
+    if (ImGui::Button("Measure n")) hy.measure_n_shell_now();
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("True energy measurement: project onto one n "
                           "SHELL.\nDegenerate l,m superpositions inside the "
                           "shell survive (2s+2p stays 2s+2p).");
     }
     ImGui::SameLine();
-    if (ImGui::Button("Measure l")) shell.measure_l_now();
+    if (ImGui::Button("Measure l")) hy.measure_l_now();
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Measure L^2: project onto one l.\nSuperpositions "
                           "across n and m survive (partial collapse).");
     }
     ImGui::SameLine();
-    if (ImGui::Button("Measure m")) shell.measure_m_now();
+    if (ImGui::Button("Measure m")) hy.measure_m_now();
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Measure L_z: project onto one signed m.\nA p_x "
                           "lobe collapses to a rotating |m|=1 ring -- and a "
@@ -157,24 +159,24 @@ void draw_hydrogen_panel(ShellT& shell, UiState& ui) {
 
     if (ImGui::Button("Real time (1)")) shell.set_real_time();
     ImGui::SameLine();
-    if (ImGui::Button("Relax 1s (2)")) shell.set_relaxing();
+    if (ImGui::Button("Relax 1s (2)")) hy.set_relaxing();
     ImGui::SameLine();
-    if (ImGui::Button("Relax 2p (3)")) shell.relax_to_excited();
+    if (ImGui::Button("Relax 2p (3)")) hy.relax_to_excited();
     ImGui::SameLine();
-    if (ImGui::Button("Relax 2s (4)")) shell.relax_to_2s();
+    if (ImGui::Button("Relax 2s (4)")) hy.relax_to_2s();
     ImGui::SameLine();
-    if (ImGui::Button("Excite n=3/4 (5)")) shell.excite_n3();
+    if (ImGui::Button("Excite n=3/4 (5)")) hy.excite_n3();
 
-    if (ImGui::Button("Decay (D)")) shell.toggle_decay();
+    if (ImGui::Button("Decay (D)")) hy.toggle_decay();
     ImGui::SameLine();
-    if (ImGui::Button("Laser (L)")) shell.toggle_laser();
+    if (ImGui::Button("Laser (L)")) hy.toggle_laser();
     ImGui::SameLine();
     if (ImGui::Button("Cloud/Surface (Tab)")) shell.toggle_view_mode();
 
     // Static E-field (+z): 0 = off, 0.1 au full scale (Stark; field-ionizes
     // above ~0.03 au from the ground state).
     if (ImGui::SliderFloat("E-field +z (au)", &ui.efield, 0.0f, 0.1f, "%.3f")) {
-        shell.set_efield_e0(static_cast<double>(ui.efield));
+        hy.set_efield_e0(static_cast<double>(ui.efield));
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Static uniform E-field along +z (Stark).\n"
@@ -188,14 +190,14 @@ void draw_hydrogen_panel(ShellT& shell, UiState& ui) {
 
     // Magnetic field: axis cycle (z -> x -> y) + strength; psi evolves under
     // the proper minimal-coupling Hamiltonian and precesses at omega = B/2.
-    const int axis = shell.bfield_axis();
+    const int axis = hy.bfield_axis();
     const char* axis_name = axis == 2 ? "z" : (axis == 0 ? "x" : "y");
     if (ImGui::Button(axis_name)) {
-        shell.toggle_bfield_axis();
+        hy.toggle_bfield_axis();
     }
     ImGui::SameLine();
     if (ImGui::SliderFloat("B-field (au)", &ui.bfield, 0.0f, 0.2f, "%.3f")) {
-        shell.set_bfield_b(static_cast<double>(ui.bfield));
+        hy.set_bfield_b(static_cast<double>(ui.bfield));
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Magnetic field along the chosen axis. The cloud "
@@ -208,9 +210,9 @@ void draw_hydrogen_panel(ShellT& shell, UiState& ui) {
 
     // MCWF no-jump damping: superpositions visibly emit between jumps
     // (H_eff amplitude decay); pure eigenstates are unaffected either way.
-    bool mcwf = shell.mcwf_damping();
+    bool mcwf = hy.mcwf_damping();
     if (ImGui::Checkbox("MCWF damping", &mcwf)) {
-        shell.set_mcwf_damping(mcwf);
+        hy.set_mcwf_damping(mcwf);
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Between jumps, drain excited amplitudes as "

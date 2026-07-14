@@ -90,10 +90,14 @@ inline ses::WavepacketSimulation make_simulation() {
     }};
 }
 
-class HydrogenDirector final : public BaseDirector {
+class HydrogenDirector final : public BaseDirector, public HydrogenApi {
 public:
     // BaseDirector's ctor stages the initial mesh + volume from make_simulation().
     HydrogenDirector() : BaseDirector(make_simulation()) {}
+
+    // The specialized-control seam (scenario.hpp): the shell reaches these
+    // through HydrogenApi, never a concrete down-cast.
+    HydrogenApi* hydrogen() override { return this; }
 
     // ---- lifecycle ----
 

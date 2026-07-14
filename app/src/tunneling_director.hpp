@@ -18,9 +18,11 @@ constexpr double kTunnelK0 = 0.5;        // mean E = k^2/2 = 0.125 < V0
 constexpr double kTunnelLaunchX = -30.0;
 constexpr double kTunnelSigma = 5.0;
 
-class TunnelingDirector final : public BaseDirector {
+class TunnelingDirector final : public BaseDirector, public TunnelApi {
 public:
     TunnelingDirector() : BaseDirector(make()) {}
+
+    TunnelApi* tunnel() override { return this; }
 
     // Selftest hook: the largest transmitted fraction seen so far.
     double transmitted_max() const { return t_max_; }

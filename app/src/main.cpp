@@ -65,8 +65,6 @@ public:
     Shell(std::unique_ptr<ses_shell::ScenarioDirector> director,
           std::vector<std::string> args)
         : director_(std::move(director)), args_(std::move(args)) {
-        hydrogen_ = dynamic_cast<ses_shell::HydrogenDirector*>(director_.get());
-        tunneling_ = dynamic_cast<ses_shell::TunnelingDirector*>(director_.get());
         distance_ = director_->default_camera_distance();
         // Verification arcs run HEADLESS: pure GPGPU on the same windowless
         // device path sesolver_vkcheck uses -- no window, no surface, no
@@ -262,9 +260,9 @@ public:
             ImGui_ImplVulkan_NewFrame();
             ImGui_ImplSDL3_NewFrame();
             ImGui::NewFrame();
-            if (hydrogen_ != nullptr) {
-                ses_shell::draw_hydrogen_panel(*this, ui_);
-            } else if (tunneling_ != nullptr) {
+            if (auto* hy = director_->hydrogen()) {
+                ses_shell::draw_hydrogen_panel(*this, ui_, *hy);
+            } else if (director_->tunnel() != nullptr) {
                 ses_shell::draw_generic_panel(*this, ui_, {});
             } else {
                 ses_shell::draw_generic_panel(
@@ -285,14 +283,13 @@ public:
         return exit_code_;
     }
 
-    // ---- control entry points (keyboard, ImGui panel, selftest arcs) -------
+    // ---- control entry points every scene shares --------------------------
+    // Scenario-specific controls/probes live behind director_->hydrogen() /
+    // director_->tunnel() (scenario.hpp) -- the panel and the selftest arcs
+    // reach them there, so the shell no longer forwards ~28 down-cast calls.
     void toggle_pause() { paused_ = !paused_; }
     void set_real_time() {
         director_->set_real_time();
-        refresh_status();
-    }
-    void set_relaxing() {
-        if (hydrogen_) hydrogen_->set_relaxing();
         refresh_status();
     }
     void reset_simulation() {
@@ -303,79 +300,18 @@ public:
         director_->measure_now();
         refresh_status();
     }
-    void measure_energy_now() {
-        if (hydrogen_) hydrogen_->measure_energy_now();
-    }
-    void measure_n_shell_now() {
-        if (hydrogen_) hydrogen_->measure_n_shell_now();
-    }
-    void measure_l_now() {
-        if (hydrogen_) hydrogen_->measure_l_now();
-    }
-    void measure_m_now() {
-        if (hydrogen_) hydrogen_->measure_m_now();
-    }
-    int last_partial_outcome() const {
-        return hydrogen_ ? hydrogen_->last_partial_outcome() : -99;
-    }
-    void debug_prepare_superposition(int a, int b) {
-        if (hydrogen_) hydrogen_->debug_prepare_superposition(a, b);
-    }
     void toggle_view_mode() {
         director_->toggle_view_mode();
         refresh_status();
     }
-    void relax_to_excited() {
-        if (hydrogen_) hydrogen_->relax_to_excited();
-        refresh_status();
-    }
-    void relax_to_2s() {
-        if (hydrogen_) hydrogen_->relax_to_2s();
-        refresh_status();
-    }
-    void toggle_decay() {
-        if (hydrogen_) hydrogen_->toggle_decay();
-        refresh_status();
-    }
-    void excite_n3() {
-        if (hydrogen_) hydrogen_->excite_n3();
-        refresh_status();
-    }
-    void toggle_laser() {
-        if (hydrogen_) hydrogen_->toggle_laser();
-        refresh_status();
-    }
-    void set_efield_e0(double e0) {
-        if (hydrogen_) hydrogen_->set_efield_e0(e0);
-        refresh_status();
-    }
-    void set_bfield_b(double b) {
-        if (hydrogen_) hydrogen_->set_bfield_b(b);
-        refresh_status();
-    }
-    void toggle_bfield_axis() {
-        if (hydrogen_) hydrogen_->toggle_bfield_axis();
-        refresh_status();
-    }
-    int bfield_axis() const { return hydrogen_ ? hydrogen_->bfield_axis() : 2; }
     // Cross-section controls are only meaningful over the volume cloud.
     bool cloud_view() const { return director_ && director_->cloud(); }
-    // Cumulative absorbed (ionized) fraction since the last collapse/prep.
-    double ionized_fraction() const {
-        return hydrogen_ ? hydrogen_->ionized_fraction() : 0.0;
-    }
-    // Selftest hook: turn on both cross-section planes (z-normal, through
-    // the nucleus) -- Re-map slice so lobe signs read clearly.
+    // Selftest hook: turn on the cross-section slice sheet (z-normal, through
+    // the nucleus) so lobe signs read clearly. Owns shell UI state.
     void enable_cross_section_demo() {
         ui_.slice_on = true;   // slice sheet ONLY (isolates the slice pass)
         ui_.slice_axis = 2;
         ui_.slice_map = 0;     // density
-    }
-    void set_mcwf_damping(bool on) {
-        if (hydrogen_) hydrogen_->set_mcwf_damping(on);
-    }
-    bool mcwf_damping() const {
-        return hydrogen_ ? hydrogen_->mcwf_damping() : false;
     }
     void set_time_scale(int scale) {
         director_->set_time_scale(scale);
@@ -396,34 +332,13 @@ public:
     }
 
     // ---- selftest / verification hooks --------------------------------------
-    double channel_a(int from, int to) const {
-        return hydrogen_ ? hydrogen_->channel_a(from, to) : 0.0;
-    }
+    // The scenario itself + its capability seams (single accessors, not the
+    // old per-method forwarders): the arcs call e.g. hy()->channel_a().
+    ses_shell::ScenarioDirector& director() { return *director_; }
+    ses_shell::HydrogenApi* hy() { return director_->hydrogen(); }
+    ses_shell::TunnelApi* tn() { return director_->tunnel(); }
     bool solving() const { return director_->solving(); }
     bool manifold_ready() const { return director_->scene_ready(); }
-    double state_energy(int idx) const {
-        return hydrogen_ ? hydrogen_->state_energy(idx) : 0.0;
-    }
-    long long photon_count() const {
-        return hydrogen_ ? hydrogen_->photon_count() : 0;
-    }
-    int last_measured_index() const {
-        return hydrogen_ ? hydrogen_->last_measured_index() : -2;
-    }
-    double mean_z() { return hydrogen_ ? hydrogen_->mean_z() : 0.0; }
-    double peak_excited_population() const {
-        return hydrogen_ ? hydrogen_->peak_excited_population() : 0.0;
-    }
-    void debug_prepare_state(int idx) {
-        if (hydrogen_) hydrogen_->debug_prepare_state(idx);
-        refresh_status();
-    }
-    double probe_population(int idx) {
-        return hydrogen_ ? hydrogen_->probe_population(idx) : 0.0;
-    }
-    double tunnel_transmitted_max() const {
-        return tunneling_ ? tunneling_->transmitted_max() : 0.0;
-    }
     void debug_set_camera_distance(double d) {
         distance_ = std::clamp(d, 4.0, 300.0);
     }
@@ -675,8 +590,6 @@ private:
     ses_shell::SwapchainPresenter presenter_;
 
     std::unique_ptr<ses_shell::ScenarioDirector> director_;
-    ses_shell::HydrogenDirector* hydrogen_ = nullptr;
-    ses_shell::TunnelingDirector* tunneling_ = nullptr;
 
     SDL_Window* window_ = nullptr;
     VkSurfaceKHR surface_ = VK_NULL_HANDLE;

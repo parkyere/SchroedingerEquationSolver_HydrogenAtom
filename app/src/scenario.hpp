@@ -17,9 +17,54 @@
 
 namespace ses_shell {
 
+// Scenario-specific capability seams. The shell holds ONE ScenarioDirector
+// and never down-casts to a concrete type; a scene that supports these
+// controls returns a non-null pointer from the matching accessor, so the
+// panel and the selftest arcs reach the specialized surface through a stable
+// interface instead of ~28 Shell forwarders (REVIEW_BACKLOG architecture).
+struct HydrogenApi {
+    virtual ~HydrogenApi() = default;
+    virtual void set_relaxing() = 0;
+    virtual void relax_to_excited() = 0;
+    virtual void relax_to_2s() = 0;
+    virtual void excite_n3() = 0;
+    virtual void toggle_decay() = 0;
+    virtual void toggle_laser() = 0;
+    virtual void measure_energy_now() = 0;
+    virtual void measure_n_shell_now() = 0;
+    virtual void measure_l_now() = 0;
+    virtual void measure_m_now() = 0;
+    virtual int last_partial_outcome() const = 0;
+    virtual void set_efield_e0(double e0) = 0;
+    virtual void set_bfield_b(double b) = 0;
+    virtual void toggle_bfield_axis() = 0;
+    virtual int bfield_axis() const = 0;
+    virtual double ionized_fraction() const = 0;
+    virtual void set_mcwf_damping(bool on) = 0;
+    virtual bool mcwf_damping() const = 0;
+    virtual double channel_a(int from, int to) const = 0;
+    virtual double state_energy(int idx) const = 0;
+    virtual long long photon_count() const = 0;
+    virtual int last_measured_index() const = 0;
+    virtual double mean_z() = 0;
+    virtual double peak_excited_population() const = 0;
+    virtual void debug_prepare_state(int idx) = 0;
+    virtual double probe_population(int idx) = 0;
+    virtual void debug_prepare_superposition(int a, int b) = 0;
+};
+
+struct TunnelApi {
+    virtual ~TunnelApi() = default;
+    virtual double transmitted_max() const = 0;
+};
+
 class ScenarioDirector {
 public:
     virtual ~ScenarioDirector() = default;
+
+    // Capability queries: non-null only for the scene that implements them.
+    virtual HydrogenApi* hydrogen() { return nullptr; }
+    virtual TunnelApi* tunnel() { return nullptr; }
 
     // ---- lifecycle ----
     virtual const ses::Grid3D& grid() const = 0;

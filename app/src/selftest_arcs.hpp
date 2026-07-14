@@ -83,7 +83,7 @@ void register_verification_arcs(ShellT* shell) {
     // both the volume clip path and the slice pipeline end to end.
     if (shell->has_arg("--dump-frame-slice")) {
         run_when_manifold_ready(shell, [shell] {
-            shell->debug_prepare_state(k3DZ0);  // a lobed orbital (3d_z2)
+            shell->hy()->debug_prepare_state(k3DZ0);  // a lobed orbital (3d_z2)
             shell->enable_cross_section_demo();
             shell->sched().after(2500, [shell] {
                 const bool ok = shell->dump_frame_bmp("frame_dump_slice.bmp");
@@ -102,14 +102,14 @@ void register_verification_arcs(ShellT* shell) {
     // >= 1 jump expected: tau_display ~ 8 au vs a ~75 au window.
     if (shell->has_arg("--selftest-decay")) {
         run_when_manifold_ready(shell, [shell] {
-            shell->toggle_decay();      // OFF: hold the prepared 2p
-            shell->relax_to_excited();  // caches ready: no block
+            shell->hy()->toggle_decay();      // OFF: hold the prepared 2p
+            shell->hy()->relax_to_excited();  // caches ready: no block
             shell->sched().after(13500, [shell] {
-                const long long baseline = shell->photon_count();
+                const long long baseline = shell->hy()->photon_count();
                 shell->set_real_time();
-                shell->toggle_decay();  // ON: the window starts NOW
+                shell->hy()->toggle_decay();  // ON: the window starts NOW
                 shell->sched().after(30000, [shell, baseline] {
-                    const long long fresh = shell->photon_count() - baseline;
+                    const long long fresh = shell->hy()->photon_count() - baseline;
                     std::fprintf(stderr, "selftest-decay: photons = %lld  [%s]\n",
                                  fresh, fresh >= 1 ? "PASS" : "FAIL");
                     shell->request_exit(fresh >= 1 ? 0 : 1);
@@ -122,14 +122,14 @@ void register_verification_arcs(ShellT* shell) {
     // put); a projective energy measurement must report the 1s eigenstate.
     if (shell->has_arg("--selftest-energy")) {
         run_when_manifold_ready(shell, [shell] {
-            shell->toggle_decay();  // OFF: keep the relaxed state stationary
-            shell->set_relaxing();  // cool to 1s
+            shell->hy()->toggle_decay();  // OFF: keep the relaxed state stationary
+            shell->hy()->set_relaxing();  // cool to 1s
             // 20 s: the random n <= 6 seed carries only ~1% weight in 1s, so
             // the ITP descent to ground needs a generous window to converge.
             shell->sched().after(20000, [shell] {
-                shell->measure_energy_now();
+                shell->hy()->measure_energy_now();
                 shell->sched().after(1500, [shell] {
-                    const int idx = shell->last_measured_index();
+                    const int idx = shell->hy()->last_measured_index();
                     const bool pass = idx == kS1;
                     std::fprintf(
                         stderr, "selftest-energy: measured %s  [%s]\n",
@@ -146,14 +146,14 @@ void register_verification_arcs(ShellT* shell) {
     // field, require <z> to shift measurably (Stark polarization).
     if (shell->has_arg("--selftest-efield")) {
         run_when_manifold_ready(shell, [shell] {
-            shell->toggle_decay();  // OFF: keep the state put
-            shell->set_relaxing();  // cool to 1s
+            shell->hy()->toggle_decay();  // OFF: keep the state put
+            shell->hy()->set_relaxing();  // cool to 1s
             shell->sched().after(20000, [shell] {
-                const double z0 = shell->mean_z();
+                const double z0 = shell->hy()->mean_z();
                 shell->set_real_time();
-                shell->set_efield_e0(0.02);  // sub-ionization: clean polarization
+                shell->hy()->set_efield_e0(0.02);  // sub-ionization: clean polarization
                 shell->sched().after(15000, [shell, z0] {
-                    const double z1 = shell->mean_z();
+                    const double z1 = shell->hy()->mean_z();
                     const bool pass = std::abs(z1 - z0) > 0.03;
                     std::fprintf(stderr,
                                  "selftest-efield: <z> %.4f -> %.4f Bohr  [%s]\n",
@@ -169,26 +169,26 @@ void register_verification_arcs(ShellT* shell) {
     // pump emits zero, so 2 is unambiguous).
     if (shell->has_arg("--selftest-rabi")) {
         run_when_manifold_ready(shell, [shell] {
-            shell->toggle_decay();  // OFF: study the clean coherent flop
-            shell->set_relaxing();  // cool to 1s
+            shell->hy()->toggle_decay();  // OFF: study the clean coherent flop
+            shell->hy()->set_relaxing();  // cool to 1s
             shell->sched().after(20000, [shell] {
                 shell->set_real_time();
-                shell->toggle_laser();  // cached: instant
+                shell->hy()->toggle_laser();  // cached: instant
                 // 256^3 runs ~3 au/s of sim time: the half-flop (pi/Omega
                 // ~ 79 au) needs most of this window.
                 shell->sched().after(60000, [shell] {
-                    const double peak = shell->peak_excited_population();
+                    const double peak = shell->hy()->peak_excited_population();
                     std::fprintf(stderr, "selftest-rabi: peak P(2pz) = %.3f  [%s]\n",
                                  peak, peak >= 0.5 ? "PASS" : "FAIL");
                     if (peak < 0.5) {
                         shell->request_exit(1);
                         return;
                     }
-                    const long long baseline = shell->photon_count();
-                    shell->toggle_decay();  // back ON: fluorescence
+                    const long long baseline = shell->hy()->photon_count();
+                    shell->hy()->toggle_decay();  // back ON: fluorescence
                     shell->sched().after(180000, [shell, baseline] {
                         const long long fresh =
-                            shell->photon_count() - baseline;
+                            shell->hy()->photon_count() - baseline;
                         std::fprintf(stderr,
                                      "selftest-rabi: photons = %lld  [%s]\n",
                                      fresh, fresh >= 2 ? "PASS" : "FAIL");
@@ -206,11 +206,11 @@ void register_verification_arcs(ShellT* shell) {
     // Time-scale 4x packs ~11 lifetimes into the same wall window (~2e-5).
     if (shell->has_arg("--selftest-cascade")) {
         run_when_manifold_ready(shell, [shell] {
-            const long long baseline = shell->photon_count();
-            shell->excite_n3();  // first in the cycle: 3d_z2
+            const long long baseline = shell->hy()->photon_count();
+            shell->hy()->excite_n3();  // first in the cycle: 3d_z2
             shell->set_time_scale(4);
             shell->sched().after(90000, [shell, baseline] {
-                const long long fresh = shell->photon_count() - baseline;
+                const long long fresh = shell->hy()->photon_count() - baseline;
                 std::fprintf(stderr, "selftest-cascade: photons = %lld  [%s]\n",
                              fresh, fresh >= 2 ? "PASS" : "FAIL");
                 shell->request_exit(fresh >= 2 ? 0 : 1);
@@ -223,15 +223,15 @@ void register_verification_arcs(ShellT* shell) {
     // the sin^2 oscillation phase cannot alias the verdict.
     if (shell->has_arg("--selftest-magnetic")) {
         run_when_manifold_ready(shell, [shell] {
-            shell->toggle_decay();            // decay OFF: pure precession
-            shell->debug_prepare_state(kP2X);  // psi = 2p_x
+            shell->hy()->toggle_decay();            // decay OFF: pure precession
+            shell->hy()->debug_prepare_state(kP2X);  // psi = 2p_x
             // Modest field: a large B would diamagnetically deform the state
             // and cap the overlap. Magnetic stepping is slow (~0.4 au/s), so
             // the window is long.
-            shell->set_bfield_b(0.08);         // B along z (default axis)
+            shell->hy()->set_bfield_b(0.08);         // B along z (default axis)
             auto max_py = std::make_shared<double>(0.0);
             const int probe = shell->sched().every(1500, [shell, max_py] {
-                *max_py = std::max(*max_py, shell->probe_population(kP2Y));
+                *max_py = std::max(*max_py, shell->hy()->probe_population(kP2Y));
             });
             shell->sched().after(90000, [shell, max_py, probe] {
                 shell->sched().cancel(probe);
@@ -247,25 +247,25 @@ void register_verification_arcs(ShellT* shell) {
     // its photons can only flow through 2p_x, proving non-2p_z channels fire.
     if (shell->has_arg("--selftest-manifold")) {
         run_when_manifold_ready(shell, [shell] {
-            const double a_pz = shell->channel_a(kP2Z, kS1);
-            const double a_px = shell->channel_a(kP2X, kS1);
-            const double a_2s1s = shell->channel_a(kS2, kS1);
+            const double a_pz = shell->hy()->channel_a(kP2Z, kS1);
+            const double a_px = shell->hy()->channel_a(kP2X, kS1);
+            const double a_2s1s = shell->hy()->channel_a(kS2, kS1);
             std::fprintf(stderr,
                          "selftest-manifold: A(2pz->1s)=%.3e A(2px->1s)=%.3e "
                          "A(2s->1s)=%.3e  E(1s)=%.4f E(2pz)=%.4f E(2s)=%.4f\n",
-                         a_pz, a_px, a_2s1s, shell->state_energy(kS1),
-                         shell->state_energy(kP2Z), shell->state_energy(kS2));
+                         a_pz, a_px, a_2s1s, shell->hy()->state_energy(kS1),
+                         shell->hy()->state_energy(kP2Z), shell->hy()->state_energy(kS2));
             const bool selection = a_pz > 0.0 && a_2s1s < 1e-3 * a_pz;
             const bool degeneracy = a_pz > 0.0 && std::abs(a_px / a_pz - 1.0) < 0.05;
             const bool ordering =
-                shell->state_energy(kS1) < shell->state_energy(kP2Z) &&
-                shell->state_energy(kS1) < shell->state_energy(kS2);
+                shell->hy()->state_energy(kS1) < shell->hy()->state_energy(kP2Z) &&
+                shell->hy()->state_energy(kS1) < shell->hy()->state_energy(kS2);
             // The n = 3 shell: cascade paths open, Delta-l selection
             // rules hold (3s -> 1s and 3d -> 1s are E1-forbidden).
-            const double a_3s2p = shell->channel_a(k3S, kP2Z);
-            const double a_3d2p = shell->channel_a(k3DZ0, kP2Z);
-            const double a_3s1s = shell->channel_a(k3S, kS1);
-            const double a_3d1s = shell->channel_a(k3DZ0, kS1);
+            const double a_3s2p = shell->hy()->channel_a(k3S, kP2Z);
+            const double a_3d2p = shell->hy()->channel_a(k3DZ0, kP2Z);
+            const double a_3s1s = shell->hy()->channel_a(k3S, kS1);
+            const double a_3d1s = shell->hy()->channel_a(k3DZ0, kS1);
             const bool cascade = a_3s2p > 0.0 && a_3d2p > 0.0;
             const bool dl_rule =
                 a_3d2p > 0.0 && a_3s1s < 1e-3 * a_3d2p && a_3d1s < 1e-3 * a_3d2p;
@@ -283,17 +283,17 @@ void register_verification_arcs(ShellT* shell) {
                 shell->request_exit(1);
                 return;
             }
-            shell->set_relaxing();  // cool to 1s for the X-pol pump
+            shell->hy()->set_relaxing();  // cool to 1s for the X-pol pump
             shell->sched().after(20000, [shell] {
                 shell->set_real_time();
-                shell->toggle_laser();  // Z (cached: no block)
-                shell->toggle_laser();  // -> X
-                const long long baseline = shell->photon_count();
+                shell->hy()->toggle_laser();  // Z (cached: no block)
+                shell->hy()->toggle_laser();  // -> X
+                const long long baseline = shell->hy()->photon_count();
                 // Two X-pol photons need ~170 au of sim time (~2 half-flops
                 // + accelerated lifetimes); at ~1.5 au/s a 60 s window was
                 // arithmetically unsatisfiable -- 180 s has real margin.
                 shell->sched().after(180000, [shell, baseline] {
-                    const long long fresh = shell->photon_count() - baseline;
+                    const long long fresh = shell->hy()->photon_count() - baseline;
                     std::fprintf(stderr,
                                  "selftest-manifold: x-pol photons = %lld  [%s]\n",
                                  fresh, fresh >= 2 ? "PASS" : "FAIL");
@@ -311,37 +311,37 @@ void register_verification_arcs(ShellT* shell) {
     // and an immediate repeat must agree (projective repeatability).
     if (shell->has_arg("--selftest-partial")) {
         run_when_manifold_ready(shell, [shell] {
-            shell->toggle_decay();  // OFF: jumps would race the assertions
-            shell->debug_prepare_superposition(kS2, kP2Z);
-            shell->measure_n_shell_now();
+            shell->hy()->toggle_decay();  // OFF: jumps would race the assertions
+            shell->hy()->debug_prepare_superposition(kS2, kP2Z);
+            shell->hy()->measure_n_shell_now();
             shell->sched().after(800, [shell] {
-                const double ps = shell->probe_population(kS2);
-                const double pz = shell->probe_population(kP2Z);
-                const bool n_ok = shell->last_partial_outcome() == 2 &&
+                const double ps = shell->hy()->probe_population(kS2);
+                const double pz = shell->hy()->probe_population(kP2Z);
+                const bool n_ok = shell->hy()->last_partial_outcome() == 2 &&
                                   ps > 0.35 && ps < 0.65 && pz > 0.35 &&
                                   pz < 0.65;
                 std::fprintf(stderr,
                              "selftest-partial: n-shell -> %d, P(2s)=%.2f "
                              "P(2pz)=%.2f  [%s]\n",
-                             shell->last_partial_outcome(), ps, pz,
+                             shell->hy()->last_partial_outcome(), ps, pz,
                              n_ok ? "PASS" : "FAIL");
-                shell->measure_l_now();
+                shell->hy()->measure_l_now();
                 shell->sched().after(800, [shell, n_ok] {
-                    const int l = shell->last_partial_outcome();
-                    const double ps = shell->probe_population(kS2);
-                    const double pz = shell->probe_population(kP2Z);
+                    const int l = shell->hy()->last_partial_outcome();
+                    const double ps = shell->hy()->probe_population(kS2);
+                    const double pz = shell->hy()->probe_population(kP2Z);
                     const bool l_ok = (l == 0 && ps > 0.98) ||
                                       (l == 1 && pz > 0.98);
                     std::fprintf(stderr,
                                  "selftest-partial: l -> %d, P(2s)=%.2f "
                                  "P(2pz)=%.2f  [%s]\n",
                                  l, ps, pz, l_ok ? "PASS" : "FAIL");
-                    shell->debug_prepare_state(kP2X);
-                    shell->measure_m_now();
+                    shell->hy()->debug_prepare_state(kP2X);
+                    shell->hy()->measure_m_now();
                     shell->sched().after(800, [shell, n_ok, l_ok] {
-                        const int m1 = shell->last_partial_outcome();
-                        const double px = shell->probe_population(kP2X);
-                        const double py = shell->probe_population(kP2Y);
+                        const int m1 = shell->hy()->last_partial_outcome();
+                        const double px = shell->hy()->probe_population(kP2X);
+                        const double py = shell->hy()->probe_population(kP2Y);
                         const bool ring_ok =
                             (m1 == 1 || m1 == -1) && px > 0.35 && px < 0.65 &&
                             py > 0.35 && py < 0.65;
@@ -349,18 +349,18 @@ void register_verification_arcs(ShellT* shell) {
                                      "selftest-partial: m -> %+d, "
                                      "P(px)=%.2f P(py)=%.2f  [%s]\n",
                                      m1, px, py, ring_ok ? "PASS" : "FAIL");
-                        shell->measure_m_now();
+                        shell->hy()->measure_m_now();
                         shell->sched().after(800, [shell, n_ok, l_ok, ring_ok,
                                                    m1] {
                             const bool rep_ok =
-                                shell->last_partial_outcome() == m1;
+                                shell->hy()->last_partial_outcome() == m1;
                             const bool pass =
                                 n_ok && l_ok && ring_ok && rep_ok;
                             std::fprintf(
                                 stderr,
                                 "selftest-partial: repeat m -> %+d "
                                 "(repeatability %s)  [%s]\n",
-                                shell->last_partial_outcome(),
+                                shell->hy()->last_partial_outcome(),
                                 rep_ok ? "PASS" : "FAIL",
                                 pass ? "PASS" : "FAIL");
                             shell->request_exit(pass ? 0 : 1);
@@ -378,7 +378,7 @@ void register_verification_arcs(ShellT* shell) {
     if (shell->has_arg("--selftest-tunnel")) {
         run_when_manifold_ready(shell, [shell] {
             shell->sched().after(180000, [shell] {
-                const double t = shell->tunnel_transmitted_max();
+                const double t = shell->tn()->transmitted_max();
                 const bool pass = t > 1e-3 && t < 0.9;
                 std::fprintf(stderr, "selftest-tunnel: max T = %.4f  [%s]\n", t,
                              pass ? "PASS" : "FAIL");
