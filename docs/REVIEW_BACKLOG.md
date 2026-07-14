@@ -2,8 +2,9 @@
 
 A whole-project critical review (2026-07-14: architecture/SOLID, antipatterns,
 resource leaks, concurrency, test edge cases, comment hygiene, correctness)
-produced 26 confirmed findings. The high/medium ones are **fixed**; this file
-tracks the remainder so a later pass can pick them up. Every fix must clear the
+produced 26 confirmed findings. As of 2026-07-14 all but two are **fixed**
+(the two remainders below are a deliberately-deferred low-value extraction and
+one minor consistency cleanup). Every fix must clear the
 gates in [`TDD_RULES.md`](TDD_RULES.md): `ctest` (all pass) + `sesolver_vkcheck`
 (all PASS) + the `--selftest-*` arcs. Prefer RED-first for any testable logic.
 
@@ -25,82 +26,45 @@ gates in [`TDD_RULES.md`](TDD_RULES.md): `ctest` (all pass) + `sesolver_vkcheck`
   needs a Linux/5090 `sesolver_vkcheck` re-run to confirm — could not reproduce
   on the RTX 4060.*
 
-## Remaining — architecture (1 medium, 1 low)
+### Batch A/B/C (2026-07-14, ee0cfa5..HEAD; ctest 264/264, vkcheck all PASS)
 
-- **[medium] Shell down-casts to concrete directors + ~28 `if (hydrogen_) …`
-  forwarders** (`app/src/main.cpp`, the Shell control/probe section) — OCP/LSP
-  leak. Fire-and-forget buttons (toggle_laser, measure_*, relax_*, set_efield…)
-  should route through the existing `handle_key`/`press` seam; give
-  `ScenarioDirector` a `virtual draw_panel(shell)`. NOTE: ~13 of the ~28 are
-  value-RETURNING selftest probes (`channel_a`, `state_energy`, `mean_z`,
-  `probe_population`, `tunnel_transmitted_max`…) that `press()` cannot fold —
-  those need a small typed capability sub-interface, not `handle_key`.
+- **[medium] Shell god-object / OCP-LSP leak** — the ~28 down-cast forwarders
+  and the concrete `HydrogenDirector*`/`TunnelingDirector*` members are GONE.
+  `scenario.hpp` now declares `HydrogenApi` / `TunnelApi` capability
+  interfaces + `ScenarioDirector::hydrogen()`/`tunnel()` (null unless the
+  scene implements them); the panel takes `HydrogenApi&`, the arcs go through
+  `shell->hy()`/`tn()`. (Deviates from the literal `draw_panel(shell)`: that
+  would pull ImGui into the framework-neutral director layer.)
+- **All 7 latent-correctness guards** — `normalize()` zero-norm; observables
+  `obs_ratio`/`obs_sigma` (den==0 + variance clamp, bitwise no-op when den>0);
+  `marching_cubes_at_fraction` empty/non-positive-peak; `fft()` power-of-two
+  runtime throw (assert survived NDEBUG); `mean_potential_gradient` norm==1
+  precondition DOCUMENTED (normalizing would desync the GPU mean_force oracle);
+  `upload_field_tables` checks both bool returns + moves the memo after a
+  successful upload; `kFlashTicks` unifies the coupled 25 / 25.0f literals.
+  `tests/degenerate_guards_test.cpp` (RED-verified 5/6 against unfixed code).
+- **3 of 4 latent concurrency items** — mc vbuf/indirect `CONCURRENT`;
+  `norm_and_peak`/`project_psi`/`scale` leading `barrier_compute_to_compute`
+  (self-contained vs an unwaited async batch); `Engine::destroy()`
+  `reset_lazy_state()` nulls the lazy handles + `*_ok_` flags + cache sizes
+  (vkcheck `check_engine_reinit`: init->destroy->init->step parity).
+
+## Remaining — architecture (1 low, deliberately deferred)
+
 - **[low] Extract a `MeasurementEngine`** from `HydrogenDirector`
   (`run_partial_measure` / `rebuild_psi_from` / `project_manifold_out`, ~180
-  lines) — the one cleanly cohesive unit left after the reparent. Optional; the
-  shared `cpu_is_truth_`/display-bridge coupling makes fuller decomposition
-  low-value.
+  lines). DEFERRED (2026-07-14): per this item's own note the shared
+  `cpu_is_truth_`/display-bridge/engine coupling makes the extraction
+  low-cohesion — it would need a fat back-reference into HydrogenDirector, so
+  the churn on the (just-refactored, manually-verified) shell is not worth the
+  negligible cohesion gain. Revisit only if that coupling is broken first.
 
-## Remaining — latent correctness (all low; reachable only in adversarial / degenerate regimes the app does not currently produce)
+## Remaining — latent correctness
 
-- **`normalize()` has no zero-norm guard** (`core/field.hpp`, ~line 88) →
-  `inv = +Inf` → NaN across the field. Called by `collapse_wavepacket`, relax,
-  `relax_deflated`. Asymmetric with `nojump_damped_amplitudes` which DOES guard.
-  Fix: `if (n2 <= 0) return;` + add the two degenerate test cases (a
-  `relax_deflated` seed parallel to the span of the lower states; a collapse
-  center far from all probability).
-- **`observables.hpp` reductions divide by accumulated norm with no `den==0`
-  guard** (`mean_position`/`sigma_position`/`mean_momentum`/`mean_energy`, the
-  num/den sites) → NaN on an empty / fully-absorbed field, propagates into the
-  title readout and the Larmor path. Also `sigma_position` lacks a
-  `max(0, var)` clamp → `sqrt` of a tiny negative FP value → NaN on single-cell
-  states (test-only path today). Fix: guard `den`, clamp variance, add a
-  single-cell edge test.
-- **`marching_cubes_at_fraction` dereferences `*max_element` with no
-  empty / non-positive-peak guard** (`core/marching_cubes.hpp`, ~line 119).
-- **`mean_potential_gradient` assumes `norm == 1`** (`core/emission.hpp`,
-  ~line 20) unlike every other observable — a caller trap on an unnormalized
-  input. Document the precondition or normalize internally.
-- **FFT power-of-two requirement is only an `assert`** (`core/fft.hpp`, ~line 50)
-  → compiled out under NDEBUG, then silent garbage / infinite loop on a
-  mis-sized axis (this bit a `48^3` test during the coverage work). Add a
-  runtime check or a death test; grids are power-of-two by construction today.
-- **`upload_field_tables` ignores the `set_potential` / `set_potential_gradient`
-  bool returns** (`app/src/hydrogen_director.hpp`) — inconsistent with
-  `init_compute`, which treats the same gradient-upload failure as fatal. On
-  failure psi keeps evolving under a stale half-potential and the Ehrenfest
-  gradient desyncs (the "fake-Larmor" hazard the function's own comment warns
-  about); the `uploaded_*` memo is committed BEFORE the upload, so the guard
-  also blocks retry. Fix: check both returns; on failure log + `gpu_ok_ = false`
-  or revert the `uploaded_*` memo.
-- **Coupled photon-flash magic literals** — `flash_ticks_ = 25` and the
-  `/ 25.0f` fade divisor (`app/src/hydrogen_director.hpp`) must stay equal but
-  are two bare literals. Introduce `kFlashTicks` (the codebase already uses
-  `kMeasureSigma`/`kIsoFraction` named-constant convention).
+ALL FIXED (Batch B, 2026-07-14) -- see the "Already fixed" section above.
 
-## Remaining — latent resource / concurrency (all low)
+## Remaining — latent resource / concurrency (1 low)
 
-- **`Engine::destroy()` leaves ~20 lazily-created descriptor-set handles
-  non-null and the `*_ok_` flags set** (`app/src/vk_engine.hpp`) → a *second*
-  `initialize()` on the same Engine object would bind freed sets (e.g.
-  `set_absorber`'s `pd_full_set_ == NULL` guard sees a stale non-null handle and
-  skips re-wiring). NOT reachable today (init runs once; vkcheck uses fresh
-  Engines). Fix: null the lazy handles and reset the flags/grow-cache sizes in
-  `destroy()`.
-- **Marching-cubes `mc_vbuf_` / `mc_indirect_` are `VK_SHARING_MODE_EXCLUSIVE`**
-  (`create_device_buffer`) but written on the compute family and read as
-  vertex/indirect on the graphics family with no queue-family ownership
-  transfer — UB per spec on a *dedicated* async-compute family (host-fence
-  serialization prevents a true race; discrete GPUs tolerate it; the
-  combined-queue fallback is fine). Fix: mark them `CONCURRENT` like the display
-  volume, or add a QFOT.
-- **psi-reading OneShots lack a self-contained leading barrier**
-  (`norm_and_peak`, `project_psi`, `scale` in `app/src/vk_engine.hpp`) — correct
-  ONLY by the call-site invariant that `wait_async()` precedes them; a future
-  readout that reads psi mid-batch without `wait_async` would silently read
-  stale psi, and validation layers do NOT catch memory hazards. Fix: add the
-  leading `barrier_compute_to_compute` locally, or document the invariant at
-  each entry.
 - **Compute `Kernel` keeps its `VkShaderModule` for the object lifetime**
   (`app/src/vk_compute.hpp`) — the graphics pipelines free theirs right after
   pipeline creation. Retained memory (~29 small modules for the session), not a
@@ -113,6 +77,17 @@ holds); OpenMP is bitwise-deterministic (fixed serial per-z-slab combine); there
 are ZERO `std::mutex`/`std::thread` anywhere; `g_validation_errors` is a correct
 `std::atomic`; the test `static const Relaxed` caches are pure memoization, not
 order-coupled.
+
+## Test-robustness observation (new, 2026-07-14)
+
+- **`--selftest-cascade` is timing-marginal** — its 90 s wall window at
+  time-scale 4x packs only ~2-3 display lifetimes of the 3d state at the
+  CURRENT au/s (the 1-step-per-render policy lowered throughput), so it has a
+  real Poisson false-fail probability (observed: one `photons = 0` run, then
+  `photons = 2` on the immediate re-run). Not a correctness bug; the window /
+  time-scale constant wants raising to restore the intended ~11-lifetime
+  margin. (decay/rabi/manifold, which share the same photon-count path, are
+  comfortably above threshold.)
 
 ## See also
 
