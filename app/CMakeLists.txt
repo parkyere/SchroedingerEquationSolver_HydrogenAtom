@@ -66,7 +66,7 @@ foreach(_k IN ITEMS phase_multiply scale norm_peak norm_finalize scale_buf
         inner_product
         dipole_kick mean_force dipole pack_half unpack_half conj_scale
         shear axpy copy_state synth project_deposit
-        bridge_store bridge_load
+        bridge_store bridge_load flow_velocity
         accum bloom_down bloom_up compose particles
         occupancy occ_dilate shadow half_mul kin_mul damp_mul phase_damp_mul
         mcwf_axpy

@@ -265,6 +265,9 @@ public:
     VkImageView psi_volume_view() override {
         return gpu_ok_ ? engine_.volume_view() : VK_NULL_HANDLE;
     }
+    VkImageView flow_velocity_view() override {
+        return gpu_ok_ ? engine_.flow_velocity_view() : VK_NULL_HANDLE;
+    }
     float next_flash_intensity() override { return 0.0f; }
     bool take_volume_written() override {
         const bool w = volume_written_;

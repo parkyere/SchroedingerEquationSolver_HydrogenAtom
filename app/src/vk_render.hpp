@@ -90,6 +90,7 @@ public:
         bool flow_animate = false;  // advance the advection (false = paused)
         bool volume_changed = false;  // psi/absorbance changed: rebuild aux
         VkImageView psi_volume = VK_NULL_HANDLE;  // engine bridge; null -> CPU fallback
+        VkImageView flow_velocity = VK_NULL_HANDLE;  // fp32 Bohmian v (streaklines)
         const ses::Mesh* mesh = nullptr;          // non-null: upload isosurface
         const std::vector<ses::Rgb>* mesh_colors = nullptr;
         const std::vector<float>* volume_staging = nullptr;  // RG staging
@@ -266,6 +267,7 @@ public:
                 std::memcpy(flow_ubo_.mapped, &fp, sizeof(fp));
                 vmaFlushAllocation(ctx_->allocator, flow_ubo_.alloc, 0,
                                    VK_WHOLE_SIZE);
+                point_flow_velocity_binding(in.flow_velocity);
                 particles_k_.bind(cb, particles_set_);
                 vkCmdDispatch(cb, (kFlowStreaks + 255) / 256, 1, 1);
                 memory_barrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -1189,7 +1191,7 @@ private:
         const auto cis = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         const auto ubo = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         if (!particles_k_.create(*ctx_, blobs.particles, blobs.particles_size,
-                                 {{0, sbuf}, {1, ubo}, {2, cis}})) {
+                                 {{0, sbuf}, {1, ubo}, {2, cis}, {3, cis}})) {
             return false;
         }
         // Flow draw set layout: SSBO + volume UBO + psi + LUT, vertex stage.
@@ -1318,6 +1320,9 @@ private:
         arena_.write_sampled(*ctx_, particles_set_, 2, phase_tex_.view,
                              samp_3d_);
         arena_.write_sampled(*ctx_, flow_set_, 2, phase_tex_.view, samp_3d_);
+        // Binding 3 (velocity) of the advect set is pointed per frame; seed.
+        arena_.write_sampled(*ctx_, particles_set_, 3, phase_tex_.view,
+                             samp_3d_);
         return true;
     }
 
@@ -1657,6 +1662,16 @@ private:
         aux_valid_ = false;  // fresh field: rebuild occupancy + shadow
         volume_bound_view_ = view;
     }
+    // Re-point the advect set's velocity binding at the (flipping) engine
+    // velocity volume each frame. Cached to skip redundant writes.
+    void point_flow_velocity_binding(VkImageView engine_view) {
+        if (engine_view == VK_NULL_HANDLE ||
+            engine_view == flow_vel_bound_view_) {
+            return;
+        }
+        arena_.write_sampled(*ctx_, particles_set_, 3, engine_view, samp_3d_);
+        flow_vel_bound_view_ = engine_view;
+    }
 
     // Grow-only host-visible mesh vertex buffer (isosurface refresh).
     void upload_mesh(const ses::Mesh& mesh,
@@ -1849,7 +1864,7 @@ private:
     // Probability-flow particles.
     // Sparse streaklines: kFlowStreaks strips, each a kFlowTrail-vertex trail
     // of recent positions (weather-map Lagrangian flux look, low frame cost).
-    static constexpr std::uint32_t kFlowStreaks = 2048;
+    static constexpr std::uint32_t kFlowStreaks = 1024;
     static constexpr std::uint32_t kFlowTrail = 40;
     struct alignas(16) FlowParams {
         float box_min[4];
@@ -1904,6 +1919,7 @@ private:
     VkDescriptorSet gizmo_set_ = VK_NULL_HANDLE;
     VkDescriptorSet volume_set_ = VK_NULL_HANDLE;
     VkImageView volume_bound_view_ = VK_NULL_HANDLE;
+    VkImageView flow_vel_bound_view_ = VK_NULL_HANDLE;
 
     Buffer scene_ubuf_{};
     Buffer gizmo_ubuf_{};

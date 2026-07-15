@@ -27,13 +27,22 @@ layout(std140, binding = 1) uniform Params {
     int animate;     // 0 = hold positions (paused)
     int reset;       // 1 = collapse every trail to a fresh seed (enable frame)
 };
-layout(binding = 2) uniform sampler3D psi_tex;
+layout(binding = 2) uniform sampler3D psi_tex;  // fp16 display volume (density)
+layout(binding = 3) uniform sampler3D vel_tex;  // fp32-computed Bohmian velocity
 
 vec2 psi_at(vec3 p) {
     // Half-texel alignment (grid point i = texel center (i+0.5)/n).
     vec3 uvw = (p - box_min.xyz) / (box_max.xyz - box_min.xyz) +
                0.5 / vec3(textureSize(psi_tex, 0));
     return texture(psi_tex, uvw).xy;
+}
+
+// Bohmian velocity, precomputed in fp32 from the physics psi (NOT the fp16
+// display volume) so a real eigenstate reads v ~ 0 -- no spurious pulsation.
+vec3 vel_at(vec3 p) {
+    vec3 uvw = (p - box_min.xyz) / (box_max.xyz - box_min.xyz) +
+               0.5 / vec3(textureSize(vel_tex, 0));
+    return texture(vel_tex, uvw).xyz;
 }
 
 // PCG-ish hash -> [0,1).
@@ -90,23 +99,7 @@ void main() {
     }
 
     if (animate != 0) {
-        // Central-difference grad psi (h ~ one cell in world units).
-        vec3 h = (box_max.xyz - box_min.xyz) / 256.0;
-        vec2 dx = (psi_at(p + vec3(h.x, 0, 0)) - psi_at(p - vec3(h.x, 0, 0))) /
-                  (2.0 * h.x);
-        vec2 dy = (psi_at(p + vec3(0, h.y, 0)) - psi_at(p - vec3(0, h.y, 0))) /
-                  (2.0 * h.y);
-        vec2 dz = (psi_at(p + vec3(0, 0, h.z)) - psi_at(p - vec3(0, 0, h.z))) /
-                  (2.0 * h.z);
-        // j = Im(conj(psi) grad psi) = re*d_im - im*d_re (== flow.hpp).
-        vec3 j = vec3(s.x * dx.y - s.y * dx.x, s.x * dy.y - s.y * dy.x,
-                      s.x * dz.y - s.y * dz.x);
-        vec3 v = j / max(rho, 1e-12);
-        float speed = length(v);
-        const float vmax = 3.0;  // au/au; clamp the low-density blowup
-        if (speed > vmax) {
-            v *= vmax / speed;
-        }
+        vec3 v = vel_at(p);  // fp32 Bohmian velocity (already node-guarded/clamped)
         p += v * dt;
         age += 1.0;
 

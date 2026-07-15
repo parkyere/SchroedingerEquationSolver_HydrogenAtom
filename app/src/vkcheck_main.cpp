@@ -68,6 +68,7 @@
 #include <project_deposit_spv.h>
 #include <bridge_store_spv.h>
 #include <bridge_load_spv.h>
+#include <flow_velocity_spv.h>
 #include <fft_line8_spv.h>
 #include <fft_line64_spv.h>
 #include <fft_line256_spv.h>
@@ -1173,6 +1174,8 @@ ses_vk::EngineKernels engine_blobs_8() {
     b.bridge_store_size = k_bridge_store_spv_size;
     b.bridge_load = k_bridge_load_spv;
     b.bridge_load_size = k_bridge_load_spv_size;
+    b.flow_velocity = k_flow_velocity_spv;
+    b.flow_velocity_size = k_flow_velocity_spv_size;
     b.pack = k_pack_half_spv;
     b.pack_size = k_pack_half_spv_size;
     b.unpack = k_unpack_half_spv;

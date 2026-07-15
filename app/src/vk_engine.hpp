@@ -106,6 +106,8 @@ struct EngineKernels {
     std::size_t bridge_store_size = 0;
     const unsigned char* bridge_load = nullptr;   // bridge_load.comp (checks)
     std::size_t bridge_load_size = 0;
+    const unsigned char* flow_velocity = nullptr;  // flow_velocity.comp (fp32
+    std::size_t flow_velocity_size = 0;            // Bohmian v; optional)
     const unsigned char* pack = nullptr;    // pack_half.comp (fp16 atlas)
     std::size_t pack_size = 0;
     const unsigned char* unpack = nullptr;  // unpack_half.comp
@@ -342,6 +344,18 @@ public:
                 return false;
             }
             fused_relax_ok_ = true;
+        }
+        // Optional fp32 Bohmian-velocity kernel for the streakline flow. Absent
+        // blob => no velocity volume (the renderer's flow feature needs it).
+        if (blobs.flow_velocity != nullptr) {
+            if (!flow_vel_k_.create(ctx, blobs.flow_velocity,
+                                    blobs.flow_velocity_size,
+                                    {{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
+                                     {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE},
+                                     {2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER}})) {
+                return false;
+            }
+            flow_vel_ok_ = true;
         }
         // Optional GPU marching cubes (Surface-mode isosurface extraction);
         // buffers are transient (mc_prepare/release_mc), kernels bake here.
@@ -1609,6 +1623,7 @@ public:
             vkCmdDispatch(cb, mul_groups_, 1, 1);
             transition_volume(cb, vol_write_,
                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            record_flow_velocity(cb);  // fp32 v from the same psi snapshot
             return true;
         }
         return false;
@@ -1668,6 +1683,11 @@ public:
     VkImageView volume_view() {
         return vol_display_ >= 0 ? volume_[vol_display_].view : VK_NULL_HANDLE;
     }
+    // The low-res fp32-computed Bohmian velocity field (last completed bridge).
+    VkImageView flow_velocity_view() {
+        return (flow_vel_ok_ && vol_display_ >= 0) ? flow_vel_[vol_display_].view
+                                                   : VK_NULL_HANDLE;
+    }
 
     // Copy psi into the write volume (imageStore, one texel per cell). The
     // engine OWNS the layout round-trip: the store runs in GENERAL, then the
@@ -1692,6 +1712,7 @@ public:
         vkCmdDispatch(shot.cb(), mul_groups_, 1, 1);
         transition_volume(shot.cb(), vol_write_,
                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        record_flow_velocity(shot.cb());
         shot.submit_and_wait(*ctx_);
         shot.destroy(*ctx_);
         flip_volume();  // fence observed: the write is the display now
@@ -2150,6 +2171,7 @@ public:
         pack_.destroy(*ctx_);
         bridge_load_.destroy(*ctx_);
         bridge_store_.destroy(*ctx_);
+        flow_vel_k_.destroy(*ctx_);
         project_.destroy(*ctx_);
         dipole_.destroy(*ctx_);
         force_.destroy(*ctx_);
@@ -2188,6 +2210,9 @@ public:
         ctx_->destroy_buffer(&bridge_ubo_);
         ctx_->destroy_image(&volume_[1]);
         ctx_->destroy_image(&volume_[0]);
+        ctx_->destroy_buffer(&flow_vel_ubo_);
+        ctx_->destroy_image(&flow_vel_[1]);
+        ctx_->destroy_image(&flow_vel_[0]);
         ctx_->destroy_buffer(&proj_ubo_);
         ctx_->destroy_buffer(&glm_buf_);
         ctx_->destroy_buffer(&proj_binoff_buf_);
@@ -2247,12 +2272,14 @@ private:
               &relax_half_set_, &relax_kin_set_, &force_set_, &dipole_set_,
               &proj_set_, &pack_set_, &unpack_set_, &inner_any_set_,
               &synth_any_set_, &norm_any_set_, &scale_any_set_, &load_set_[0],
-              &load_set_[1], &store_set_[0], &store_set_[1], &fft_set_[0],
+              &load_set_[1], &store_set_[0], &store_set_[1],
+              &flow_vel_set_[0], &flow_vel_set_[1], &fft_set_[0],
               &fft_set_[1], &fft_set_[2], &shear_set_[0], &shear_set_[1]}) {
             *s = VK_NULL_HANDLE;
         }
         pd_kernel_ok_ = false;
         fused_relax_ok_ = false;
+        flow_vel_ok_ = false;
         mcwf_kernel_ok_ = false;
         mc_kernel_ok_ = false;
         mc_buffers_ok_ = false;
@@ -2269,6 +2296,9 @@ private:
         vol_display_ = -1;
         volume_layout_[0] = VK_IMAGE_LAYOUT_UNDEFINED;
         volume_layout_[1] = VK_IMAGE_LAYOUT_UNDEFINED;
+        flow_vel_layout_[0] = VK_IMAGE_LAYOUT_UNDEFINED;
+        flow_vel_layout_[1] = VK_IMAGE_LAYOUT_UNDEFINED;
+        flow_vel_m_ = 0;
     }
 
     struct alignas(16) MulParams {
@@ -2321,6 +2351,10 @@ private:
     };
     struct alignas(16) BridgeParams {
         std::int32_t nx, ny, nz, pad;
+    };
+    struct alignas(16) FlowVelParams {  // flow_velocity.comp std140
+        std::int32_t nx, ny, nz, m;
+        float hx, hy, hz, vmax;
     };
     // std140 all-scalar block (tight 4-byte packing), matches shear.comp;
     // the trailing pad makes the 16-byte alignment explicit (dodges C4324).
@@ -2675,6 +2709,43 @@ private:
                                 VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                                 bridge_ubo_.buf, sizeof(BridgeParams));
         }
+        // Companion low-res velocity volume (double-buffered with the display).
+        if (flow_vel_ok_) {
+            flow_vel_m_ = std::min(128, n_);
+            const FlowVelParams fvp{grid_.x.n,
+                                    grid_.y.n,
+                                    grid_.z.n,
+                                    flow_vel_m_,
+                                    static_cast<float>(grid_.x.spacing()),
+                                    static_cast<float>(grid_.y.spacing()),
+                                    static_cast<float>(grid_.z.spacing()),
+                                    3.0f};
+            if (!write_ubo(&flow_vel_ubo_, &fvp, sizeof(fvp))) {
+                return false;
+            }
+            for (int i = 0; i < 2; ++i) {
+                if (!ctx_->create_storage_image_3d(
+                        static_cast<std::uint32_t>(flow_vel_m_),
+                        static_cast<std::uint32_t>(flow_vel_m_),
+                        static_cast<std::uint32_t>(flow_vel_m_),
+                        VK_FORMAT_R16G16B16A16_SFLOAT, &flow_vel_[i],
+                        /*share_across_queues=*/true)) {
+                    return false;
+                }
+                flow_vel_set_[i] =
+                    arena_.allocate(*ctx_, flow_vel_k_.set_layout());
+                if (flow_vel_set_[i] == VK_NULL_HANDLE) {
+                    return false;
+                }
+                arena_.write_buffer(*ctx_, flow_vel_set_[i], 0,
+                                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, psi_.buf);
+                arena_.write_image(*ctx_, flow_vel_set_[i], 1,
+                                   flow_vel_[i].view);
+                arena_.write_buffer(*ctx_, flow_vel_set_[i], 2,
+                                    VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                                    flow_vel_ubo_.buf, sizeof(FlowVelParams));
+            }
+        }
         OneShot shot;
         if (!shot.begin_compute(*ctx_)) {
             return false;
@@ -2687,6 +2758,14 @@ private:
                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                  VK_ACCESS_SHADER_READ_BIT |
                                      VK_ACCESS_SHADER_WRITE_BIT);
+            if (flow_vel_ok_) {
+                image_layout_barrier(
+                    shot.cb(), flow_vel_[i].img, VK_IMAGE_LAYOUT_UNDEFINED,
+                    VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                    0, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+                flow_vel_layout_[i] = VK_IMAGE_LAYOUT_GENERAL;
+            }
         }
         shot.submit_and_wait(*ctx_);
         shot.destroy(*ctx_);
@@ -2710,6 +2789,32 @@ private:
         image_layout_barrier(cb, volume_[idx].img, volume_layout_[idx], to,
                              stages, access, stages, access);
         volume_layout_[idx] = to;
+    }
+    void transition_flow_vel(VkCommandBuffer cb, int idx, VkImageLayout to) {
+        if (flow_vel_layout_[idx] == to) {
+            return;
+        }
+        const VkPipelineStageFlags stages = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        const VkAccessFlags access =
+            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        image_layout_barrier(cb, flow_vel_[idx].img, flow_vel_layout_[idx], to,
+                             stages, access, stages, access);
+        flow_vel_layout_[idx] = to;
+    }
+    // Record the fp32 velocity field into flow_vel_[vol_write_] alongside the
+    // display bridge (same psi snapshot). GENERAL for the store, then
+    // SHADER_READ for the renderer's flow sampler.
+    void record_flow_velocity(VkCommandBuffer cb) {
+        if (!flow_vel_ok_ || flow_vel_set_[vol_write_] == VK_NULL_HANDLE) {
+            return;
+        }
+        transition_flow_vel(cb, vol_write_, VK_IMAGE_LAYOUT_GENERAL);
+        flow_vel_k_.bind(cb, flow_vel_set_[vol_write_]);
+        const std::uint32_t g =
+            (static_cast<std::uint32_t>(flow_vel_m_) + 3u) / 4u;
+        vkCmdDispatch(cb, g, g, g);
+        transition_flow_vel(cb, vol_write_,
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
 
     // Lazily create the async batch's pool/cb/fence (compute family).
@@ -3275,6 +3380,15 @@ private:
                                        VK_IMAGE_LAYOUT_UNDEFINED};
     int vol_write_ = 0;
     int vol_display_ = -1;  // -1: nothing written yet (renderer falls back)
+    // Flow velocity field (fp32 Bohmian v -> low-res rgba16f), double-buffered
+    // with the display volume (same psi snapshot, same vol_write_/vol_display_).
+    Kernel flow_vel_k_;
+    DeviceContext::Image flow_vel_[2]{};
+    VkImageLayout flow_vel_layout_[2] = {VK_IMAGE_LAYOUT_UNDEFINED,
+                                         VK_IMAGE_LAYOUT_UNDEFINED};
+    VkDescriptorSet flow_vel_set_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    Buffer flow_vel_ubo_{};
+    int flow_vel_m_ = 0;  // velocity-volume side (0 = not created)
     Buffer decode_scratch_[2]{};
     std::vector<State> states_;
     std::vector<int> free_full_states_;  // released full-state slots, reusable
@@ -3332,6 +3446,7 @@ private:
     VkDescriptorSet pd_half_set_ = VK_NULL_HANDLE;  // fused V+mask, coef -dt/2
     bool pd_kernel_ok_ = false;
     bool fused_relax_ok_ = false;  // P4: finalize_ + scale_buf_ wired
+    bool flow_vel_ok_ = false;     // flow_velocity kernel wired
     Buffer mcwf_radial_{};  // kMcwfSlots x n_radial floats (slotted tables)
     VkDeviceSize mcwf_radial_bytes_ = 0;
     Buffer mcwf_ubo_{};

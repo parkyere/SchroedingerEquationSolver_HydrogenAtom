@@ -109,6 +109,9 @@ public:
     virtual bool cloud() const = 0;
     virtual double peak() const = 0;
     virtual VkImageView psi_volume_view() = 0;
+    // Low-res fp32 Bohmian-velocity volume for the streaklines (null -> the
+    // renderer skips flow). Default null: only the GPU cloud scenes provide it.
+    virtual VkImageView flow_velocity_view() { return VK_NULL_HANDLE; }
     // GPU surface mesh (non-null when the scene extracts on-GPU): the
     // renderer draws these directly and ignores mesh()/colors().
     virtual VkBuffer surface_vbuf() const { return VK_NULL_HANDLE; }

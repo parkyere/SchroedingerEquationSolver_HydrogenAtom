@@ -564,6 +564,7 @@ private:
         // The psi display volume: the engine's bridge image on the GPU path;
         // null lets the renderer fall back to its CPU-staged texture.
         in.psi_volume = director_->psi_volume_view();
+        in.flow_velocity = director_->flow_velocity_view();
         if (in.cloud) {
             if (director_->take_volume_dirty()) {
                 // CPU staging only: until compute init has been ATTEMPTED the
