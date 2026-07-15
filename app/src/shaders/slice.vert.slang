@@ -5,6 +5,7 @@
 // (glsl module) maps to the raw SPIR-V VertexIndex builtin -- unlike
 // SV_VertexID it needs no shaderDrawParameters capability.
 import glsl;
+import vec;
 
 struct Ubo {
     float4x4 mvp;
@@ -26,13 +27,6 @@ struct VSOut {
     float4 pos : SV_Position;
     [[vk::location(0)]] float3 v_world : TEXCOORD0;
 };
-
-void set_comp(inout float3 v, int i, float x) {
-    if (i == 0) v.x = x;
-    else if (i == 1) v.y = x;
-    else v.z = x;
-}
-float comp(float3 v, int i) { return i == 0 ? v.x : (i == 1 ? v.y : v.z); }
 
 // CCW quad corners as (s, t) in {0,1}^2.
 static const float2 kST[6] = {

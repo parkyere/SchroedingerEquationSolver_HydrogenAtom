@@ -3,6 +3,8 @@
 // alpha, compositing). psi is an RG16F 3D texture (re,im), colors
 // from the phase LUT 1D texture. std140 UBO (binding 0, shared with the
 // vertex stage); samplers at bindings 1-4.
+import vec;
+
 struct FSIn {
     float4 fragCoord : SV_Position;  // gl_FragCoord
     [[vk::location(0)]] float3 v_world : TEXCOORD0;
@@ -23,8 +25,6 @@ struct Ubo {
     float4 slice;  // (slice pass only; here to share the UBO layout)
 };
 [[vk::binding(0, 0)]] ConstantBuffer<Ubo, Std140DataLayout> ubo;
-
-float comp(float3 v, int i) { return i == 0 ? v.x : (i == 1 ? v.y : v.z); }
 
 [[vk::binding(1, 0)]] Sampler3D<float4> psi_tex;
 [[vk::binding(2, 0)]] Sampler1D<float4> phase_tex;

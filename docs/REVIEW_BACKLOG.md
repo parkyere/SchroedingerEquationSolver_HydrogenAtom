@@ -107,8 +107,11 @@ the golden diff flags only the run-to-run timing lines).
   Complex via new `mix`/`arg` helpers) -- marching-cubes oracle stays byte-
   identical (tris 5668, dhue 1.214e-07). Deliberate keeps: mean_force's inline
   uint unflatten (feeds uint neighbor-wrap; the int-typed grid fn would add
-  friction), no unary-minus / complex-division in complex.slang (no consumer),
-  render `comp(float3,int)` left local (1-liner, visual-only).
+  friction), no unary-minus / complex-division in complex.slang (no consumer).
+  Follow-up: the render `comp`/`set_comp` dynamic-axis accessors (dup'd 3x across
+  volume.frag/slice.frag/slice.vert) were extracted to a shared `vec.slang` --
+  kept as the register-only ternary, since native `v[i]` with a runtime index
+  spills the vector to addressable Function storage.
 
 ## Already fixed (for context — do not redo)
 

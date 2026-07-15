@@ -5,6 +5,8 @@
 // planes read as dark bands ON a visible sheet. The colour/alpha and the
 // clip-side discard MIRROR ses::slice_shade / ses::clip_ray_interval
 // (core/cross_section.hpp) -- the tested single source of truth.
+import vec;
+
 struct FSIn {
     float4 pos : SV_Position;
     [[vk::location(0)]] float3 v_world : TEXCOORD0;
@@ -28,8 +30,6 @@ struct Ubo {
 
 [[vk::binding(1, 0)]] Sampler3D<float4> psi_tex;
 [[vk::binding(2, 0)]] Sampler1D<float4> phase_tex;
-
-float comp(float3 v, int i) { return i == 0 ? v.x : (i == 1 ? v.y : v.z); }
 
 [shader("fragment")]
 float4 main(FSIn input) : SV_Target {
