@@ -170,22 +170,27 @@ RTX 4060 (ctest 264/264 + vkcheck all-PASS + windowed validation 0-errors).
     relaxed modes, `subgroupAdd` on the bandwidth-bound STEP reductions, any
     `VK_NV_*`, larger workgroups; NO fp16 in propagation without explicit opt-in.
 
-## Validation layers on the office machine (static-triplet gotcha, 2026-07-15)
+## Validation layers -- use the `msvc-release-validation` preset (2026-07-15)
 
-`vulkan-validationlayers` is an opt-in vcpkg feature (`VCPKG_MANIFEST_FEATURES=
-validation`, or `-DVCPKG_MANIFEST_FEATURES=validation` on reconfigure -- the env
-var alone is ignored once the cache exists). BUT on the **x64-windows-static**
-triplet vcpkg BUILDS the layer yet does NOT copy the runtime DLL to
-`vcpkg_installed/bin` (static triplet suppresses DLLs). The built layer lives in
-`external/vcpkg/buildtrees/vulkan-validationlayers/x64-windows-static-rel/layers/`
-(DLL + `VkLayer_khronos_validation.json`). Point `VK_ADD_LAYER_PATH` THERE:
+`vulkan-validationlayers` is an opt-in vcpkg feature. **The `vulkan-validationlayers`
+port forces its OWN dynamic linkage** (`set(VCPKG_LIBRARY_LINKAGE dynamic)` at
+portfile line 1) + `VCPKG_POLICY_DLLS_WITHOUT_LIBS`, so the layer DLL + manifest
+land in `vcpkg_installed/x64-windows-static/bin` even on the static triplet --
+**no custom triplet needed** (an overlay triplet force-rebuilds ALL deps, since
+vcpkg hashes the triplet file into every package ABI -- dry-run confirmed; do NOT
+do it). The real trap was STICKINESS: `-DVCPKG_MANIFEST_FEATURES=validation` on a
+bare reconfigure is not cached, so a later plain reconfigure (VS auto-reconfigure
+on a CMakeLists edit) re-resolves without the feature and silently UNINSTALLS the
+layer from the tree. Fix: the new **`msvc-release-validation`** preset (its own
+tree; the cacheVariable re-applies every configure). Then:
 ```
 SES_VK_VALIDATION=1
-VK_ADD_LAYER_PATH=<repo>/external/vcpkg/buildtrees/vulkan-validationlayers/x64-windows-static-rel/layers
+VK_ADD_LAYER_PATH=<repo>/out/build/msvc-release-validation/vcpkg_installed/x64-windows-static/bin
 VK_LOADER_LAYERS_ENABLE=*validation*
 ```
-Confirmed working: `vkcheck` prints `[validation ON]` + all-PASS. Windowed verify
-= launch `sesolver_app`, ~9 s, `Stop-Process -Force`, grep stderr for `VUID`/error.
+Confirmed end-to-end: `vkcheck` `[validation ON]` + all-PASS via that documented
+path. Windowed verify = launch `sesolver_app`, ~9 s, `Stop-Process -Force`, grep
+stderr for `VUID`/error. First VVL build ~14 min from source, then binary-cached.
 
 ## See also
 
