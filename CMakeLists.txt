@@ -35,10 +35,6 @@ if(CMAKE_HOST_UNIX AND SES_AUTODETECT_COMPILER
     endforeach()
 endif()
 
-# C++23 `import std`: the experimental gate MUST be set before CXX is enabled
-# (project()). The UUID is CMake-version-specific (this is the CMake 4.3 value).
-set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "451f2fe2-a8a2-47c3-bc32-94786d8fc91b")
-
 project(ShoeridingerEquationSolver
     VERSION 0.0.1
     DESCRIPTION "From-scratch FDM/TDSE single-electron Schrodinger solver with framework-free Vulkan compute and rendering in an SDL3 window shell"
@@ -47,7 +43,7 @@ project(ShoeridingerEquationSolver
 # ---------------------------------------------------------------------------
 # Language standard
 # ---------------------------------------------------------------------------
-set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
