@@ -12,7 +12,6 @@
 #include "vk_engine.hpp"
 
 #include <core/decay.hpp>
-#include <core/emission.hpp>
 #include <core/field.hpp>
 #include <core/grid.hpp>
 #include <core/imaginary_time.hpp>
@@ -39,6 +38,8 @@
 import ses.vram_budget;
 
 import ses.colormap;
+
+import ses.emission;
 
 namespace ses_shell {
 

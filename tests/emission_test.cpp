@@ -16,7 +16,6 @@
 //  - Larmor power: exact (2/3) alpha^3 factor and quadratic scaling.
 
 #include <core/decay.hpp>
-#include <core/emission.hpp>
 #include <core/field.hpp>
 #include <core/grid.hpp>
 #include <core/observables.hpp>
@@ -27,6 +26,8 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+
+import ses.emission;
 
 namespace {
 

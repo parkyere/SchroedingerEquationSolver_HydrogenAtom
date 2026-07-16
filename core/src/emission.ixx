@@ -1,19 +1,20 @@
-#pragma once
+module;
+#include <core/decay.hpp>  // kFineStructureConstant
+#include <core/field.hpp>
+#include <core/grid.hpp>
+#include <core/vec.hpp>
+#include <cstddef>
+#include <vector>
+export module ses.emission;
+
 
 // Semiclassical (Larmor) emission from the oscillating dipole:
 //     P = (2/3) alpha^3 |d_ddot|^2,  d_ddot = <grad V> (Ehrenfest, a.u.).
 // Coherent-superposition emission only: exactly 0 for a pure eigenstate,
 // whose spontaneous decay is the Einstein-A quantum jumps (core/decay.hpp).
 
-#include <core/decay.hpp>  // kFineStructureConstant
-#include <core/field.hpp>
-#include <core/grid.hpp>
-#include <core/vec.hpp>
 
-#include <cstddef>
-#include <vector>
-
-namespace ses {
+export namespace ses {
 
 // <grad V> = integral |psi|^2 grad V dr, grad V by central differences on the
 // periodic grid (exact for a harmonic well's linear force).
