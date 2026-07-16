@@ -18,7 +18,8 @@
 //    ground state, no-jump leaves psi bitwise untouched, and the jump
 //    probability is weighted by the ACTUAL excited population.
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 #include <core/decay.hpp>
 #include <core/field.hpp>
 import ses.grid;

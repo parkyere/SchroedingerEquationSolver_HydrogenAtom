@@ -4,7 +4,8 @@
 // psi = (u_nl(r)/r) Y_lm from the radial engine's u tables. Cartesian
 // polynomial forms keep the nodal planes exact on the grid.
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 #include <core/field.hpp>
 import ses.grid;
 #include <core/radial.hpp>

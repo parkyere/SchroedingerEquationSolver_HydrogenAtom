@@ -1,5 +1,5 @@
 module;
-#include <core/complex.hpp>
+#include <complex>
 #include <algorithm>
 #include <cmath>
 export module ses.cross_section;
@@ -7,6 +7,7 @@ export module ses.cross_section;
 import ses.colormap;
 import ses.vec;
 import ses.grid;
+import ses.complex;
 
 
 // Cross-section display logic: the clip-plane ray-interval clamp, the slice

@@ -9,7 +9,8 @@
 #include "manifold_spec.hpp"
 #include "vk_engine.hpp"
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 #include <core/decay.hpp>
 #include <core/radial.hpp>
 

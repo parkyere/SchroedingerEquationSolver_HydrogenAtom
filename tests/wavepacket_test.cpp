@@ -11,7 +11,8 @@
 // Observables must be scale-invariant (they divide by the norm), so they work
 // on unnormalized fields too.
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 #include <core/field.hpp>
 import ses.grid;
 #include <core/observables.hpp>

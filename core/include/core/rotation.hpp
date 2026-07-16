@@ -7,7 +7,8 @@
 // (X(k) *= e^{-i k d}). Norm-conserving, no interpolation blur; |theta| < pi.
 // Used for the paramagnetic (B/2) L_axis factor of the magnetic propagator.
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 #include <core/fft.hpp>
 #include <core/field.hpp>
 import ses.grid;

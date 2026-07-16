@@ -7,7 +7,8 @@
 // is a 1-D dot sum_j u_nl[j] g_lm[lm][j]. CPU-double oracle for the GPU deposit
 // kernel. CONTRACT: W_j(r) must mirror fill_orbital (core/harmonics.hpp) exactly.
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 #include <core/field.hpp>
 import ses.grid;
 #include <core/harmonics.hpp>  // real_spherical_harmonic

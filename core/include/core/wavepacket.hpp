@@ -6,7 +6,8 @@
 // momentum k0. The result is normalized on the grid (the continuum amplitude
 // is already unit-norm; a final discrete normalize absorbs sampling error).
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 #include <core/field.hpp>
 import ses.grid;
 import ses.vec;

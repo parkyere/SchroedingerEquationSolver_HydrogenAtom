@@ -5,7 +5,8 @@
 // and a product of three continuum-normalized 1D Gaussians must have unit
 // discrete norm.
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 #include <core/field.hpp>
 import ses.grid;
 

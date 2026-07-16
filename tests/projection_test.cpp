@@ -16,7 +16,8 @@
 
 #include <core/projection.hpp>
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 #include <core/field.hpp>
 import ses.grid;
 #include <core/harmonics.hpp>

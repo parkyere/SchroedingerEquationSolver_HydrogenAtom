@@ -3,7 +3,8 @@
 // circulate counterclockwise about z -- the same convention the L_z
 // measurement labels +m (measurement.hpp).
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 import ses.vec;
 
 #include <gtest/gtest.h>

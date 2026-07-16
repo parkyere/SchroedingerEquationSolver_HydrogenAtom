@@ -5,7 +5,8 @@
 // (3,5,1)) so that any axis mix-up or stride bug lands the spike in the
 // wrong bin and fails loudly.
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 #include <core/fft.hpp>
 #include <core/field.hpp>
 import ses.grid;

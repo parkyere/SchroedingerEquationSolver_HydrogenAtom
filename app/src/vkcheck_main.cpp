@@ -21,7 +21,8 @@
 #define VMA_IMPLEMENTATION
 #include "vk_engine.hpp"
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 #include <core/fft.hpp>
 #include <core/field.hpp>
 import ses.grid;

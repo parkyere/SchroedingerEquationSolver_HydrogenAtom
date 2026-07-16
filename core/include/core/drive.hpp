@@ -5,7 +5,8 @@
 //     psi <- kick(t0+dt) . halfV . IFFT . kinetic . FFT . halfV . kick(t0),
 // which keeps global O(dt^2) accuracy.
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 #include <core/fft.hpp>
 #include <core/field.hpp>
 import ses.grid;

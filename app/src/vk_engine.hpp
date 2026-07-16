@@ -34,7 +34,8 @@
 
 import ses.mc.tables;
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 #include <core/decay.hpp>
 #include <core/drive.hpp>
 import ses.grid;

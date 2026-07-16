@@ -6,7 +6,8 @@
 // Jumps are Poisson, weighted by the CURRENT excited population; randomness
 // is injected by the caller.
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 #include <core/field.hpp>
 import ses.grid;
 

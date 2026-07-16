@@ -11,7 +11,8 @@
 //    both a missing h and a wrong h);
 //  - normalize() must produce unit norm for an arbitrary field.
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 #include <core/field.hpp>
 import ses.grid;
 

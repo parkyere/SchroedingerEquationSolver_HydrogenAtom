@@ -18,7 +18,8 @@
 //  - SELECTION RULE: the z-polarized drive leaves the y-flavored state
 //    empty (<1_y|z|0> = 0 by symmetry) -- exact regardless of the ladder.
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 #include <core/drive.hpp>
 #include <core/field.hpp>
 import ses.grid;

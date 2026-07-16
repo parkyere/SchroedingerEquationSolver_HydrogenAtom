@@ -11,7 +11,8 @@
 // spike would land at N-k0); cosine -> conjugate bin pair; round-trip;
 // linearity; Parseval.
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 #include <core/fft.hpp>
 
 #include <gtest/gtest.h>

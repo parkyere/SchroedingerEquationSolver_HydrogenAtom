@@ -14,7 +14,8 @@
 //    E1 = 5/2, orthogonal to the ground state -- while the SAME guess
 //    without deflation falls back to the ground state (the control).
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 #include <core/field.hpp>
 import ses.grid;
 #include <core/imaginary_time.hpp>

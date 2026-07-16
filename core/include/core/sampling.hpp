@@ -4,7 +4,8 @@
 // colors. Interpolating the COMPLEX value and then taking atan2 keeps
 // constant-phase regions exactly constant (amplitude cancels in the ratio).
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 #include <core/field.hpp>
 import ses.grid;
 #include <core/marching_cubes.hpp>

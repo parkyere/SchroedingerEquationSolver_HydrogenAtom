@@ -11,7 +11,8 @@
 // operations use values exactly representable in binary floating point, so
 // EXPECT_EQ is legitimate there; sqrt/division results use EXPECT_DOUBLE_EQ.
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 
 #include <gtest/gtest.h>
 

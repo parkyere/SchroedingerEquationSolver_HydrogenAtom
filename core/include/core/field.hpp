@@ -6,7 +6,8 @@
 //     ||psi||^2 = sum_i |psi_i|^2 * h
 // so a continuum-normalized function sampled on the grid keeps unit norm.
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 import ses.grid;
 
 #include <cmath>

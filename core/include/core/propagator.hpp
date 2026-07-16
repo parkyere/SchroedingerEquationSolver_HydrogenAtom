@@ -6,7 +6,8 @@
 // Unitary by construction (pure phases), O(dt^2) splitting error.
 // Phase tables are precomputed once per (grid, potential, dt).
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 #include <core/fft.hpp>
 #include <core/field.hpp>
 import ses.grid;

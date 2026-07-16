@@ -20,7 +20,8 @@
 //    on its (empty) slot;
 //  - all-forbidden channel lists never jump, even with u1 = 0.
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 #include <core/decay.hpp>
 #include <core/field.hpp>
 import ses.grid;

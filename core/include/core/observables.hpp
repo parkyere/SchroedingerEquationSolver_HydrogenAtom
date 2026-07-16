@@ -4,7 +4,8 @@
 // (they divide by the discrete norm), so they are valid on unnormalized
 // fields as well.
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 #include <core/fft.hpp>
 #include <core/field.hpp>
 #include <core/spectral.hpp>

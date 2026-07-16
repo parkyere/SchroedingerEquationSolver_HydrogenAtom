@@ -6,7 +6,8 @@
 // branch disabled. This is the missing pure-logic net; the director's GPU
 // apply_mcwf_damping mirrors it.
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 #include <core/decay.hpp>
 
 #include <gtest/gtest.h>

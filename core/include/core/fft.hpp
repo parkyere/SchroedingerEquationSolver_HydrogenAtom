@@ -7,7 +7,8 @@
 //     inverse:  x_n = (1/N) sum_k X_k e^{+2 pi i k n / N}
 // Sizes must be powers of two.
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 #include <core/field.hpp>
 
 #include <cassert>

@@ -11,7 +11,8 @@
 //  - for a unit-amplitude plane wave e^{i k x} the interpolated phase tracks
 //    k*x to O((kh)^2) between grid points (tolerance-checked).
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 #include <core/field.hpp>
 import ses.grid;
 #include <core/marching_cubes.hpp>

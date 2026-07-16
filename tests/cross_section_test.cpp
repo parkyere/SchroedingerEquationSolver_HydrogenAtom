@@ -6,7 +6,8 @@
 // here; the fragment shader's transcription is verified by the dump-frame
 // composite, NOT by a per-fragment GPU oracle (there is none).
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 import ses.grid;
 import ses.vec;
 

@@ -7,7 +7,8 @@
 // Kraus mask e^{-(r-c)^2/(4 s^2)} is |psi|^2 BLURRED by a Gaussian of std
 // sigma_m (E_c = M_c^dag M_c), not raw |psi|^2 -- see sample_povm_index.
 
-#include <core/complex.hpp>
+#include <complex>
+import ses.complex;
 #include <core/field.hpp>
 import ses.grid;
 import ses.vec;
