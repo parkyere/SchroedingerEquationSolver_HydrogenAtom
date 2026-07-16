@@ -199,4 +199,98 @@ inline Field3D synthesize_orbital(const Grid3D& g, const RadialGrid& rg,
     return psi;
 }
 
+// ---- E1 angular strengths in the tesseral basis --------------------------
+// For states (u(r)/r) Y_lm the dipole integral factorizes exactly:
+// <f|r_q|i> = R_radial * A_q, and |A_q|^2 = (theta recursion element)^2 *
+// (phi overlap)^2 -- every factor an exact RATIONAL, so the table is
+// constexpr. The channel build multiplies by the runtime radial integral;
+// no 3D integral is ever needed.
+
+namespace e1_detail {
+
+// <Theta_{l+1,mu}|cos theta|Theta_{l,mu}>^2 between the shell pair (l, l+1).
+constexpr double cos_sq(int l, int mu) noexcept {
+    return static_cast<double>((l + 1) * (l + 1) - mu * mu) /
+           static_cast<double>((2 * l + 1) * (2 * l + 3));
+}
+// <Theta_{l+1,mu+1}|sin theta|Theta_{l,mu}>^2: mu raised WITH l.
+constexpr double sin_up_sq(int l, int mu) noexcept {
+    return static_cast<double>((l + mu + 1) * (l + mu + 2)) /
+           static_cast<double>((2 * l + 1) * (2 * l + 3));
+}
+// <Theta_{l-1,mu+1}|sin theta|Theta_{l,mu}>^2: mu raised, l lowered.
+constexpr double sin_down_sq(int l, int mu) noexcept {
+    const int num = (l - mu) * (l - mu - 1);
+    return num <= 0 ? 0.0
+                    : static_cast<double>(num) /
+                          static_cast<double>((2 * l - 1) * (2 * l + 1));
+}
+
+// Squared phi overlap of tesseral phi factors under cos(phi) (axis 0 = x)
+// or sin(phi) (axis 1 = y): the product-to-sum algebra leaves 1/2 when one
+// side is the m = 0 constant and 1/4 otherwise; x preserves the cos/sin
+// sector (m = 0 pairs with m' = +1), y flips it (m = 0 pairs with m' = -1).
+constexpr double phi_xy_sq(int axis, int m_to, int m_from) noexcept {
+    if (m_from == 0 || m_to == 0) {
+        const int other = m_from == 0 ? m_to : m_from;
+        if (other * other != 1) {
+            return 0.0;
+        }
+        return (axis == 0 ? other > 0 : other < 0) ? 0.5 : 0.0;
+    }
+    const bool same_sector = (m_to > 0) == (m_from > 0);
+    return (axis == 0 ? same_sector : !same_sector) ? 0.25 : 0.0;
+}
+
+}  // namespace e1_detail
+
+// |<Y_{l_to,m_to}| r_q/r |Y_{l_from,m_from}>|^2 for real Y_lm; axis q:
+// 0 = x, 1 = y, 2 = z. Exact E1 selection rules fall out as hard zeros:
+// |dl| = 1, and z: m' == m, x/y: ||m'|-|m|| = 1 with the sector algebra
+// (m' == -m is exactly forbidden). Symmetric in (to, from).
+constexpr double tesseral_e1_axis_sq(int axis, int l_to, int m_to, int l_from,
+                                     int m_from) noexcept {
+    const int dl = l_to - l_from;
+    if (dl != 1 && dl != -1) {
+        return 0.0;
+    }
+    const int mu_to = m_to < 0 ? -m_to : m_to;
+    const int mu_from = m_from < 0 ? -m_from : m_from;
+    if (axis == 2) {
+        return m_to == m_from
+                   ? e1_detail::cos_sq(dl > 0 ? l_from : l_to, mu_from)
+                   : 0.0;
+    }
+    const int dmu = mu_to - mu_from;
+    if (dmu != 1 && dmu != -1) {
+        return 0.0;
+    }
+    const double phi = e1_detail::phi_xy_sq(axis, m_to, m_from);
+    if (phi == 0.0) {
+        return 0.0;
+    }
+    // Theta element between (la, mua) and (lb, mua + 1), la = lower-mu side.
+    const int la = dmu > 0 ? l_from : l_to;
+    const int lb = dmu > 0 ? l_to : l_from;
+    const int mua = dmu > 0 ? mu_from : mu_to;
+    const double theta = lb == la + 1 ? e1_detail::sin_up_sq(la, mua)
+                                      : e1_detail::sin_down_sq(la, mua);
+    return theta * phi;
+}
+
+// Sum over the three polarizations: what Einstein A needs per channel.
+constexpr double tesseral_e1_sq(int l_to, int m_to, int l_from,
+                                int m_from) noexcept {
+    return tesseral_e1_axis_sq(0, l_to, m_to, l_from, m_from) +
+           tesseral_e1_axis_sq(1, l_to, m_to, l_from, m_from) +
+           tesseral_e1_axis_sq(2, l_to, m_to, l_from, m_from);
+}
+
+// Compile-time physics anchors: every 2p -> 1s orientation carries exactly
+// 1/3, and the tesseral m' == -m channel is a hard zero.
+static_assert(tesseral_e1_axis_sq(2, 0, 0, 1, 0) == 1.0 / 3.0);
+static_assert(tesseral_e1_axis_sq(0, 0, 0, 1, 1) == 1.0 / 3.0);
+static_assert(tesseral_e1_axis_sq(1, 0, 0, 1, -1) == 1.0 / 3.0);
+static_assert(tesseral_e1_sq(1, 1, 2, -1) == 0.0);
+
 }  // namespace ses
