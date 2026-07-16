@@ -1631,6 +1631,88 @@ bool check_engine_relax(ses_vk::DeviceContext& ctx) {
     return pass;
 }
 
+// The post-collapse flush sequence the director hook uses: collapse
+// (synthesize_into_psi of a sampled radial eigenstate) -> fixed ITP burst
+// (transient tables, 6 steps at the production dtau 0.05) -> table release ->
+// async real-time resume. Exercises the transient-table descriptor re-point
+// interleaved with synthesis and step_async against the CPU double doing the
+// identical sequence (tests/eigenstate_flush_test.cpp pins the physics; this
+// pins the GPU path).
+bool check_engine_collapse_flush(ses_vk::DeviceContext& ctx) {
+    const ses::Grid1D axis{-4.0, 4.0, 8};
+    const ses::Grid3D g{axis, axis, axis};
+    const std::vector<double> v =
+        ses::regularized_coulomb_potential(g, 1.0, ses::Vec3d{});
+    const double dt = 0.02;
+    const double dtau = 0.05;
+    const ses::SplitOperator3D cpu_prop{g, v, dt};
+    const ses::ImaginaryTimePropagator3D cpu_relaxer{g, v, dtau};
+    ses::Field3D seed = ses::gaussian_wavepacket(
+        g, ses::Vec3d{}, ses::Vec3d{1.5, 1.5, 1.5}, ses::Vec3d{});
+
+    ses_vk::Engine engine;
+    if (!engine.initialize(ctx, g, engine_blobs_8(), v, dt, seed.data())) {
+        std::printf("collapse flush (raw Vulkan): engine init FAIL\n");
+        return false;
+    }
+    if (!engine.write_psi_to_volume()) {  // ping-pong volumes for the resume
+        std::printf("collapse flush (raw Vulkan): volume FAIL\n");
+        return false;
+    }
+
+    // Collapse target: the sampled 2s (cusp-heavy AND excited -- the hook's
+    // worst case). Bare -1/r radial solve, the app's exact construction.
+    const ses::RadialGrid rg{8.0, 1599};
+    std::vector<double> vr(static_cast<std::size_t>(rg.n));
+    for (int i = 0; i < rg.n; ++i) {
+        vr[static_cast<std::size_t>(i)] = -1.0 / rg.r(i);
+    }
+    const ses::RadialState st =
+        ses::radial_eigenstate(rg, ses::radial_hamiltonian(rg, vr, 0), 1);
+
+    if (!engine.synthesize_into_psi(st.u, 0, 0, rg.h(), rg.rmax, rg.n)) {
+        std::printf("collapse flush (raw Vulkan): synthesize FAIL\n");
+        return false;
+    }
+    if (!engine.set_relax_tables(cpu_relaxer.half_potential_weight(),
+                                 cpu_relaxer.kinetic_weight(), dtau,
+                                 g.cell_volume())) {
+        std::printf("collapse flush (raw Vulkan): set_relax_tables FAIL\n");
+        return false;
+    }
+    engine.relax_step(6);
+    engine.release_relax_tables();
+    engine.step_async(3, false, true);
+    engine.wait_async();
+    std::vector<float> gpu_out;
+    if (!engine.readback(gpu_out)) {
+        std::printf("collapse flush (raw Vulkan): readback FAIL\n");
+        return false;
+    }
+
+    ses::Field3D cpu = ses::synthesize_orbital(g, rg, st.u, 0, 0);
+    cpu_relaxer.relax(cpu, 6);
+    cpu_prop.step(cpu, 3);
+
+    double max_err = 0.0;
+    double max_mag = 0.0;
+    for (std::size_t i = 0; i < cpu.data().size(); ++i) {
+        max_err =
+            std::max(max_err, std::abs(gpu_out[2 * i] - cpu.data()[i].real()));
+        max_err = std::max(max_err,
+                           std::abs(gpu_out[2 * i + 1] - cpu.data()[i].imag()));
+        max_mag = std::max(max_mag, std::abs(cpu.data()[i].real()));
+        max_mag = std::max(max_mag, std::abs(cpu.data()[i].imag()));
+    }
+    const double tol = 1e-4 + 1e-5 * max_mag;
+    const bool pass = max_err < tol;
+    std::printf(
+        "collapse flush 2s + 6 ITP + 3 async steps (raw Vulkan): max "
+        "|gpu - cpu| = %.3e (tol %.3e)  [%s]\n",
+        max_err, tol, pass ? "PASS" : "FAIL");
+    return pass;
+}
+
 // Deflated imaginary-time relax vs ImaginaryTimePropagator3D::relax_deflated
 // -- Gram-Schmidt projecting the ground state out each step so the flow
 // climbs to the first excited level. Exercises create_state_buffer, the
@@ -2662,6 +2744,7 @@ int main() {
     failures += check_engine_marching_cubes(ctx) ? 0 : 1;
     failures += check_engine_bridge(ctx) ? 0 : 1;
     failures += check_engine_step_async(ctx) ? 0 : 1;
+    failures += check_engine_collapse_flush(ctx) ? 0 : 1;
 #ifdef SES_HAVE_VKFFT
     failures += check_native_vkfft_perf(ctx) ? 0 : 1;
     failures += check_timestamp_profile(ctx) ? 0 : 1;
