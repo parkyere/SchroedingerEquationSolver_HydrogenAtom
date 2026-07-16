@@ -1,4 +1,4 @@
-// RED: the MCWF NO-JUMP evolution -- the piece decay.hpp deliberately left to
+// RED: the MCWF NO-JUMP evolution -- the piece ses.decay deliberately left to
 // the caller (quantum_jump only handles the jump; on survival psi was
 // untouched). The app drains excited amplitudes by exp(-gamma_n dt/2) then
 // renormalizes between jumps (the visible "breathe-out"). That amplitude
@@ -7,12 +7,12 @@
 // apply_mcwf_damping mirrors it.
 
 #include <complex>
-#include <core/decay.hpp>
 
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <vector>
+import ses.decay;
 
 namespace {
 

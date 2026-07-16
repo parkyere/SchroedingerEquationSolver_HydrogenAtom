@@ -19,15 +19,15 @@
 //    probability is weighted by the ACTUAL excited population.
 
 #include <complex>
-#include <core/decay.hpp>
-#include <core/field.hpp>
-import ses.grid;
-import ses.vec;
 
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <vector>
+import ses.grid;
+import ses.vec;
+import ses.decay;
+import ses.field;
 
 namespace {
 

@@ -46,7 +46,7 @@
         {
             "name": "linux-release",
             "displayName": "Linux Release (static)",
-            "description": "Linux Release build. Deps static via vcpkg x64-linux (static libraries; glibc stays dynamic, as is standard on Linux). Portable AVX2 (bitwise-reproducible oracles). SDL3 needs the system X11/Wayland dev headers. Bootstrap external/vcpkg/bootstrap-vcpkg.sh first.",
+            "description": "Linux Release build. Deps static via vcpkg x64-linux (static libraries; glibc stays dynamic, as is standard on Linux). Portable AVX2 (bitwise-reproducible oracles). C++20 named modules: needs clang >= 16 or gcc >= 14 (use linux-clang22 where the default compiler is older). SDL3 needs the system X11/Wayland dev headers. Bootstrap external/vcpkg/bootstrap-vcpkg.sh first.",
             "inherits": "linux-base",
             "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
         },

@@ -1,23 +1,26 @@
-#pragma once
+module;
+#include <optional>
+#include <utility>
+#include <vector>
+#include <cstdint>
+#include <cassert>
+export module ses.simulation;
+export import ses.grid;
+export import ses.vec;
+export import ses.imaginary_time;
+export import ses.propagator;
+export import ses.measurement;
+export import ses.field;
+export import ses.wavepacket;
+
 
 // WavepacketSimulation: the tested orchestration layer the app shell drives.
 // Owns grid + potential + propagator + psi; advance() steps real time.
 // Exactly equivalent to gaussian_wavepacket followed by SplitOperator3D
 // steps (pinned by tests) -- no hidden physics lives here.
 
-#include <core/field.hpp>
-import ses.grid;
-#include <core/imaginary_time.hpp>
-#include <core/measurement.hpp>
-#include <core/propagator.hpp>
-import ses.vec;
 
-#include <optional>
-#include <utility>
-#include <vector>
-import ses.wavepacket;
-
-namespace ses {
+export namespace ses {
 
 class WavepacketSimulation {
 public:

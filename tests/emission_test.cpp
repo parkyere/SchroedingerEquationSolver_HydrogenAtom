@@ -15,19 +15,19 @@
 //  - <grad V> = 0 for a free particle and for a symmetric cloud in a central V;
 //  - Larmor power: exact (2/3) alpha^3 factor and quadratic scaling.
 
-#include <core/decay.hpp>
-#include <core/field.hpp>
-import ses.grid;
-#include <core/observables.hpp>
-import ses.vec;
 
 #include <gtest/gtest.h>
 
 #include <cmath>
+import ses.observables;
+import ses.grid;
+import ses.vec;
+import ses.decay;
+import ses.field;
 import ses.wavepacket;
 import ses.potential;
-
 import ses.emission;
+
 
 namespace {
 

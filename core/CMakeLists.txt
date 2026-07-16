@@ -2,17 +2,14 @@
 # HARD RULE: this target must NEVER depend on Qt, OpenGL/Vulkan, or any
 # windowing / rendering library. Everything here is reachable by unit tests
 # with analytic oracles (TDD loop: docs/TDD_RULES.md).
-# placeholder.cpp exists only so the header-only static library links.
-add_library(sesolver_core STATIC
-    src/placeholder.cpp
-)
+# Sources are the CXX_MODULES file set below -- each module interface unit
+# compiles to a real object, so the archive needs no placeholder TU.
+add_library(sesolver_core STATIC)
 
-target_include_directories(sesolver_core PUBLIC include)
-
-# C++20 modules the core provides (consumers `import` these). Incremental
-# migration off the header web: a leaf becomes a named module, and a consuming
-# header may `import` it while still being #included elsewhere. PUBLIC so the
-# app/test targets that link the core can import across the target boundary.
+# C++20 modules the core provides (consumers `import` these) -- the whole
+# core is modules now; the old core/include header tree is gone. PUBLIC so
+# the app/test targets that link the core can import across the target
+# boundary.
 target_sources(sesolver_core
     PUBLIC FILE_SET CXX_MODULES FILES
         src/marching_cubes_tables.ixx
@@ -29,24 +26,36 @@ target_sources(sesolver_core
         src/potential.ixx
         src/wavepacket.ixx
         src/sphere.ixx
-        src/harmonics.ixx)
+        src/harmonics.ixx
+        src/parallel.ixx
+        src/field.ixx
+        src/marching_cubes.ixx
+        src/fft.ixx
+        src/decay.ixx
+        src/measurement.ixx
+        src/radial.ixx
+        src/observables.ixx
+        src/rotation.ixx
+        src/propagator.ixx
+        src/imaginary_time.ixx
+        src/sampling.ixx
+        src/projection.ixx
+        src/drive.ixx
+        src/magnetic.ixx
+        src/simulation.ixx)
 target_compile_features(sesolver_core PUBLIC cxx_std_20)
 target_link_libraries(sesolver_core PRIVATE ses_warnings)
 target_link_libraries(sesolver_core PUBLIC ses_arch)
 
-# OpenMP hot loops; pragmas are #ifdef-guarded so a non-OpenMP compiler still
-# builds a correct serial core. PUBLIC: header-only code, consumers need the flag.
+# CPU hot loops thread through ses.parallel (core/src/parallel.ixx), the
+# project's own std::jthread pool: OpenMP is gone because MSVC miscompiles
+# omp pragmas inside C++20 module interfaces (silent zero-output) and the
+# pool's fixed-chunk reductions are bitwise-reproducible across machines.
+find_package(Threads REQUIRED)
+target_link_libraries(sesolver_core PUBLIC Threads::Threads)
+
+# _CRT_SECURE_NO_WARNINGS keeps MSVC quiet about std::getenv (the
+# SES_PARALLEL_WORKERS debug override in parallel.ixx); same idiom as the app.
 if(MSVC)
-    # MSVC's default OpenMP 2.0 IGNORES collapse(2) (C4849); the LLVM runtime
-    # implements modern OpenMP and links automatically.
-    target_compile_options(sesolver_core PUBLIC /openmp:llvm)
-    message(STATUS "OpenMP (MSVC LLVM runtime) - parallel core hot loops enabled.")
-else()
-    find_package(OpenMP QUIET)
-    if(OpenMP_CXX_FOUND)
-        target_link_libraries(sesolver_core PUBLIC OpenMP::OpenMP_CXX)
-        message(STATUS "OpenMP found - parallel core hot loops enabled.")
-    else()
-        message(STATUS "OpenMP not found - core runs serial.")
-    endif()
+    target_compile_definitions(sesolver_core PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()

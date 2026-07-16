@@ -19,18 +19,18 @@
 //    empty (<1_y|z|0> = 0 by symmetry) -- exact regardless of the ladder.
 
 #include <complex>
-#include <core/drive.hpp>
-#include <core/field.hpp>
-import ses.grid;
-#include <core/observables.hpp>
-#include <core/propagator.hpp>
-import ses.vec;
 
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <numbers>
 #include <vector>
+import ses.drive;
+import ses.propagator;
+import ses.observables;
+import ses.grid;
+import ses.vec;
+import ses.field;
 import ses.wavepacket;
 import ses.potential;
 

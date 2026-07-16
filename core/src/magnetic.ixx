@@ -1,4 +1,13 @@
-#pragma once
+module;
+#include <cmath>
+#include <cstddef>
+#include <vector>
+export module ses.magnetic;
+export import ses.grid;
+export import ses.propagator;
+export import ses.rotation;
+export import ses.field;
+
 
 // Magnetic split-operator propagator: uniform B along a coordinate axis
 // (symmetric gauge, atomic units, minimal coupling),
@@ -7,16 +16,8 @@
 // paramagnetic exp(-i (B/2) L_axis tau) is the exact three-shear rotate_axis,
 // Strang-split: R(a) . [halfV.kin.halfV] . R(a), a = (B/2)(dt/2). Unitary.
 
-#include <core/field.hpp>
-import ses.grid;
-#include <core/propagator.hpp>
-#include <core/rotation.hpp>
 
-#include <cmath>
-#include <cstddef>
-#include <vector>
-
-namespace ses {
+export namespace ses {
 
 class MagneticPropagator3D {
 public:

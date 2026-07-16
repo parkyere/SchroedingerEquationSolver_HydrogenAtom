@@ -1,7 +1,7 @@
 // Cross-section quad: a plane through the nucleus, normal along slice.y
 // (0/1/2), at offset slice.z, spanning the box in the other two axes. Two
 // triangles from SV_VertexID -- no vertex buffer. Shares the volume UBO.
-// Mirrors ses::slice_quad_corner (core/cross_section.hpp). gl_VertexIndex
+// Mirrors ses::slice_quad_corner (ses.cross_section). gl_VertexIndex
 // (glsl module) maps to the raw SPIR-V VertexIndex builtin -- unlike
 // SV_VertexID it needs no shaderDrawParameters capability.
 import glsl;

@@ -3,10 +3,11 @@ module;
 #include <cmath>
 #include <cstddef>
 #include <vector>
-#include <core/field.hpp>
-#include <core/radial.hpp>
 export module ses.harmonics;
+export import ses.radial;
+export import ses.field;
 export import ses.grid;
+import ses.parallel;
 
 
 // Real spherical harmonics (l <= 5) and 3D orbital synthesis:
@@ -154,16 +155,15 @@ inline double real_spherical_harmonic(int l, int m, double x, double y, double z
 
 // psi = (u(r)/r) Y_lm with u linearly interpolated (u/r -> u[0]/h as r -> 0).
 // fill_orbital writes the UN-normalized field; synthesize_orbital normalizes.
-// CONTRACT: core/projection.hpp's deposit shape mirrors this interpolation.
+// CONTRACT: ses.projection's deposit shape (core/src/projection.ixx) mirrors this interpolation.
 inline void fill_orbital(Field3D& psi, const Grid3D& g, const RadialGrid& rg,
                          const std::vector<double>& u, int l, int m) noexcept {
     const double h = rg.h();
-    // Serial by necessity: MSVC (18 / 14.51) SILENTLY miscompiles an
-    // `#pragma omp parallel for` inside an EXPORTED module function -- the
-    // parallel region writes nothing, yielding a zero field. This runs only on
-    // the oracle-only CPU path (state prep / vkcheck), so no speed is lost that
-    // matters; z-slabs stay disjoint, so the result is bitwise the old one.
-    for (int k = 0; k < g.z.n; ++k) {
+    // Disjoint z-slabs via ses.parallel: bitwise-deterministic parallelism
+    // (project rule). NOT OpenMP: MSVC silently miscompiles `#pragma omp`
+    // inside an exported module function (zero field) -- ses.parallel exists
+    // to replace it.
+    parallel_for(g.z.n, [&](int k) {
         for (int j = 0; j < g.y.n; ++j) {
             for (int i = 0; i < g.x.n; ++i) {
                 const double x = g.x.coord(i);
@@ -188,7 +188,7 @@ inline void fill_orbital(Field3D& psi, const Grid3D& g, const RadialGrid& rg,
                 psi(i, j, k) = std::complex<double>{value, 0.0};
             }
         }
-    }
+    });
 }
 
 inline Field3D synthesize_orbital(const Grid3D& g, const RadialGrid& rg,

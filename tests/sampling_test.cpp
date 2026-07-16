@@ -12,19 +12,18 @@
 //    k*x to O((kh)^2) between grid points (tolerance-checked).
 
 #include <complex>
-#include <core/field.hpp>
-import ses.grid;
-#include <core/marching_cubes.hpp>
-#include <core/observables.hpp>
-#include <core/sampling.hpp>
-import ses.vec;
 
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <vector>
-
+import ses.sampling;
+import ses.grid;
+import ses.vec;
+import ses.marching_cubes;
+import ses.field;
 import ses.colormap;
+
 
 namespace {
 

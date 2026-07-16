@@ -11,17 +11,7 @@
 #include "scenario.hpp"
 #include "vk_engine.hpp"
 
-#include <core/decay.hpp>
-#include <core/field.hpp>
 import ses.grid;
-#include <core/imaginary_time.hpp>
-#include <core/magnetic.hpp>
-#include <core/marching_cubes.hpp>
-#include <core/measurement.hpp>
-#include <core/observables.hpp>
-#include <core/projection.hpp>
-#include <core/sampling.hpp>
-#include <core/simulation.hpp>
 import ses.vec;
 
 #include <algorithm>
@@ -33,11 +23,19 @@ import ses.vec;
 #include <random>
 #include <string>
 #include <vector>
+import ses.simulation;
+import ses.magnetic;
+import ses.projection;
+import ses.imaginary_time;
+import ses.observables;
+import ses.measurement;
+import ses.decay;
+import ses.marching_cubes;
+import ses.field;
 import ses.potential;
 
 import ses.vram_budget;
 
-import ses.colormap;
 
 import ses.emission;
 
@@ -994,7 +992,7 @@ private:
     // MCWF no-jump damping: psi += (e^{-gamma_n dt/2} - 1) c_n |n> for each
     // occupied excited state, then renormalize -- the non-Hermitian H_eff
     // conditioned on "no photon detected". This realizes ses::
-    // nojump_damped_amplitudes (core/decay.hpp, unit-tested) in the {|n>}
+    // nojump_damped_amplitudes (ses.decay, unit-tested) in the {|n>}
     // basis on the grid state (the renorm here spans the full field, not just
     // the tracked amplitudes). A pure eigenstate is unchanged (the renorm
     // cancels its damping); a superposition visibly breathes its excited

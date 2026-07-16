@@ -3,8 +3,8 @@ module;
 #include <cstddef>
 #include <numbers>
 #include <vector>
-#include <core/marching_cubes.hpp>
 export module ses.sphere;
+export import ses.marching_cubes;
 export import ses.vec;
 
 

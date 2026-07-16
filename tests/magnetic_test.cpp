@@ -17,16 +17,17 @@
 //    rotation by omega_L * t, omega_L = B/2 -- an exact identity;
 //  - norm is conserved.
 
-#include <core/field.hpp>
-import ses.grid;
-#include <core/magnetic.hpp>
-#include <core/propagator.hpp>
-#include <core/rotation.hpp>
-import ses.vec;
 
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <complex>
+import ses.magnetic;
+import ses.propagator;
+import ses.rotation;
+import ses.grid;
+import ses.vec;
+import ses.field;
 import ses.wavepacket;
 import ses.potential;
 

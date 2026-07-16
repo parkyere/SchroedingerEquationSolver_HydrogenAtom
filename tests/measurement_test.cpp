@@ -18,18 +18,19 @@
 //  - the uncertainty principle on screen: a SHARPER measurement re-spreads
 //    FASTER under subsequent free evolution.
 
-#include <core/field.hpp>
-import ses.grid;
-#include <core/measurement.hpp>
-#include <core/observables.hpp>
-#include <core/propagator.hpp>
-#include <core/simulation.hpp>
-import ses.vec;
 
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <complex>
 #include <vector>
+import ses.simulation;
+import ses.propagator;
+import ses.observables;
+import ses.grid;
+import ses.vec;
+import ses.measurement;
+import ses.field;
 import ses.wavepacket;
 import ses.potential;
 

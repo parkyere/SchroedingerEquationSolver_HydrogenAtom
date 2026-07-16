@@ -15,16 +15,16 @@
 //    without deflation falls back to the ground state (the control).
 
 #include <complex>
-#include <core/field.hpp>
-import ses.grid;
-#include <core/imaginary_time.hpp>
-#include <core/observables.hpp>
-import ses.vec;
 
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <vector>
+import ses.imaginary_time;
+import ses.observables;
+import ses.grid;
+import ses.vec;
+import ses.field;
 import ses.wavepacket;
 import ses.potential;
 

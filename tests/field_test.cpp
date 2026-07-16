@@ -12,13 +12,13 @@
 //  - normalize() must produce unit norm for an arbitrary field.
 
 #include <complex>
-#include <core/field.hpp>
-import ses.grid;
 
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <numbers>
+import ses.grid;
+import ses.field;
 
 namespace {
 

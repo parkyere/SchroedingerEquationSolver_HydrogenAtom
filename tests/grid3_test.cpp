@@ -5,9 +5,9 @@
 //     flat(i, j, k) = i + nx * (j + ny * k)
 // so x-lines are contiguous, y-stride is nx, z-stride is nx*ny.
 
-import ses.grid;
 
 #include <gtest/gtest.h>
+import ses.grid;
 
 namespace {
 

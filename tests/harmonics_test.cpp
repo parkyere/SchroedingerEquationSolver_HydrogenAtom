@@ -13,17 +13,18 @@
 //    survives interpolation; angular orthogonality by symmetry);
 //  - parity: p_x flips sign under x -> -x, d_xy is even under (x,y) -> -.
 
-#include <core/field.hpp>
-import ses.grid;
-#include <core/observables.hpp>
-#include <core/radial.hpp>
-import ses.vec;
 
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <complex>
 #include <cstddef>
 #include <vector>
+import ses.observables;
+import ses.radial;
+import ses.grid;
+import ses.vec;
+import ses.field;
 import ses.harmonics;
 import ses.potential;
 

@@ -7,15 +7,15 @@
 // composite, NOT by a per-fragment GPU oracle (there is none).
 
 #include <complex>
-import ses.grid;
-import ses.vec;
 
 #include <gtest/gtest.h>
 
 #include <cmath>
-
+import ses.grid;
+import ses.vec;
 import ses.colormap;
 import ses.cross_section;
+
 
 namespace {
 

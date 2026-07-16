@@ -12,15 +12,16 @@
 //  - a z-symmetric field is invariant;
 //  - composition R(a) . R(b) == R(a+b).
 
-#include <core/field.hpp>
-import ses.grid;
-#include <core/observables.hpp>
-#include <core/rotation.hpp>
-import ses.vec;
 
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <complex>
+import ses.rotation;
+import ses.observables;
+import ses.grid;
+import ses.vec;
+import ses.field;
 
 namespace {
 

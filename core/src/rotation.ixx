@@ -1,4 +1,15 @@
-#pragma once
+module;
+#include <complex>
+#include <cmath>
+#include <cstddef>
+#include <vector>
+#include <cstdint>
+export module ses.rotation;
+export import ses.grid;
+export import ses.spectral;
+export import ses.fft;
+export import ses.field;
+
 
 // Exact, unitary rotation of a 3D field about a coordinate axis via the
 // three-shear (Paeth) decomposition in the perpendicular plane,
@@ -7,17 +18,8 @@
 // (X(k) *= e^{-i k d}). Norm-conserving, no interpolation blur; |theta| < pi.
 // Used for the paramagnetic (B/2) L_axis factor of the magnetic propagator.
 
-#include <complex>
-#include <core/fft.hpp>
-#include <core/field.hpp>
-import ses.grid;
-import ses.spectral;
 
-#include <cmath>
-#include <cstddef>
-#include <vector>
-
-namespace ses {
+export namespace ses {
 
 namespace rotation_detail {
 

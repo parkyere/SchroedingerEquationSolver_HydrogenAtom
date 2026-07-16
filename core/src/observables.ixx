@@ -1,21 +1,23 @@
-#pragma once
+module;
+#include <complex>
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <vector>
+#include <cstdint>
+export module ses.observables;
+export import ses.spectral;
+export import ses.vec;
+export import ses.fft;
+export import ses.field;
+
 
 // Expectation values over a Field1D. All observables are scale-invariant
 // (they divide by the discrete norm), so they are valid on unnormalized
 // fields as well.
 
-#include <complex>
-#include <core/fft.hpp>
-#include <core/field.hpp>
-import ses.spectral;
-import ses.vec;
 
-#include <algorithm>
-#include <cmath>
-#include <cstddef>
-#include <vector>
-
-namespace ses {
+export namespace ses {
 
 // Degenerate-input guards. An empty or fully-absorbed field has zero total
 // weight, so num/den is 0/0 -> NaN, which would poison the title readout and

@@ -3,17 +3,17 @@
 // set_psi() lets the shell hand a GPU-evolved state back to the CPU session,
 // and propagator() exposes the tested phase tables without rebuilding them.
 
-#include <core/field.hpp>
-import ses.grid;
-#include <core/observables.hpp>
-#include <core/propagator.hpp>
-#include <core/simulation.hpp>
-import ses.vec;
 
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <vector>
+import ses.simulation;
+import ses.propagator;
+import ses.observables;
+import ses.grid;
+import ses.vec;
+import ses.field;
 import ses.wavepacket;
 import ses.potential;
 

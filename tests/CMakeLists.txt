@@ -47,6 +47,7 @@ add_executable(sesolver_tests
     mcwf_test.cpp
     measurement_test.cpp
     multichannel_decay_test.cpp
+    parallel_test.cpp
     potential_test.cpp
     projection_test.cpp
     propagator_tables_test.cpp

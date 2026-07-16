@@ -5,8 +5,6 @@
 // outward radial, and the triangle soup is watertight (the same topological
 // check that pinned marching cubes).
 
-#include <core/marching_cubes.hpp>
-import ses.vec;
 
 #include <gtest/gtest.h>
 
@@ -16,6 +14,8 @@ import ses.vec;
 #include <map>
 #include <tuple>
 #include <utility>
+import ses.vec;
+import ses.marching_cubes;
 import ses.sphere;
 
 namespace {

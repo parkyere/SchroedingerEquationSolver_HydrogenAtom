@@ -21,15 +21,15 @@
 //  - all-forbidden channel lists never jump, even with u1 = 0.
 
 #include <complex>
-#include <core/decay.hpp>
-#include <core/field.hpp>
-import ses.grid;
 
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <cstddef>
 #include <vector>
+import ses.grid;
+import ses.decay;
+import ses.field;
 
 namespace {
 

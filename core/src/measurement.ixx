@@ -1,4 +1,15 @@
-#pragma once
+module;
+#include <complex>
+#include <cmath>
+#include <cstddef>
+#include <vector>
+#include <cstdint>
+export module ses.measurement;
+export import ses.grid;
+export import ses.vec;
+export import ses.field;
+import ses.parallel;
+
 
 // Soft position measurement (Gaussian POVM): collapse to a Gaussian packet,
 // not a delta. Randomness stays OUT of core: callers supply u in [0,1) and
@@ -7,16 +18,8 @@
 // Kraus mask e^{-(r-c)^2/(4 s^2)} is |psi|^2 BLURRED by a Gaussian of std
 // sigma_m (E_c = M_c^dag M_c), not raw |psi|^2 -- see sample_povm_index.
 
-#include <complex>
-#include <core/field.hpp>
-import ses.grid;
-import ses.vec;
 
-#include <cmath>
-#include <cstddef>
-#include <vector>
-
-namespace ses {
+export namespace ses {
 
 // Projective energy measurement over populations P_n = |<phi_n|psi>|^2.
 // The tracked manifold is incomplete, so sum(P) <= 1: returns the collapsed
@@ -83,8 +86,7 @@ inline std::vector<double> povm_outcome_density(const Field3D& psi,
         }
         const int stride = strides[a];
         const int lines = nx * ny * nz / n;
-#pragma omp parallel for schedule(static)
-        for (int line = 0; line < lines; ++line) {
+        parallel_for(lines, [&](int line) {
             // Base index of this axis-a line: reinsert the axis dimension
             // into the flattened remaining-dims counter.
             const int base = line % stride + (line / stride) * stride * n;
@@ -97,13 +99,13 @@ inline std::vector<double> povm_outcome_density(const Field3D& psi,
                 }
                 tmp[static_cast<std::size_t>(base + p * stride)] = acc;
             }
-        }
+        });
         d.swap(tmp);
     }
     return d;
 }
 
-// L_z bookkeeping for one real-harmonic pair. Convention (harmonics.hpp,
+// L_z bookkeeping for one real-harmonic pair. Convention (ses.harmonics,
 // pinned by tests): Y_{l,+|m|} ~ cos(m phi), Y_{l,-|m|} ~ sin(m phi), so
 // |l, +-m> = (|cos> +- i |sin>)/sqrt(2) and the signed-m amplitudes of
 // psi = c_cos|cos> + c_sin|sin> are a_+- = (c_cos -+ i c_sin)/sqrt(2).

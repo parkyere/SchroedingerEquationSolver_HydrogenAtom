@@ -1,22 +1,24 @@
-#pragma once
+module;
+#include <complex>
+#include <cmath>
+#include <cstddef>
+#include <vector>
+#include <cstdint>
+export module ses.drive;
+export import ses.grid;
+export import ses.vec;
+export import ses.propagator;
+export import ses.fft;
+export import ses.field;
+
 
 // Time-dependent dipole drive: V_drive = amplitude * (axis . r) * cos(omega t).
 // Enters the Strang step as half-kicks AROUND the untouched static tables,
 //     psi <- kick(t0+dt) . halfV . IFFT . kinetic . FFT . halfV . kick(t0),
 // which keeps global O(dt^2) accuracy.
 
-#include <complex>
-#include <core/fft.hpp>
-#include <core/field.hpp>
-import ses.grid;
-#include <core/propagator.hpp>
-import ses.vec;
 
-#include <cmath>
-#include <cstddef>
-#include <vector>
-
-namespace ses {
+export namespace ses {
 
 struct DipoleDrive {
     Vec3d axis;          // polarization direction (need not be unit; scales E0)

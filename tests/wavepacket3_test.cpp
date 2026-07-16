@@ -5,15 +5,15 @@
 // momentum (anisotropic on purpose: any axis mix-up in the factory, the
 // observables, or the k-mapping shows up as a wrong per-axis number).
 
-#include <core/field.hpp>
-import ses.grid;
-#include <core/observables.hpp>
-import ses.vec;
 
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <vector>
+import ses.observables;
+import ses.grid;
+import ses.vec;
+import ses.field;
 import ses.wavepacket;
 import ses.potential;
 

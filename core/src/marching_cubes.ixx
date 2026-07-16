@@ -1,4 +1,13 @@
-#pragma once
+module;
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <vector>
+export module ses.marching_cubes;
+import ses.mc.tables;
+export import ses.grid;
+export import ses.vec;
+
 
 // Marching cubes: extract the isosurface of a real scalar field sampled on a
 // Grid3D. The surface encloses the region where field > isovalue (the inside
@@ -6,17 +15,8 @@
 // the gradient. Output is an unindexed triangle soup (3 vertices + 3 normals
 // per triangle).
 
-import ses.mc.tables;
 
-import ses.grid;
-import ses.vec;
-
-#include <algorithm>
-#include <cmath>
-#include <cstddef>
-#include <vector>
-
-namespace ses {
+export namespace ses {
 
 struct Mesh {
     std::vector<Vec3d> vertices;

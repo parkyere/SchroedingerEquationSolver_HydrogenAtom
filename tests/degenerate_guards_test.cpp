@@ -2,18 +2,18 @@
 // These regimes the app does not currently produce, but the helpers must not
 // emit NaN / deref past-the-end / spin when handed them.
 
-#include <core/field.hpp>
-#include <core/fft.hpp>
-import ses.grid;
-#include <core/marching_cubes.hpp>
-#include <core/observables.hpp>
-import ses.vec;
 
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <stdexcept>
 #include <vector>
+import ses.observables;
+import ses.grid;
+import ses.vec;
+import ses.fft;
+import ses.marching_cubes;
+import ses.field;
 
 namespace {
 

@@ -6,18 +6,17 @@
 // Also: marching_cubes_at_fraction -- isovalue as a fraction of the current
 // density peak, so an animated (dispersing) cloud keeps a visible surface.
 
-#include <core/field.hpp>
-import ses.grid;
-#include <core/marching_cubes.hpp>
-#include <core/observables.hpp>
-#include <core/propagator.hpp>
-#include <core/simulation.hpp>
-import ses.vec;
 
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <vector>
+import ses.simulation;
+import ses.propagator;
+import ses.grid;
+import ses.vec;
+import ses.marching_cubes;
+import ses.field;
 import ses.wavepacket;
 import ses.potential;
 

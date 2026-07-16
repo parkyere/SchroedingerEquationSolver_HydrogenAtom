@@ -5,16 +5,16 @@
 // Oracles: entries equal the defining formulas evaluated through the same
 // public building blocks (wavenumbers, potential), bitwise.
 
-import ses.grid;
-#include <core/imaginary_time.hpp>
-import ses.spectral;
-import ses.vec;
 
 #include <gtest/gtest.h>
 
 #include <array>
 #include <cmath>
 #include <vector>
+import ses.imaginary_time;
+import ses.grid;
+import ses.spectral;
+import ses.vec;
 import ses.potential;
 
 namespace {

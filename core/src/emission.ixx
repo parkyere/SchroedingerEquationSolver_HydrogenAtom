@@ -1,9 +1,11 @@
 module;
-#include <core/decay.hpp>  // kFineStructureConstant
-#include <core/field.hpp>
+#include <cmath>
+#include <complex>
 #include <cstddef>
 #include <vector>
 export module ses.emission;
+export import ses.decay;
+export import ses.field;
 import ses.vec;
 import ses.grid;
 
@@ -11,7 +13,7 @@ import ses.grid;
 // Semiclassical (Larmor) emission from the oscillating dipole:
 //     P = (2/3) alpha^3 |d_ddot|^2,  d_ddot = <grad V> (Ehrenfest, a.u.).
 // Coherent-superposition emission only: exactly 0 for a pure eigenstate,
-// whose spontaneous decay is the Einstein-A quantum jumps (core/decay.hpp).
+// whose spontaneous decay is the Einstein-A quantum jumps (ses.decay).
 
 
 export namespace ses {
@@ -19,7 +21,7 @@ export namespace ses {
 // <grad V> = integral |psi|^2 grad V dr, grad V by central differences on the
 // periodic grid (exact for a harmonic well's linear force).
 // PRECONDITION: psi is normalized (integral |psi|^2 dr = 1). Unlike the
-// observables.hpp expectations (which divide by the discrete norm and so are
+// ses.observables expectations (which divide by the discrete norm and so are
 // scale-invariant), this returns the raw integral, so an unnormalized psi
 // yields <grad V> scaled by the norm. The live sim always feeds a normalized
 // psi, and the GPU mean_force oracle shares this assumption.

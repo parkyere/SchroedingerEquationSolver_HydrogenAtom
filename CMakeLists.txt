@@ -1,4 +1,6 @@
-cmake_minimum_required(VERSION 3.21)
+# 3.28: first release where FILE_SET CXX_MODULES is stable non-experimental
+# (the whole core ships as C++20 named modules); Ninja >= 1.11 required.
+cmake_minimum_required(VERSION 3.28)
 
 # ---------------------------------------------------------------------------
 # Optional: pick the newest installed clang++ / g++ BEFORE the compiler is
@@ -47,10 +49,10 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# C++20 named modules: scan every C++20 TU for `import` so consumers (which only
-# import, not provide) resolve modules the core provides. Required because a
-# consumed module forces all consuming targets to be scanned, and the project
-# baseline (cmake_minimum_required 3.21) leaves CMP0155 OLD (scan off).
+# C++20 named modules: scan every C++20 TU for `import` so consumers (which
+# only import, not provide) resolve modules the core provides. The 3.28
+# baseline sets CMP0155 NEW (scan on for C++20 targets); keep the explicit ON
+# so kit presets that override policies cannot silently turn it off.
 set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 
 # Single-config generators: default to Debug for the TDD loop.
@@ -91,8 +93,9 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
-# CPU architecture flags (INTERFACE target, linked PUBLIC by the core so every
-# TU that compiles the header-only hot loops gets it).
+# CPU architecture flags (INTERFACE target, linked PUBLIC by the core so the
+# module BMIs and every importing TU compile with identical codegen flags --
+# a BMI/importer flag mismatch is an ODR trap).
 #
 # NOTE -ffp-contract=off: with bare -mavx2 -mfma the compiler may contract
 # a + b*c into fma(b, c, a), changing rounding and breaking the exact-value

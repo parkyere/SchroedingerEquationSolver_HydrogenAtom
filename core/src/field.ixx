@@ -1,4 +1,11 @@
-#pragma once
+module;
+#include <cmath>
+#include <complex>
+#include <cstddef>
+#include <vector>
+export module ses.field;
+export import ses.grid;
+
 
 // Complex scalar field over a Grid1D -- the container for the wavefunction psi.
 //
@@ -6,13 +13,8 @@
 //     ||psi||^2 = sum_i |psi_i|^2 * h
 // so a continuum-normalized function sampled on the grid keeps unit norm.
 
-#include <complex>
-import ses.grid;
 
-#include <cmath>
-#include <vector>
-
-namespace ses {
+export namespace ses {
 
 class Field1D {
 public:

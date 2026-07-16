@@ -2,8 +2,8 @@ module;
 #include <complex>
 #include <cmath>
 #include <numbers>
-#include <core/field.hpp>
 export module ses.wavepacket;
+export import ses.field;
 export import ses.grid;
 export import ses.vec;
 

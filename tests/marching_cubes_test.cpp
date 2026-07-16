@@ -12,10 +12,6 @@
 // Convention: the surface encloses the region where field > isovalue (the
 // "inside" of a density cloud), and normals point OUTWARD (down-gradient).
 
-#include <core/field.hpp>
-import ses.grid;
-#include <core/marching_cubes.hpp>
-import ses.vec;
 
 #include <gtest/gtest.h>
 
@@ -24,6 +20,10 @@ import ses.vec;
 #include <map>
 #include <tuple>
 #include <vector>
+import ses.grid;
+import ses.vec;
+import ses.marching_cubes;
+import ses.field;
 
 namespace {
 

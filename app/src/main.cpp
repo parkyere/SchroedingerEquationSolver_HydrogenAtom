@@ -11,24 +11,41 @@
 // position, E = measure energy, D = decay off/on, L = laser (off -> Z -> X
 // -> off), F = flow particles, [ ] = thinner/denser cloud.
 
-// ses_vk first: volk (inside) defines VK_NO_PROTOTYPES and must own the
-// vulkan.h inclusion before SDL/ImGui pull their own Vulkan declarations.
-// This TU owns the app's single VMA implementation (vkcheck has its own); no
-// other TU may define VMA_IMPLEMENTATION.
+// Std first, in full: the app headers below carry `import ses.*;` whose GMFs
+// reach these std headers -- a later FIRST textual include would C2572, so
+// this TU textually claims the whole set up front (later ones are guard
+// no-ops).
+#include <algorithm>
+#include <atomic>
+#include <cassert>
+#include <cfloat>
+#include <cmath>
+#include <complex>
+#include <condition_variable>
+#include <cstdarg>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
+
+// ses_vk before SDL/ImGui: volk (inside) defines VK_NO_PROTOTYPES and must
+// own the vulkan.h inclusion before SDL/ImGui pull their own Vulkan
+// declarations. This TU owns the app's single VMA implementation (vkcheck
+// has its own); no other TU may define VMA_IMPLEMENTATION.
 #define VMA_IMPLEMENTATION
 #include "vk_blobs.hpp"
 
 #include <blit_frag_spv.h>
 #include <blit_vert_spv.h>
-
-#include "harmonic_director.hpp"
-#include "hydrogen_director.hpp"
-#include "imgui_ui.hpp"
-#include "scheduler.hpp"
-#include "selftest_arcs.hpp"
-#include "tunneling_director.hpp"
-#include "vk_present.hpp"
-#include "vram_probe.hpp"
 
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
@@ -38,14 +55,14 @@
 #include <SDL3/SDL_vulkan.h>
 #include <SDL3/SDL_main.h>
 
-#include <algorithm>
-#include <cmath>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <memory>
-#include <string>
-#include <vector>
+#include "harmonic_director.hpp"
+#include "hydrogen_director.hpp"
+#include "imgui_ui.hpp"
+#include "scheduler.hpp"
+#include "selftest_arcs.hpp"
+#include "tunneling_director.hpp"
+#include "vk_present.hpp"
+#include "vram_probe.hpp"
 
 namespace {
 

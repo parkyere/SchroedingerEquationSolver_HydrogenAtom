@@ -13,15 +13,15 @@
 //  - soft Coulomb (Z=1, a=1): bound (E0 < 0) and E0 ~= -0.6698 (literature
 //    value for V = -1/sqrt(x^2+1)) -- the precursor of the hydrogen 1s cloud.
 
-#include <core/field.hpp>
-import ses.grid;
-#include <core/imaginary_time.hpp>
-#include <core/observables.hpp>
 
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <vector>
+import ses.imaginary_time;
+import ses.observables;
+import ses.grid;
+import ses.field;
 import ses.wavepacket;
 import ses.potential;
 

@@ -3,15 +3,18 @@
 //     sesolver_bench
 // prints per-operation wall times at 32^3 and 64^3.
 
-#include <core/field.hpp>
-import ses.grid;
-#include <core/marching_cubes.hpp>
-#include <core/simulation.hpp>
-import ses.vec;
 
 #include <chrono>
+#include <cmath>
+#include <complex>
 #include <cstdio>
 #include <functional>
+#include <vector>
+import ses.simulation;
+import ses.grid;
+import ses.vec;
+import ses.marching_cubes;
+import ses.field;
 import ses.potential;
 
 namespace {

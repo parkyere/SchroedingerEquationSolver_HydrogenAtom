@@ -12,13 +12,13 @@
 // on unnormalized fields too.
 
 #include <complex>
-#include <core/field.hpp>
-import ses.grid;
-#include <core/observables.hpp>
 
 #include <gtest/gtest.h>
 
 #include <cmath>
+import ses.observables;
+import ses.grid;
+import ses.field;
 import ses.wavepacket;
 
 namespace {

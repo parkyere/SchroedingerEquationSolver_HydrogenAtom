@@ -21,14 +21,14 @@
 //  - the soft-core atom (a = 1): energies must match the 3D solver's ITP
 //    values and the level lifetime tau(2p) must match the 3D GPU pipeline.
 
-#include <core/decay.hpp>
-#include <core/radial.hpp>
 
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <cstddef>
 #include <vector>
+import ses.radial;
+import ses.decay;
 
 namespace {
 

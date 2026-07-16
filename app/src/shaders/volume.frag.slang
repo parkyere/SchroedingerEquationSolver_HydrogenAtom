@@ -65,7 +65,7 @@ float4 main(FSIn input) : SV_Target {
     }
     float t_stop = t.y;
 
-    // Clip plane (mirrors ses::clip_ray_interval, core/cross_section.hpp):
+    // Clip plane (mirrors ses::clip_ray_interval, ses.cross_section):
     // keep only the half-space clip.z*(p[axis]-offset) <= 0 so the cut face
     // reveals the interior. Restrict the ray interval to it.
     if (ubo.clip.x > 0.5) {

@@ -6,14 +6,14 @@
 // wrong bin and fails loudly.
 
 #include <complex>
-#include <core/fft.hpp>
-#include <core/field.hpp>
-import ses.grid;
 
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <numbers>
+import ses.grid;
+import ses.fft;
+import ses.field;
 
 namespace {
 

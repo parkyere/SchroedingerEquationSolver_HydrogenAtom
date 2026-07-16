@@ -12,13 +12,13 @@
 // linearity; Parseval.
 
 #include <complex>
-#include <core/fft.hpp>
 
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <numbers>
 #include <vector>
+import ses.fft;
 
 namespace {
 

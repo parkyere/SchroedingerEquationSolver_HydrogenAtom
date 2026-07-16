@@ -1,22 +1,25 @@
-#pragma once
+module;
+#include <cassert>
+#include <cmath>
+#include <complex>
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+export module ses.imaginary_time;
+export import ses.grid;
+export import ses.spectral;
+export import ses.fft;
+export import ses.field;
+import ses.parallel;
+
 
 // Imaginary-time relaxation to the ground state: e^{-H dtau} decays each
 // eigencomponent as e^{-E_n tau}. Same Strang splitting as the real-time
 // propagator but with REAL decay weights e^{-V dtau/2}, e^{-k^2 dtau/2};
 // the flow is not unitary -- per-step renormalization is mandatory.
 
-#include <core/fft.hpp>
-#include <core/field.hpp>
-import ses.grid;
-import ses.spectral;
 
-#include <cassert>
-#include <cmath>
-#include <cstddef>
-#include <cstdint>
-#include <vector>
-
-namespace ses {
+export namespace ses {
 
 class ImaginaryTimePropagator1D {
 public:
@@ -136,14 +139,10 @@ private:
     // Elementwise (disjoint) scale: threaded result is bitwise identical.
     static void apply_weight(const std::vector<double>& weight,
                              std::vector<std::complex<double>>& a) noexcept {
-        const std::int64_t n = static_cast<std::int64_t>(a.size());
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static)
-#endif
-        for (std::int64_t i = 0; i < n; ++i) {
+        parallel_for(static_cast<int>(a.size()), [&](int i) {
             a[static_cast<std::size_t>(i)] =
                 weight[static_cast<std::size_t>(i)] * a[static_cast<std::size_t>(i)];
-        }
+        });
     }
 
     std::vector<double> half_v_;

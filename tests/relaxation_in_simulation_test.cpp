@@ -10,16 +10,16 @@
 //    subsequent real-time evolution must leave the density where it is
 //    (only the invisible global phase turns).
 
-#include <core/field.hpp>
-import ses.grid;
-#include <core/observables.hpp>
-#include <core/simulation.hpp>
-import ses.vec;
 
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <vector>
+import ses.simulation;
+import ses.observables;
+import ses.grid;
+import ses.vec;
+import ses.field;
 import ses.potential;
 
 namespace {

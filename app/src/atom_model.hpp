@@ -10,14 +10,14 @@
 #include "vk_engine.hpp"
 
 #include <complex>
-#include <core/decay.hpp>
-#include <core/radial.hpp>
 
 #include <array>
 #include <cmath>
 #include <cstdio>
 #include <utility>
 #include <vector>
+import ses.radial;
+import ses.decay;
 
 import ses.vram_budget;
 

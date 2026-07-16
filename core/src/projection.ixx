@@ -1,24 +1,25 @@
-#pragma once
+module;
+#include <complex>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+export module ses.projection;
+export import ses.grid;
+export import ses.radial;
+export import ses.field;
+export import ses.harmonics;  // real_spherical_harmonic
+
 
 // Orbital-free projection: every amplitude <n|psi> over the tracked manifold
 // with no resident 3-D orbital atlas. Central V factorizes |n> = (u_nl/r) Y_lm,
 // so ONE grid pass (independent of the state count) deposits
 // g_lm[c][j] = sum_cells W_j(r) Y_lm(cell) psi(cell) dV, then each amplitude
 // is a 1-D dot sum_j u_nl[j] g_lm[lm][j]. CPU-double oracle for the GPU deposit
-// kernel. CONTRACT: W_j(r) must mirror fill_orbital (core/harmonics.hpp) exactly.
+// kernel. CONTRACT: W_j(r) must mirror fill_orbital (ses.harmonics) exactly.
 
-#include <complex>
-#include <core/field.hpp>
-import ses.grid;
-#include <core/radial.hpp>     // RadialGrid
 
-#include <cmath>
-#include <cstddef>
-#include <cstdint>
-#include <vector>
-import ses.harmonics;  // real_spherical_harmonic
-
-namespace ses {
+export namespace ses {
 
 // A tracked state's generative seed: which radial level (index into the
 // caller's u tables) and its angular quantum numbers. NO 3-D orbital.

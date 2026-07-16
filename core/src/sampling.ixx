@@ -1,23 +1,24 @@
-#pragma once
+module;
+#include <complex>
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <utility>
+#include <vector>
+export module ses.sampling;
+export import ses.grid;
+export import ses.vec;
+export import ses.marching_cubes;
+export import ses.field;
+export import ses.colormap;
+
 
 // Trilinear sampling of the complex field, and per-vertex isosurface phase
 // colors. Interpolating the COMPLEX value and then taking atan2 keeps
 // constant-phase regions exactly constant (amplitude cancels in the ratio).
 
-#include <complex>
-#include <core/field.hpp>
-import ses.grid;
-#include <core/marching_cubes.hpp>
-import ses.vec;
 
-#include <algorithm>
-#include <cmath>
-#include <utility>
-#include <vector>
-
-import ses.colormap;
-
-namespace ses {
+export namespace ses {
 
 namespace sampling_detail {
 

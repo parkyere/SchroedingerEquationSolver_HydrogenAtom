@@ -10,17 +10,17 @@
 //    E0 = 3 omega / 2, per-axis sigma = 1/sqrt(2 omega), from a deliberately
 //    wrong (offset, isotropic-width) initial packet.
 
-#include <core/field.hpp>
-import ses.grid;
-#include <core/imaginary_time.hpp>
-#include <core/observables.hpp>
-#include <core/propagator.hpp>
-import ses.vec;
 
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <vector>
+import ses.imaginary_time;
+import ses.propagator;
+import ses.observables;
+import ses.grid;
+import ses.vec;
+import ses.field;
 import ses.wavepacket;
 import ses.potential;
 

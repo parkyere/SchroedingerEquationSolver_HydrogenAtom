@@ -13,17 +13,18 @@
 //  - the three 2p orbitals are EXACTLY degenerate (cubic-grid symmetry);
 //  - n=1 sits well below n=2; 2s and 2p share the n=2 shell (approx SO(4)).
 
-#include <core/field.hpp>
-import ses.grid;
-#include <core/imaginary_time.hpp>
-#include <core/observables.hpp>
-#include <core/radial.hpp>
-import ses.vec;
 
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <complex>
 #include <vector>
+import ses.imaginary_time;
+import ses.observables;
+import ses.radial;
+import ses.grid;
+import ses.vec;
+import ses.field;
 import ses.harmonics;
 import ses.wavepacket;
 import ses.potential;

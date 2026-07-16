@@ -18,16 +18,16 @@
 // at dt = 2 pi/1000) while sitting far below any real defect (order 1).
 // The last test pins the O(dt^2) convergence claim itself.
 
-#include <core/field.hpp>
-import ses.grid;
-#include <core/observables.hpp>
-#include <core/propagator.hpp>
 
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <numbers>
 #include <vector>
+import ses.propagator;
+import ses.observables;
+import ses.grid;
+import ses.field;
 import ses.wavepacket;
 import ses.potential;
 

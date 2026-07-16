@@ -1,4 +1,14 @@
-#pragma once
+module;
+#include <complex>
+#include <cmath>
+#include <cstddef>
+#include <vector>
+#include <cstdint>
+export module ses.decay;
+export import ses.grid;
+export import ses.field;
+import ses.parallel;
+
 
 // Spontaneous decay via quantum jumps (Monte-Carlo wavefunction).
 // Einstein A = (4/3) alpha^3 omega^3 |<f|r|i>|^2 (atomic units); selection
@@ -6,15 +16,8 @@
 // Jumps are Poisson, weighted by the CURRENT excited population; randomness
 // is injected by the caller.
 
-#include <complex>
-#include <core/field.hpp>
-import ses.grid;
 
-#include <cmath>
-#include <cstddef>
-#include <vector>
-
-namespace ses {
+export namespace ses {
 
 inline constexpr double kFineStructureConstant = 7.2973525693e-3;
 
@@ -26,15 +29,14 @@ struct DipoleMatrixElement {
 
 // <f| r |i> component-wise: sum conj(f) * r * i * dV. Parallelized with
 // per-z-slab partial sums combined in a FIXED order, so the result is
-// deterministic run to run (the project's OpenMP discipline).
+// deterministic run to run (the ses.parallel discipline).
 inline DipoleMatrixElement dipole_matrix_element(const Field3D& f, const Field3D& i) {
     const Grid3D& g = f.grid();
     const int nz = g.z.n;
     std::vector<std::complex<double>> px(static_cast<std::size_t>(nz));
     std::vector<std::complex<double>> py(static_cast<std::size_t>(nz));
     std::vector<std::complex<double>> pz(static_cast<std::size_t>(nz));
-#pragma omp parallel for
-    for (int k = 0; k < nz; ++k) {
+    parallel_for(nz, [&](int k) {
         std::complex<double> dx{};
         std::complex<double> dy{};
         std::complex<double> dz{};
@@ -49,7 +51,7 @@ inline DipoleMatrixElement dipole_matrix_element(const Field3D& f, const Field3D
         px[static_cast<std::size_t>(k)] = dx;
         py[static_cast<std::size_t>(k)] = dy;
         pz[static_cast<std::size_t>(k)] = dz;
-    }
+    });
     std::complex<double> dx{};
     std::complex<double> dy{};
     std::complex<double> dz{};

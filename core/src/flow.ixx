@@ -7,8 +7,9 @@ import ses.vec;
 
 // Probability current and the Bohmian velocity field it induces -- the physics
 // behind the streakline flow visualization (and the raw material for an <L_z>
-// diagnostic). Atomic units (hbar = m_e = 1). Complex/Vec3d ride in from the
-// global module (GMF #include); consumers naming them still include those.
+// diagnostic). Atomic units (hbar = m_e = 1). Vec3d arrives via import
+// ses.vec; std::complex rides in the GMF, so consumers naming it still
+// #include <complex> themselves.
 
 
 export namespace ses {

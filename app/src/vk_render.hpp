@@ -16,7 +16,6 @@
 #include "vk_compute.hpp"
 
 import ses.grid;
-#include <core/marching_cubes.hpp>
 import ses.vec;
 
 #include <algorithm>
@@ -26,6 +25,7 @@ import ses.vec;
 #include <cstdio>
 #include <cstring>
 #include <vector>
+import ses.marching_cubes;
 import ses.sphere;
 
 import ses.camera;

@@ -1,4 +1,13 @@
-#pragma once
+module;
+#include <algorithm>
+#include <cmath>
+#include <complex>
+#include <cstddef>
+#include <vector>
+#include <cstdint>
+export module ses.radial;
+export import ses.decay;
+
 
 // Radial engine: bound levels and E1 lifetimes for every orbital with
 // n <= n_max. Central V(r) reduces the eigenproblem exactly to 1D per l:
@@ -7,13 +16,8 @@
 // bisection, eigenvectors by shifted inverse iteration. The k-th state for a
 // given l has k radial nodes and n = l + 1 + k.
 
-#include <core/decay.hpp>
 
-#include <cmath>
-#include <cstddef>
-#include <vector>
-
-namespace ses {
+export namespace ses {
 
 struct RadialGrid {
     double rmax{};

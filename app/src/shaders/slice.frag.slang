@@ -4,7 +4,7 @@
 // HSV LUT, brightness by |psi|). The card carries a base opacity so nodal
 // planes read as dark bands ON a visible sheet. The colour/alpha and the
 // clip-side discard MIRROR ses::slice_shade / ses::clip_ray_interval
-// (core/cross_section.hpp) -- the tested single source of truth.
+// (ses.cross_section) -- the tested single source of truth.
 import vec;
 
 struct FSIn {

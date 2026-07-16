@@ -35,8 +35,6 @@
 import ses.mc.tables;
 
 #include <complex>
-#include <core/decay.hpp>
-#include <core/drive.hpp>
 import ses.grid;
 import ses.spectral;
 import ses.vec;
@@ -47,6 +45,9 @@ import ses.vec;
 #include <cstdio>
 #include <cstring>
 #include <vector>
+import ses.drive;
+import ses.rotation;
+import ses.decay;
 
 namespace ses_vk {
 
@@ -931,7 +932,7 @@ public:
     }
 
     // Exact three-shear rotation of psi about coordinate `axis` by theta --
-    // the GPU transcription of core/rotation.hpp rotate_axis. One submission.
+    // the GPU transcription of ses.rotation rotate_axis. One submission.
     void rotate_axis_shear(int axis, double theta) {
         const int b = (axis + 1) % 3;  // in-plane axes (b x c = axis)
         const int c = (axis + 2) % 3;
@@ -1337,7 +1338,7 @@ public:
                          mc_nblocks_);
             return false;
         }
-        // Tables SSBO, uploaded from the core headers (single source of
+        // Tables SSBO, uploaded from ses.mc.tables (single source of
         // truth with the CPU oracle): [0,256) edge, [256,4352) tri 256x16,
         // [4352,4608) per-case triangle counts.
         std::vector<std::int32_t> tab(4608, 0);
@@ -3484,7 +3485,7 @@ private:
         std::int32_t pad1;
     };
     Buffer mc_den_{};        // |psi|^2 scalar field (R32, cells_)
-    Buffer mc_tables_{};     // edge/tri/count tables (core headers verbatim)
+    Buffer mc_tables_{};     // edge/tri/count tables (ses.mc.tables verbatim)
     Buffer mc_block_sums_{};
     Buffer mc_block_offsets_{};
     Buffer mc_vbuf_{};       // interleaved pos3 normal3 color3 (+VERTEX)

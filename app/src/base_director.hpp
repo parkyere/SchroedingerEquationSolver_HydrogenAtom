@@ -8,13 +8,7 @@
 #include "scenario.hpp"
 #include "vk_blobs.hpp"
 
-#include <core/field.hpp>
 import ses.grid;
-#include <core/imaginary_time.hpp>
-#include <core/marching_cubes.hpp>
-#include <core/observables.hpp>
-#include <core/sampling.hpp>
-#include <core/simulation.hpp>
 import ses.vec;
 
 #include <algorithm>
@@ -25,6 +19,12 @@ import ses.vec;
 #include <random>
 #include <string>
 #include <vector>
+import ses.simulation;
+import ses.sampling;
+import ses.imaginary_time;
+import ses.observables;
+import ses.marching_cubes;
+import ses.field;
 import ses.potential;
 
 import ses.colormap;

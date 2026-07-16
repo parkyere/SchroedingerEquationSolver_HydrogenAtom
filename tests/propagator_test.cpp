@@ -14,15 +14,15 @@
 // The potential path (e^{-i V dt/2}) is pinned by the harmonic-oscillator
 // coherent-state spec (harmonic_dynamics_test).
 
-#include <core/field.hpp>
-import ses.grid;
-#include <core/observables.hpp>
-#include <core/propagator.hpp>
 
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <vector>
+import ses.propagator;
+import ses.observables;
+import ses.grid;
+import ses.field;
 import ses.wavepacket;
 
 namespace {

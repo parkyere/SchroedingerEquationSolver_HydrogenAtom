@@ -14,17 +14,17 @@
 // reassociated. The reference orbital is built by fill_orbital (the un-
 // normalized (u_interp/r)Y_lm the projection algebraically equals).
 
-#include <core/projection.hpp>
 
 #include <complex>
-#include <core/field.hpp>
-import ses.grid;
-#include <core/radial.hpp>
 
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <vector>
+import ses.projection;
+import ses.radial;
+import ses.grid;
+import ses.field;
 import ses.harmonics;
 import ses.wavepacket;
 

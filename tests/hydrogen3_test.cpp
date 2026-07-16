@@ -10,16 +10,16 @@
 //    discretization bias largely cancels between the two runs).
 //  - Symmetry: the cloud is spherical about the nucleus.
 
-#include <core/field.hpp>
-import ses.grid;
-#include <core/imaginary_time.hpp>
-#include <core/observables.hpp>
-import ses.vec;
 
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <vector>
+import ses.imaginary_time;
+import ses.observables;
+import ses.grid;
+import ses.vec;
+import ses.field;
 import ses.wavepacket;
 import ses.potential;
 

@@ -1,4 +1,17 @@
-#pragma once
+module;
+#include <complex>
+#include <cassert>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+export module ses.propagator;
+export import ses.grid;
+export import ses.spectral;
+export import ses.fft;
+export import ses.field;
+import ses.parallel;
+
 
 // Split-operator (Fourier) propagator for the TDSE in atomic units. One
 // Strang step of exp(-i H dt), H = -1/2 laplacian + V:
@@ -6,19 +19,8 @@
 // Unitary by construction (pure phases), O(dt^2) splitting error.
 // Phase tables are precomputed once per (grid, potential, dt).
 
-#include <complex>
-#include <core/fft.hpp>
-#include <core/field.hpp>
-import ses.grid;
-import ses.spectral;
 
-#include <cassert>
-#include <cmath>
-#include <cstddef>
-#include <cstdint>
-#include <vector>
-
-namespace ses {
+export namespace ses {
 
 class SplitOperator1D {
 public:
@@ -121,14 +123,10 @@ private:
     // Elementwise (disjoint) multiply: threaded result is bitwise identical.
     static void apply_phase(const std::vector<std::complex<double>>& phase,
                             std::vector<std::complex<double>>& a) noexcept {
-        const std::int64_t n = static_cast<std::int64_t>(a.size());
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static)
-#endif
-        for (std::int64_t i = 0; i < n; ++i) {
+        parallel_for(static_cast<int>(a.size()), [&](int i) {
             a[static_cast<std::size_t>(i)] =
                 a[static_cast<std::size_t>(i)] * phase[static_cast<std::size_t>(i)];
-        }
+        });
     }
 
     double dt_;

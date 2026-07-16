@@ -22,19 +22,6 @@
 #include "vk_engine.hpp"
 
 #include <complex>
-#include <core/fft.hpp>
-#include <core/field.hpp>
-import ses.grid;
-#include <core/drive.hpp>
-#include <core/imaginary_time.hpp>
-#include <core/magnetic.hpp>
-#include <core/marching_cubes.hpp>
-#include <core/radial.hpp>
-#include <core/sampling.hpp>
-#include <core/projection.hpp>
-#include <core/propagator.hpp>
-#include <core/rotation.hpp>
-import ses.vec;
 
 #include <phase_multiply_spv.h>
 #include <half_mul_spv.h>
@@ -78,6 +65,19 @@ import ses.vec;
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+import ses.magnetic;
+import ses.drive;
+import ses.projection;
+import ses.sampling;
+import ses.imaginary_time;
+import ses.propagator;
+import ses.rotation;
+import ses.radial;
+import ses.grid;
+import ses.vec;
+import ses.fft;
+import ses.marching_cubes;
+import ses.field;
 import ses.harmonics;
 import ses.wavepacket;
 import ses.potential;
@@ -1719,7 +1719,7 @@ bool check_engine_deflation(ses_vk::DeviceContext& ctx) {
 }
 
 // The driven Strang step (dipole half-kicks around the static tables) vs
-// core/drive.hpp driven_step, with an adversarial drive: skew (non-unit)
+// ses.drive driven_step, with an adversarial drive: skew (non-unit)
 // polarization axis, nonzero omega, nonzero start time, so every kick
 // uniform (axis/box_min/cell_h/theta) is exercised, per-kick through the
 // dynamic-offset UBO slots.
