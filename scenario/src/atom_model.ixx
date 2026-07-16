@@ -3,7 +3,6 @@ module;
 #include <array>
 #include <cmath>
 #include <cstdio>
-#include <utility>
 #include <vector>
 export module ses.scenario.atom_model;
 export import ses.scenario.manifold_spec;
@@ -11,6 +10,7 @@ export import ses.vk.engine;
 export import ses.radial;
 export import ses.decay;
 export import ses.vram_budget;
+import ses.harmonics;
 
 
 // The tracked-atom model: the radial solve, the on-demand eigenstate
@@ -210,67 +210,52 @@ public:
         return state_buf_[s] >= 0;
     }
 
-    // Downward pairs worth a dipole integral: gap > 1e-3 skips degenerate
-    // m-splittings and sub-mHa channels; |dl| = 1 and the real-basis m rule
-    // apply the E1 selection rules analytically. In the tesseral basis the
-    // phi integral makes z couple m' == m only and x/y couple
-    // ||m'| - |m|| == 1 only -- everything else (including m' == -m) is
-    // EXACTLY zero, so those integrals never reach the GPU.
-    void collect_channel_pairs() {
-        pair_queue_.clear();
+    // The E1 channel table, factorized: for (u/r) Y_lm states the 3D dipole
+    // integral separates EXACTLY into (1D radial integral) x (constexpr
+    // tesseral angular strength, ses.harmonics), so the whole table is ~40
+    // radial dot products on the CPU -- no GPU pass. Gap > 1e-3 skips the
+    // degenerate intra-shell channels; the |dl| = 1 and tesseral m rules
+    // (m' == -m exactly forbidden) are hard zeros of tesseral_e1_sq.
+    void build_channel_table() {
+        channels_.clear();
+        std::array<std::array<double, kNumLevels>, kNumLevels> rint{};
+        std::array<std::array<bool, kNumLevels>, kNumLevels> have{};
+        for (int s = 0; s < kNumStates; ++s) {
+            state_energy_[static_cast<std::size_t>(s)] = radial_energy_[
+                static_cast<std::size_t>(kStateSpec[s].level)];
+        }
         for (int from = 0; from < kNumStates; ++from) {
+            const StateSpec& sf = kStateSpec[from];
             for (int to = 0; to < kNumStates; ++to) {
-                const bool downward =
+                const StateSpec& st = kStateSpec[to];
+                const double gap =
                     state_energy_[static_cast<std::size_t>(from)] -
-                        state_energy_[static_cast<std::size_t>(to)] >
-                    1e-3;
-                const bool dl_allowed =
-                    std::abs(kStateSpec[from].l - kStateSpec[to].l) == 1;
-                const int mf = kStateSpec[from].m;
-                const int mt = kStateSpec[to].m;
-                const bool dm_allowed =
-                    mt == mf || std::abs(std::abs(mt) - std::abs(mf)) == 1;
-                if (downward && dl_allowed && dm_allowed) {
-                    pair_queue_.push_back({from, to});
+                    state_energy_[static_cast<std::size_t>(to)];
+                if (gap <= 1e-3) {
+                    continue;
+                }
+                const double angular =
+                    ses::tesseral_e1_sq(st.l, st.m, sf.l, sf.m);
+                if (angular == 0.0) {
+                    continue;
+                }
+                const std::size_t lf = static_cast<std::size_t>(sf.level);
+                const std::size_t lt = static_cast<std::size_t>(st.level);
+                if (!have[lf][lt]) {
+                    rint[lf][lt] = ses::radial_dipole_integral(
+                        radial_grid_, radial_u_[lt], radial_u_[lf]);
+                    have[lf][lt] = true;
+                }
+                const double r = rint[lf][lt];
+                channels_.push_back(ShellChannel{
+                    from, to, ses::einstein_a(gap, r * r * angular), 0.0});
+                if (from == kP2Z && to == kS1) {
+                    // Laser E0 drive strength |<1s|z|2p_z>| = |R| sqrt(1/3).
+                    dipole_z_ = std::abs(r) *
+                                std::sqrt(ses::tesseral_e1_axis_sq(2, 0, 0, 1, 0));
                 }
             }
         }
-    }
-
-    std::vector<std::pair<int, int>>& pair_queue() { return pair_queue_; }
-
-    void evaluate_channel_pair(ses_vk::Engine& engine,
-                               const std::pair<int, int>& p) {
-        const std::size_t from = static_cast<std::size_t>(p.first);
-        const std::size_t to = static_cast<std::size_t>(p.second);
-        const double gap = state_energy_[from] - state_energy_[to];
-        // Transient endpoints: cache the 'from' orbital across its
-        // consecutive channels, synthesize each 'to' fresh -- peak residency
-        // is 2 orbitals.
-        if (pair_from_idx_ != p.first) {
-            if (pair_from_buf_ >= 0) {
-                engine.release_state(pair_from_buf_);
-            }
-            pair_from_buf_ = synth_transient(engine, p.first);
-            pair_from_idx_ = p.first;
-        }
-        const int to_buf = synth_transient(engine, p.second);
-        const ses::DipoleMatrixElement d = engine.dipole_between(to_buf, pair_from_buf_);
-        engine.release_state(to_buf);
-        channels_.push_back(ShellChannel{
-            p.first, p.second, ses::einstein_a(gap, ses::dipole_strength_sq(d)), 0.0});
-        if (p.first == kP2Z && p.second == kS1) {
-            dipole_z_ = std::abs(d.z);  // laser E0 drive strength, ready for free
-        }
-    }
-
-    // Free the channel-build 'from' cache (the finale of the chunked build).
-    void release_pair_cache(ses_vk::Engine& engine) {
-        if (pair_from_buf_ >= 0) {
-            engine.release_state(pair_from_buf_);
-            pair_from_buf_ = -1;
-        }
-        pair_from_idx_ = -1;
     }
 
     bool finalize_channel_table(double gamma_display_target) {
@@ -347,22 +332,17 @@ public:
         if (!channels_.empty()) {
             return true;
         }
-        // The whole blocking build: dipoles reduce on the GPU and never
-        // touch the CPU; the engine owns its frames.
+        // Synthesis captures each state's grid norm (state_norm2_), which
+        // projections and the MCWF terms divide by; the channel table itself
+        // is the factorized CPU build.
         bool ok = true;
         for (int idx = 0; idx < kNumStates && ok; ++idx) {
             ok = ensure_state(engine, idx);
         }
-        if (ok) {
-            collect_channel_pairs();
-            while (!pair_queue_.empty()) {
-                evaluate_channel_pair(engine, pair_queue_.back());
-                pair_queue_.pop_back();
-            }
-        }
         if (!ok) {
             return false;
         }
+        build_channel_table();
         return finalize_channel_table(gamma_display_target);
     }
 
@@ -387,12 +367,9 @@ private:
     std::array<double, kNumStates> state_energy_{};
     ses::GpuPrecision precision_ = ses::GpuPrecision::Fp32;
 
-    // E1 decay channel table + the chunked-build work queue.
+    // E1 decay channel table (factorized CPU build).
     std::vector<ShellChannel> channels_;
-    std::vector<std::pair<int, int>> pair_queue_;
     double accel_display_ = 0.0;  // common display acceleration factor
-    int pair_from_idx_ = -1;      // channel-build 'from' cache (transient)
-    int pair_from_buf_ = -1;
     double dipole_z_ = 0.0;  // |<2p_z| z |1s>|, the laser drive strength
 };
 

@@ -69,7 +69,6 @@ constexpr double kRabiTargetOmega = 0.04;
 constexpr int kLaserStepsPerTick = 6;  // the pump demo runs hotter than 1x
 
 constexpr int kAtlasMontageFrames = 3;  // frames each synthesized orbital shows
-constexpr int kAtlasPairsPerFrame = 4;  // dipole pairs evaluated per paint
 constexpr int kFlashTicks = 25;  // photon-flash duration AND the fade divisor
 
 // Potential: bare -Z/r with only the nucleus cell regularized (analytic cell
@@ -734,14 +733,11 @@ public:
         if (stepping_ == BaseStepping::RealTime && !solving()) {
             s += strf("  emit P = %.2e au", radiated_power_);
         }
-        if (solving()) {
-            s += synth_queue_.empty()
-                     ? strf("  solving atom: dipole channels (%d left)",
-                            static_cast<int>(atom_.pair_queue().size()))
-                     : strf("  solving atom: %s (%d/%d)",
-                            kStateSpec[synth_queue_.front()].name,
-                            kNumStates - static_cast<int>(synth_queue_.size()) + 1,
-                            kNumStates);
+        if (solving() && !synth_queue_.empty()) {
+            s += strf("  solving atom: %s (%d/%d)",
+                      kStateSpec[synth_queue_.front()].name,
+                      kNumStates - static_cast<int>(synth_queue_.size()) + 1,
+                      kNumStates);
         }
         if (decay_on_ && !atom_.channels().empty()) {
             s += strf("  decay ON: tau(2p) %.2e au, tau(2s) %.2e au, x%.1e, photons %lld",
@@ -1437,24 +1433,16 @@ private:
             volume_dirty_ = false;
             montage_hold_ = kAtlasMontageFrames;
             if (synth_queue_.empty()) {
-                atom_.collect_channel_pairs();
-            }
-            return;
-        }
-        if (!atom_.pair_queue().empty()) {
-            for (int c = 0; c < kAtlasPairsPerFrame && !atom_.pair_queue().empty(); ++c) {
-                atom_.evaluate_channel_pair(engine_, atom_.pair_queue().back());
-                atom_.pair_queue().pop_back();
-            }
-            if (atom_.pair_queue().empty()) {
+                // Channel table: factorized radial x constexpr angular
+                // (build_channel_table) -- instant, so the atlas finale
+                // follows the last montage frame with no dipole pause.
+                atom_.build_channel_table();
                 atom_.finalize_channel_table(kDecayGammaDisplay);
-                // Free the 'from' cache; nothing else is resident (no atlas
-                // -> ~1.2 GB runtime, 512^3 feasible).
-                atom_.release_pair_cache(engine_);
                 atlas_done_ = true;
                 seed_bound_superposition();  // the demo starts bound
                 title_dirty_ = true;
             }
+            return;
         }
     }
 
