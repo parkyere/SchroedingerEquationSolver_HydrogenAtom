@@ -9,7 +9,7 @@
 #include <core/imaginary_time.hpp>
 #include <core/potential.hpp>
 #include <core/spectral.hpp>
-#include <core/vec.hpp>
+import ses.vec;
 
 #include <gtest/gtest.h>
 

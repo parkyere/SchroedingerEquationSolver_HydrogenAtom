@@ -11,7 +11,7 @@
 //  - phase_lut: the cyclic phase colormap baked into a lookup table so the
 //    GPU samples the TESTED colormap instead of a re-derived formula.
 
-#include <core/vec.hpp>
+import ses.vec;
 
 #include <gtest/gtest.h>
 

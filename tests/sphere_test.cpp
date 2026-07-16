@@ -7,7 +7,7 @@
 
 #include <core/marching_cubes.hpp>
 #include <core/sphere.hpp>
-#include <core/vec.hpp>
+import ses.vec;
 
 #include <gtest/gtest.h>
 

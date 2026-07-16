@@ -1,7 +1,7 @@
 module;
-#include <core/vec.hpp>
 #include <cmath>
 export module ses.camera;
+import ses.vec;
 
 
 // Hand-rolled renderer math (purist reinvention boundary: no GLM).

@@ -39,7 +39,7 @@ import ses.mc.tables;
 #include <core/drive.hpp>
 #include <core/grid.hpp>
 #include <core/spectral.hpp>
-#include <core/vec.hpp>
+import ses.vec;
 
 #include <algorithm>
 #include <cmath>

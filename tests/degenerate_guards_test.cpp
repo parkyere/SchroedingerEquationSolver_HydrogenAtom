@@ -7,7 +7,7 @@
 #include <core/grid.hpp>
 #include <core/marching_cubes.hpp>
 #include <core/observables.hpp>
-#include <core/vec.hpp>
+import ses.vec;
 
 #include <gtest/gtest.h>
 

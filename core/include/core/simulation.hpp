@@ -10,7 +10,7 @@
 #include <core/imaginary_time.hpp>
 #include <core/measurement.hpp>
 #include <core/propagator.hpp>
-#include <core/vec.hpp>
+import ses.vec;
 #include <core/wavepacket.hpp>
 
 #include <optional>

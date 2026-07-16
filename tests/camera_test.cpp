@@ -9,7 +9,7 @@
 //  - View space is right-handed, camera looks down -Z.
 //  - NDC depth range is [-1, +1] (near plane -> -1, far plane -> +1).
 
-#include <core/vec.hpp>
+import ses.vec;
 
 #include <gtest/gtest.h>
 

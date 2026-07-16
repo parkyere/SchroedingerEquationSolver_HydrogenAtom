@@ -15,7 +15,7 @@
 #include <core/observables.hpp>
 #include <core/potential.hpp>
 #include <core/simulation.hpp>
-#include <core/vec.hpp>
+import ses.vec;
 
 #include <gtest/gtest.h>
 

@@ -1,5 +1,4 @@
 module;
-#include <core/vec.hpp>
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -9,6 +8,7 @@ module;
 export module ses.volume;
 
 import ses.colormap;
+import ses.vec;
 
 
 // Volume-rendering math. The shader ray marcher mirrors these formulas

@@ -8,7 +8,7 @@
 #include <core/marching_cubes.hpp>
 #include <core/potential.hpp>
 #include <core/simulation.hpp>
-#include <core/vec.hpp>
+import ses.vec;
 
 #include <chrono>
 #include <cstdio>

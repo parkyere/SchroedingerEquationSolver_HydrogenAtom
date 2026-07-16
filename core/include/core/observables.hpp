@@ -8,7 +8,7 @@
 #include <core/fft.hpp>
 #include <core/field.hpp>
 #include <core/spectral.hpp>
-#include <core/vec.hpp>
+import ses.vec;
 
 #include <algorithm>
 #include <cmath>

@@ -6,7 +6,7 @@
 // the exact unit radials.
 
 #include <core/marching_cubes.hpp>
-#include <core/vec.hpp>
+import ses.vec;
 
 #include <cmath>
 #include <cstddef>

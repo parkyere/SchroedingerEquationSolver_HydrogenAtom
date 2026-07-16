@@ -1,10 +1,12 @@
-#pragma once
+module;
+#include <cmath>
+export module ses.vec;
+
 
 // 3-component double vector with the operations the renderer math needs.
 
-#include <cmath>
 
-namespace ses {
+export namespace ses {
 
 struct Vec3d {
     double x{};

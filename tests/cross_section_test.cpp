@@ -8,7 +8,7 @@
 
 #include <core/complex.hpp>
 #include <core/grid.hpp>
-#include <core/vec.hpp>
+import ses.vec;
 
 #include <gtest/gtest.h>
 

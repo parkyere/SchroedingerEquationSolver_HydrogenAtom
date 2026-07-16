@@ -16,7 +16,7 @@
 #include <core/observables.hpp>
 #include <core/potential.hpp>
 #include <core/propagator.hpp>
-#include <core/vec.hpp>
+import ses.vec;
 #include <core/wavepacket.hpp>
 
 #include <gtest/gtest.h>

@@ -16,7 +16,7 @@
 #include <core/grid.hpp>
 #include <core/observables.hpp>
 #include <core/rotation.hpp>
-#include <core/vec.hpp>
+import ses.vec;
 
 #include <gtest/gtest.h>
 

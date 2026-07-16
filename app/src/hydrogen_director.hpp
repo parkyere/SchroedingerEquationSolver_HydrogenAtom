@@ -23,7 +23,7 @@
 #include <core/projection.hpp>
 #include <core/sampling.hpp>
 #include <core/simulation.hpp>
-#include <core/vec.hpp>
+import ses.vec;
 
 #include <algorithm>
 #include <array>

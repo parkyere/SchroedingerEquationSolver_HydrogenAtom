@@ -19,7 +19,7 @@
 #include <core/observables.hpp>
 #include <core/potential.hpp>
 #include <core/radial.hpp>
-#include <core/vec.hpp>
+import ses.vec;
 
 #include <gtest/gtest.h>
 

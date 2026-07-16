@@ -4,7 +4,7 @@
 // split-operator propagator. Atomic units.
 
 #include <core/grid.hpp>
-#include <core/vec.hpp>
+import ses.vec;
 
 #include <cmath>
 #include <cstddef>

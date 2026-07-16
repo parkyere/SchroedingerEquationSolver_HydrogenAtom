@@ -1,8 +1,8 @@
 module;
 #include <core/complex.hpp>
-#include <core/vec.hpp>
 #include <algorithm>
 export module ses.flow;
+import ses.vec;
 
 
 // Probability current and the Bohmian velocity field it induces -- the physics

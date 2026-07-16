@@ -2,10 +2,10 @@ module;
 #include <core/decay.hpp>  // kFineStructureConstant
 #include <core/field.hpp>
 #include <core/grid.hpp>
-#include <core/vec.hpp>
 #include <cstddef>
 #include <vector>
 export module ses.emission;
+import ses.vec;
 
 
 // Semiclassical (Larmor) emission from the oscillating dipole:

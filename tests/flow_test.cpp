@@ -4,7 +4,7 @@
 // measurement labels +m (measurement.hpp).
 
 #include <core/complex.hpp>
-#include <core/vec.hpp>
+import ses.vec;
 
 #include <gtest/gtest.h>
 

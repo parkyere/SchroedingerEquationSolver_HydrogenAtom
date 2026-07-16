@@ -10,7 +10,7 @@
 #include <core/propagator.hpp>
 #include <core/simulation.hpp>
 #include <core/spectral.hpp>
-#include <core/vec.hpp>
+import ses.vec;
 
 #include <gtest/gtest.h>
 

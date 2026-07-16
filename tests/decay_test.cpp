@@ -22,7 +22,7 @@
 #include <core/decay.hpp>
 #include <core/field.hpp>
 #include <core/grid.hpp>
-#include <core/vec.hpp>
+import ses.vec;
 
 #include <gtest/gtest.h>
 
