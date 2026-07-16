@@ -5,8 +5,8 @@ module;
 #include <cstdio>
 #include <utility>
 #include <vector>
-export module ses.app.atom_model;
-export import ses.app.manifold_spec;
+export module ses.scenario.atom_model;
+export import ses.scenario.manifold_spec;
 export import ses.vk.engine;
 export import ses.radial;
 export import ses.decay;

@@ -25,46 +25,61 @@ research-grade mean-field (DFT) project. We stay single-electron on purpose.
  tests/ -------->|   sesolver_core   |   pure physics: no GUI, no GPU,
  (gtest)         |   fully testable  |   fully unit-tested
                  +-------------------+
+                           ^
+                 +-------------------+
+                 | solver/ ses_solver|   Schrodinger GPGPU library
+                 | volk+VMA+Slang    |   (sesolver_vkcheck = windowless
+                 +-------------------+    GPU oracle, runs inside ctest)
                     ^             ^
-                    |             |
- +---------------------+      +--------------------------+
- |       ses_vk        |<-----|     app/ SDL3 shell      |
- | framework-free      |      | window + input + main    |
- | Vulkan compute AND  |      | loop + OWN swapchain +   |
- | rendering           |      | ImGui panel ("Humble     |
- +---------------------+      | Object")                 |
-           ^                  +--------------------------+
-           |
- sesolver_vkcheck  (windowless GPU oracle, runs inside ctest)
+ +---------------------+   +----------------------+
+ |    viz/ ses_viz     |   | scenario/ ses_scenario|
+ | raw-Vulkan renderer |   | physics orchestration |
+ | + swapchain present |   | (directors, arcs)     |
+ +---------------------+   +----------------------+
+            ^                     ^
+ +--------------------------------------+
+ |  app/ SDL3 shell + ImGui panel       |   pure presentation
+ |  ("Humble Object")                   |
+ +--------------------------------------+
 ```
 
 - **`core` depends on nothing** (no GUI, no GPU, no windowing). Every behavior
   has an analytic or golden oracle and is unit-tested, test-first.
-- **`ses_vk`** (`app/src/vk_*.ixx`, C++20 modules `ses.vk.*`) is the GPU engine and scene renderer:
-  framework-free Vulkan on top of `core` plus vendored infrastructure only
-  (volk, VMA, VkFFT). It links no windowing at all — proven by
-  `sesolver_vkcheck`, which drives every kernel and engine path against the
-  CPU double core inside ctest.
+- **`solver/`** (`ses_solver`, modules `ses.vk.device/compute/engine/...`) is
+  the Schrodinger GPGPU library: framework-free Vulkan on top of `core` plus
+  vendored infrastructure only (volk, VMA, VkFFT, offline-baked Slang
+  kernels). It links no windowing at all — proven by `sesolver_vkcheck`,
+  which lives beside it and drives every kernel and engine path against the
+  CPU double core inside ctest, on machines with no SDL installed.
+- **`viz/`** (`ses_viz`, `ses.vk.render/present/...`) is the raw-Vulkan scene
+  renderer and swapchain presenter. It rides the solver's device and knows
+  nothing about SDL or ImGui (the presenter takes an opaque UI-record
+  callback).
+- **`scenario/`** (`ses_scenario`, `ses.scenario.*`) is everything a demo IS:
+  the `ScenarioDirector` seam, the atom model, the concrete directors, and
+  the headless selftest arcs. Physics orchestration only — no UI.
 - **The shell is thin and replaceable**: SDL3 gives the window, input, and the
   Vulkan surface; the shell itself owns the device (the same
   `DeviceContext::create` path vkcheck exercises), the swapchain + one
   fullscreen-triangle pass sampling the renderer's image (`ses.vk.present`),
   and the Dear ImGui control panel riding that pass. Only raw Khronos handles
-  cross the shell <-> `ses_vk` seam. The shell holds
-  **no domain logic**; anything worth testing is pushed down into `core` as
-  pure data/geometry first (e.g. marching-cubes vertex generation,
-  transfer-function math, camera matrices).
-- Dependency direction points **inward**: `app → ses_vk → core`,
-  `tests → core`. `core` never points outward.
+  and CPU meshes cross the seams. The shell holds **no domain logic**;
+  anything worth testing is pushed down into `core` as pure data/geometry
+  first (e.g. marching-cubes vertex generation, transfer-function math,
+  camera matrices).
+- Dependency direction points **inward**:
+  `app → scenario/viz → solver → core`, `tests → core`. `core` never points
+  outward.
 
 ## Reuse boundary (purist reinvention)
 
 The boundary applies to THIRD-PARTY libraries only. The **C++ standard
-library is always fair game** (user decision): `ses::Complex` is an alias of
-`std::complex` (built with `-fcx-limited-range` / Clang's
+library is always fair game** (user decision): the core uses `std::complex`
+directly (built with `-fcx-limited-range` / Clang's
 `-fcomplex-arithmetic=basic` where supported, so multiply/divide use the
 naive formulas the exact-value test oracles pin), and `std::vector`,
-`<cmath>`, `<numbers>`, `<random>` etc. are used freely.
+`<cmath>`, `<numbers>`, `<random>` etc. are used freely. CPU parallelism is
+the project's own `ses.parallel` worker pool (no OpenMP).
 
 Hand-written (the learning lives here):
 - vector/matrix/camera math (no stdlib equivalent until C++26 `<linalg>`)

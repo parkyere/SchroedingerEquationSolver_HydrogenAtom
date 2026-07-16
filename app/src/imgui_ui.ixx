@@ -4,7 +4,7 @@ module;
 #include <string>
 #include <utility>
 export module ses.app.imgui_ui;
-export import ses.app.scenario;  // HydrogenApi (the hydrogen panel's control seam)
+export import ses.scenario;  // HydrogenApi (the hydrogen panel's control seam)
 
 
 // The discoverable-controls panel, in Dear ImGui: a clickable mirror of the

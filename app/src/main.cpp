@@ -36,10 +36,9 @@
 #include <utility>
 #include <vector>
 
-// ses_vk before SDL/ImGui: volk (inside) defines VK_NO_PROTOTYPES and must
-// own the vulkan.h inclusion before SDL/ImGui pull their own Vulkan
-// declarations. The single VMA implementation lives in vma_impl.cpp inside
-// ses_app_modules (vma_impl.cpp, the single implementation TU).
+// volk before SDL/ImGui: it defines VK_NO_PROTOTYPES and must own the
+// vulkan.h inclusion before SDL/ImGui pull their own Vulkan declarations.
+// The single VMA implementation TU is solver/src/vma_impl.cpp (ses_solver).
 #include <volk.h>  // VK_* macros: modules cannot export them
 
 #include <blit_frag_spv.h>
@@ -52,16 +51,16 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 #include <SDL3/SDL_main.h>
-import ses.app.tunneling_director;
+import ses.scenario.tunneling_director;
 
 import ses.app.scheduler;
-import ses.app.harmonic_director;
-import ses.app.hydrogen_director;
-import ses.app.selftest_arcs;
-import ses.vk.blobs;
+import ses.scenario.harmonic_director;
+import ses.scenario.hydrogen_director;
+import ses.scenario.selftest_arcs;
+import ses.vk.render_blobs;
 import ses.app.imgui_ui;
 import ses.vk.present;
-import ses.app.vram_probe;
+import ses.vk.vram_probe;
 
 namespace {
 
@@ -75,7 +74,7 @@ constexpr std::uint64_t kTickMs = 16;
 
 // The shell: window + input + device + presentation + the main loop. The one
 // wrapper surface shared by the keyboard, the ImGui panel (ses.app.imgui_ui),
-// and the selftest arcs (ses.app.selftest_arcs).
+// and the selftest arcs (ses.scenario.selftest_arcs).
 class Shell {
 public:
     Shell(std::unique_ptr<ses_shell::ScenarioDirector> director,
@@ -125,7 +124,7 @@ public:
                          vk_ctx_.validation_active ? " [validation ON]" : "");
             if (needs_render_ &&
                 !vk_renderer_.initialize(vk_ctx_, director_->grid(),
-                                         ses_shell::app_render_blobs())) {
+                                         ses_vk::render_blobs())) {
                 fatal_shell_error("render resources",
                                   "ses_vk renderer initialization failed");
             }
@@ -168,7 +167,7 @@ public:
                      vk_ctx_.validation_active ? " [validation ON]" : "");
 
         if (!vk_renderer_.initialize(vk_ctx_, director_->grid(),
-                                     ses_shell::app_render_blobs())) {
+                                     ses_vk::render_blobs())) {
             fatal_shell_error("render resources",
                               "ses_vk renderer initialization failed");
         }
@@ -310,7 +309,7 @@ public:
 
     // ---- control entry points every scene shares --------------------------
     // Scenario-specific controls/probes live behind director_->hydrogen() /
-    // director_->tunnel() (ses.app.scenario); the panel and the selftest arcs
+    // director_->tunnel() (ses.scenario); the panel and the selftest arcs
     // reach them there.
     void toggle_pause() { paused_ = !paused_; }
     void set_real_time() {
@@ -704,7 +703,7 @@ int main(int argc, char* argv[]) {
     shell.init();
 
     // Verification + selftest arcs (--dump-frame*, --selftest-*): registered
-    // from ses.app.selftest_arcs so main() stays a shell.
+    // from ses.scenario.selftest_arcs so main() stays a shell.
     ses_shell::register_verification_arcs(&shell);
 
     const int code = shell.run();

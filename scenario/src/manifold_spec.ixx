@@ -1,4 +1,4 @@
-export module ses.app.manifold_spec;
+export module ses.scenario.manifold_spec;
 
 
 // Tracked n<=6 eigenstate-manifold spec: state/level index tables (pure data).

@@ -9,14 +9,14 @@ module;
 #include <random>
 #include <string>
 #include <vector>
-export module ses.app.hydrogen_director;
-export import ses.app.manifold_spec;
+export module ses.scenario.hydrogen_director;
+export import ses.scenario.manifold_spec;
 export import ses.grid;
 export import ses.vec;
-export import ses.app.base_director;
-export import ses.app.atom_model;
+export import ses.scenario.base_director;
+export import ses.scenario.atom_model;
 export import ses.vk.engine;
-export import ses.app.scenario;
+export import ses.scenario;
 export import ses.simulation;
 export import ses.magnetic;
 export import ses.projection;
@@ -93,7 +93,7 @@ public:
     // BaseDirector's ctor stages the initial mesh + volume from make_simulation().
     HydrogenDirector() : BaseDirector(make_simulation()) {}
 
-    // The specialized-control seam (ses.app.scenario): the shell reaches these
+    // The specialized-control seam (ses.scenario): the shell reaches these
     // through HydrogenApi, never a concrete down-cast.
     HydrogenApi* hydrogen() override { return this; }
 
@@ -107,7 +107,7 @@ public:
         compute_attempted_ = true;
         gpu_ok_ = device_ok &&
                   engine_.initialize(ctx, sim_.grid(),
-                                     ses_shell::app_engine_blobs(sim_.grid().x.n),
+                                     ses_vk::engine_blobs(sim_.grid().x.n),
                                      sim_.potential(), sim_.dt(),
                                      sim_.psi().data());
         if (gpu_ok_) {

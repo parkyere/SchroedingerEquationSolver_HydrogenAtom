@@ -11,7 +11,7 @@ module;
 #include <cstdint>
 #include <string>
 #include <vector>
-export module ses.app.scenario;
+export module ses.scenario;
 export import ses.vk.device;
 export import ses.grid;
 export import ses.marching_cubes;

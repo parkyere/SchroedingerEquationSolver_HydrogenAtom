@@ -3,8 +3,8 @@ module;
 #include <cmath>
 #include <cstdio>
 #include <memory>
-export module ses.app.selftest_arcs;
-export import ses.app.manifold_spec;
+export module ses.scenario.selftest_arcs;
+export import ses.scenario.manifold_spec;
 
 
 // Verification + selftest arcs: every --dump-frame* and --selftest-* arc,

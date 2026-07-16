@@ -1,8 +1,8 @@
 module;
 #include <cmath>
 #include <string>
-export module ses.app.harmonic_director;
-export import ses.app.base_director;
+export module ses.scenario.harmonic_director;
+export import ses.scenario.base_director;
 
 
 // The 3D isotropic harmonic trap scenario: a coherent state (the ground

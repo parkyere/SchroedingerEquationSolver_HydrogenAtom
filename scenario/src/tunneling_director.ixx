@@ -2,8 +2,8 @@ module;
 #include <algorithm>
 #include <cstddef>
 #include <string>
-export module ses.app.tunneling_director;
-export import ses.app.base_director;
+export module ses.scenario.tunneling_director;
+export import ses.scenario.base_director;
 
 
 // Quantum tunneling: a Gaussian packet fired at a rectangular barrier its

@@ -160,8 +160,23 @@ endif()
 # Pure, dependency-free numerical core. Always built.
 add_subdirectory(core)
 
+# Testing must be enabled BEFORE the solver directory registers VkCheck.
 if(SES_BUILD_TESTS)
     enable_testing()
+endif()
+
+# Shared build machinery for the GPU layers (slangc AOT bake, VkFFT probe).
+include(tools/cmake/ses_slang.cmake)
+include(tools/cmake/ses_vkfft.cmake)
+
+# The layered libraries. All windowing-free: the Schrodinger GPGPU solver
+# (with its headless vkcheck harness), the raw-Vulkan viz, and the physics
+# scenario orchestration. Always built -- only the SDL shell is gated below.
+add_subdirectory(solver)
+add_subdirectory(viz)
+add_subdirectory(scenario)
+
+if(SES_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 

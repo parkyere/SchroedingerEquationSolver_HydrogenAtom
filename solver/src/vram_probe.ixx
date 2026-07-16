@@ -8,7 +8,7 @@ module;
 #include <cstdint>
 #include <cstring>
 #include <vector>
-export module ses.app.vram_probe;
+export module ses.vk.vram_probe;
 export import ses.vram_budget;
 
 

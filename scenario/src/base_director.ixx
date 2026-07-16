@@ -11,10 +11,10 @@ module;
 #include <string>
 #include <vector>
 #include <volk.h>
-export module ses.app.base_director;
+export module ses.scenario.base_director;
 export import ses.grid;
-export import ses.vk.blobs;
-export import ses.app.scenario;
+export import ses.vk.engine_blobs;
+export import ses.scenario;
 export import ses.simulation;
 export import ses.sampling;
 export import ses.imaginary_time;
@@ -64,7 +64,7 @@ public:
         compute_attempted_ = true;
         gpu_ok_ = device_ok &&
                   engine_.initialize(ctx, sim_.grid(),
-                                     ses_shell::app_engine_blobs(sim_.grid().x.n),
+                                     ses_vk::engine_blobs(sim_.grid().x.n),
                                      sim_.potential(), sim_.dt(),
                                      sim_.psi().data());
         if (!gpu_ok_) {
@@ -171,7 +171,7 @@ public:
         }
     }
 
-    // Visualized time scale (see ses.app.scenario): steps per tick, not dt.
+    // Visualized time scale (see ses.scenario): steps per tick, not dt.
     void set_time_scale(int scale) override {
         time_scale_ = std::clamp(scale, 1, 16);
     }
