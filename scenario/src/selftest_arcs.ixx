@@ -149,15 +149,49 @@ void register_verification_arcs(ShellT* shell) {
                     [shell, hy_ok, harm_ok, harm_emits,
                      harm_runs](bool tn_runs) {
                         const bool tn_ok = shell->tn() != nullptr;
-                        const bool pass = hy_ok && harm_ok && harm_emits &&
-                                          harm_runs && tn_ok && tn_runs;
+                        const bool leg3d = hy_ok && harm_ok && harm_emits &&
+                                           harm_runs && tn_ok && tn_runs;
                         std::fprintf(
                             stderr,
                             "selftest-scene: hydrogen %d, harmonic %d "
-                            "(runs %d, emits %d), tunnel %d (runs %d)  [%s]\n",
+                            "(runs %d, emits %d), tunnel %d (runs %d)\n",
                             hy_ok, harm_ok, harm_runs, harm_emits, tn_ok,
-                            tn_runs, pass ? "PASS" : "FAIL");
-                        shell->request_exit(pass ? 0 : 1);
+                            tn_runs);
+                        // The 1D legs: GPU scene -> CPU-only scene (renderer
+                        // rebuild + overlay path), CPU -> CPU, and back to a
+                        // GPU scene -- the reinit-safety gauntlet.
+                        shell->request_scene(3);  // 1D harmonic ladder
+                        selftest_scene_wait_running(shell, "harmonic1d", 0,
+                                                    [shell, leg3d](
+                                                        bool h1_runs) {
+                            const bool h1_ok = shell->ln() != nullptr &&
+                                               shell->hy() == nullptr;
+                            shell->request_scene(4);  // 1D tunneling
+                            selftest_scene_wait_running(shell, "tunnel1d", 0,
+                                                        [shell, leg3d, h1_ok,
+                                                         h1_runs](
+                                                            bool t1_runs) {
+                                const bool t1_ok = shell->tn() != nullptr &&
+                                                   shell->ln() == nullptr;
+                                shell->request_scene(1);  // back to a GPU scene
+                                selftest_scene_wait_running(
+                                    shell, "harmonic-return", 0,
+                                    [shell, leg3d, h1_ok, h1_runs, t1_ok,
+                                     t1_runs](bool ret_runs) {
+                                        const bool pass = leg3d && h1_ok &&
+                                                          h1_runs && t1_ok &&
+                                                          t1_runs && ret_runs;
+                                        std::fprintf(
+                                            stderr,
+                                            "selftest-scene: harmonic1d %d "
+                                            "(runs %d), tunnel1d %d (runs %d), "
+                                            "gpu-return runs %d  [%s]\n",
+                                            h1_ok, h1_runs, t1_ok, t1_runs,
+                                            ret_runs, pass ? "PASS" : "FAIL");
+                                        shell->request_exit(pass ? 0 : 1);
+                                    });
+                            });
+                        });
                     });
             });
         });
