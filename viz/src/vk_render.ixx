@@ -540,6 +540,40 @@ public:
         ctx_->destroy_buffer(&zlabel_vbuf_);
         ctx_->destroy_buffer(&mesh_vbuf_);
         ctx_->destroy_buffer(&staging_);
+        // Reset every cached memo alongside its destroyed resource, so a
+        // re-initialize (live scene switch) starts clean: a stale
+        // staging_bytes_ would skip the staging create and memcpy into a
+        // null map; a stale bound-view handle could ALIAS a recycled handle
+        // value and silently skip the re-bind.
+        staging_bytes_ = 0;
+        mesh_vbuf_bytes_ = 0;
+        mesh_vertex_count_ = 0;
+        volume_bound_view_ = VK_NULL_HANDLE;
+        flow_vel_bound_view_ = VK_NULL_HANDLE;
+        aux_valid_ = false;
+        accum_frames_ = 0;
+        flow_frame_ = 0;
+        flow_was_on_ = false;
+        // Every descriptor set died with the arena's pools: null the handles
+        // too, or the allocate-once memos (create_post_chain's accum_set_
+        // guard) would skip re-allocation and write to freed sets.
+        scene_set_ = VK_NULL_HANDLE;
+        gizmo_set_ = VK_NULL_HANDLE;
+        volume_set_ = VK_NULL_HANDLE;
+        accum_set_ = VK_NULL_HANDLE;
+        for (int i = 0; i < 3; ++i) {
+            down_set_[i] = VK_NULL_HANDLE;
+        }
+        up_set_[0] = VK_NULL_HANDLE;
+        up_set_[1] = VK_NULL_HANDLE;
+        compose_set_ = VK_NULL_HANDLE;
+        down0_color_set_ = VK_NULL_HANDLE;
+        compose_color_set_ = VK_NULL_HANDLE;
+        occ_set_ = VK_NULL_HANDLE;
+        dilate_set_ = VK_NULL_HANDLE;
+        shadow_set_ = VK_NULL_HANDLE;
+        particles_set_ = VK_NULL_HANDLE;
+        flow_set_ = VK_NULL_HANDLE;
         ctx_ = nullptr;
     }
 
