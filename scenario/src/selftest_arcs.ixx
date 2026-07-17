@@ -166,15 +166,51 @@ void register_verification_arcs(ShellT* shell) {
     // Renderer survival across a scene switch: swap to the harmonic trap
     // (different grid -> full SceneRenderer rebuild) and dump the finished
     // frame -- the windowed combo's renderer path, verified headless.
+    // CONDITION-POLLED, not wall-clocked: the swap defers the new scene's
+    // compute init to the loop's init block, which runs AFTER the scheduler
+    // poll -- a fixed-delay dump can fire before the first post-swap render
+    // and read a never-rendered target (latent race, found the hard way).
     if (shell->has_arg("--dump-frame-switch")) {
         shell->sched().after(2000, [shell] {
             shell->request_scene(1);  // harmonic trap
-            shell->sched().after(2500, [shell] {
-                const bool ok = shell->dump_frame_bmp("frame_dump_switch.bmp");
-                std::fprintf(stderr, "dump-frame-switch: %ux%u  [%s]\n",
-                             shell->frame_width(), shell->frame_height(),
-                             ok ? "PASS" : "FAIL");
-                shell->request_exit(ok ? 0 : 1);
+            selftest_scene_wait_running(shell, "switch-target", 0, [shell](
+                                                                      bool runs) {
+                if (!runs) {
+                    std::fprintf(stderr, "dump-frame-switch: scene STALLED  "
+                                         "[FAIL]\n");
+                    shell->request_exit(1);
+                    return;
+                }
+                shell->sched().after(1000, [shell] {  // let a few frames settle
+                    const bool ok =
+                        shell->dump_frame_bmp("frame_dump_switch.bmp");
+                    std::fprintf(stderr, "dump-frame-switch: %ux%u  [%s]\n",
+                                 shell->frame_width(), shell->frame_height(),
+                                 ok ? "PASS" : "FAIL");
+                    shell->request_exit(ok ? 0 : 1);
+                });
+            });
+        });
+    }
+
+    // Trap Fock-ladder decay: prepare an eigenstate (Key 5 -> 1p_z), arm the
+    // Einstein-A jumps (Key D), and expect >= 1 photon inside the window --
+    // the QED half of the trap's complementarity demo (the license physics
+    // lives in tests/trap_ladder_test.cpp). tau_display ~ 8 au as the atom.
+    if (shell->has_arg("--selftest-trapdecay")) {
+        shell->sched().after(2000, [shell] {
+            shell->press('5');  // 1p_z: N = 1, one rung above ground
+            shell->sched().after(1000, [shell] {
+                const long long baseline = shell->director().photon_count();
+                shell->press('D');  // arm: the window starts now
+                shell->sched().after(30000, [shell, baseline] {
+                    const long long fresh =
+                        shell->director().photon_count() - baseline;
+                    std::fprintf(stderr,
+                                 "selftest-trapdecay: photons = %lld  [%s]\n",
+                                 fresh, fresh >= 1 ? "PASS" : "FAIL");
+                    shell->request_exit(fresh >= 1 ? 0 : 1);
+                });
             });
         });
     }
