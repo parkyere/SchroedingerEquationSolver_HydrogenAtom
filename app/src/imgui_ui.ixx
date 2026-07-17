@@ -98,7 +98,7 @@ void draw_scene_picker(ShellT& shell) {
     ImGui::SetNextItemWidth(200.0f);
     if (ImGui::Combo("Scene", &cur,
                      "Hydrogen atom\0Harmonic trap\0Tunneling barrier\0"
-                     "1D harmonic ladder\0"
+                     "1D harmonic oscillator\0"
                      "1D tunneling barrier\0")) {
         shell.request_scene(cur);
     }

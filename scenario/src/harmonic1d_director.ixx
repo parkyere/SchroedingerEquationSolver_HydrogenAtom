@@ -43,7 +43,9 @@ constexpr int kHo1dPoints = 256;
 constexpr double kHo1dDt = 0.04;
 constexpr double kHo1dRScale = 18.0;  // radius = 18 |psi|^2 (~5 Bohr at n=0)
 constexpr double kHo1dEScale = 0.8;   // V display: Ha -> Bohr height
-constexpr double kHo1dYClamp = 10.0;  // parabola leaves the frame at +-10
+// No display clamp: a clamped parabola reads as a FLAT-TOPPED (finite)
+// well -- wrong physics on screen. The red curve honestly leaves the frame.
+constexpr double kHo1dYClamp = 1e30;
 // Var(H) below this reads as an eigenstate: grid eigenstates sit at
 // ~1e-13, the closest superposition (adjacent levels, tiny weight eps has
 // Var ~ eps^2 w^2) crosses it only below display relevance.
@@ -159,7 +161,7 @@ public:
     double default_camera_distance() const override { return 55.0; }
 
 protected:
-    const char* scene_name() const override { return "1D harmonic ladder"; }
+    const char* scene_name() const override { return "1D harmonic oscillator"; }
 
     std::string title_suffix() override {
         const double e = ses::mean_energy(psi_, potential_);
