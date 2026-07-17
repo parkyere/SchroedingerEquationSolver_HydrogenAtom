@@ -118,29 +118,34 @@ inline Field1D ho_eigenstate(const Grid1D& g, double omega, int n) {
     return cur;
 }
 
-// The largest Fock level the FFT ladder reaches cleanly on a given grid.
-// Each raise amplifies the k_max round-off floor by g/sqrt(n+1) with
-// g = k_max/sqrt(2 omega) (the derivative term's top-of-band gain), so the
-// accumulated noise amplitude after N raises is ~ eps0 g^N / sqrt(N!).
-// The cap is the last N keeping that below a display-invisible bound
-// (norm^2 error <~ 1e-8). eps0 ~ 3e-16 is the measured effective FFT
-// round-off floor per apply (see tests/ladder_test.cpp for the calibration
-// history: 1024 points, g ~ 114, lost the chain at n = 8 exactly as this
-// model predicts).
-inline int ladder_cap(double omega, double k_max) noexcept {
-    const double gain = k_max / std::sqrt(2.0 * omega);
-    const double eps0 = 3e-16;   // effective per-apply round-off floor
-    const double bound = 1e-4;   // noise amplitude ceiling (norm^2 ~ 1e-8)
-    double amp = eps0;
-    int n = 0;
-    while (n < 64) {
-        amp *= gain / std::sqrt(n + 1.0);
-        if (amp > bound) {
-            break;
+// The largest Fock level the FFT ladder reaches cleanly on a given grid --
+// MEASURED, not modeled. a-dag carries two competing round-off gains: the
+// derivative term k_max/sqrt(2w) (worse for a soft, wide well) and the x
+// term x_max*sqrt(w/2) (worse for a stiff well whose tail round-off is
+// leveraged by the large |x| box edge), plus a boundary/periodicity effect
+// when a wide state does not fit the box. The net clean cap is non-monotone
+// (it peaks near w = k_max/x_max) and no simple closed form captures all
+// three mechanisms -- so we probe it directly: raise from the ground and
+// return the last level still matching the direct Hermite oracle to within
+// `defect_tol` (fidelity defect ~ (amplitude noise)^2; 1e-6 ~ 0.1% amplitude,
+// below display relevance). ~cap FFTs, run only when omega changes.
+inline int ladder_cap(const Grid1D& g, double omega, double defect_tol = 1e-6) {
+    Field1D psi = ho_eigenstate(g, omega, 0);
+    int cap = 0;
+    for (int n = 1; n <= 64; ++n) {
+        ladder_raise(psi, omega);
+        const Field1D oracle = ho_eigenstate(g, omega, n);
+        std::complex<double> ov{};
+        for (int i = 0; i < g.n; ++i) {
+            ov += std::conj(psi[i]) * oracle[i];
         }
-        ++n;
+        ov *= g.spacing();  // grid-weighted overlap (both normalized)
+        if (1.0 - std::norm(ov) > defect_tol) {
+            break;  // ladder diverged from the clean eigenstate here
+        }
+        cap = n;
     }
-    return n;
+    return cap;
 }
 
 // a: psi <- a psi / ||a psi|| unless annihilated (||a psi||^2 < vanish_eps,

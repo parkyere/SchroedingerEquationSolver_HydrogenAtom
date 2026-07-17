@@ -2,7 +2,6 @@ module;
 #include <algorithm>
 #include <cmath>
 #include <complex>
-#include <numbers>
 #include <random>
 #include <string>
 export module ses.scenario.harmonic1d_director;
@@ -56,7 +55,7 @@ public:
                              kHo1dOmega),
                          kHo1dDt, kHo1dRScale, kHo1dEScale, kHo1dYClamp),
           rng_(20260718u) {
-        cap_ = ses::ladder_cap(omega_, k_max());
+        cap_ = ses::ladder_cap(grid1d_, omega_);
         set_state(ground());
     }
 
@@ -100,10 +99,10 @@ public:
     void set_omega(double w) override {
         omega_ = std::clamp(w, kHo1dOmegaMin, kHo1dOmegaMax);
         // Sudden quench: swap the well under the LIVE psi (kept), retarget
-        // reset at the new ground, re-derive the spectral-band cap.
+        // reset at the new ground, re-measure the clean ladder cap.
         set_potential(ses::harmonic_potential(grid1d_, omega_));
         set_reset_target(ground());
-        cap_ = ses::ladder_cap(omega_, k_max());
+        cap_ = ses::ladder_cap(grid1d_, omega_);
         note_ = "quench: psi kept";
         classify();
     }
@@ -184,8 +183,6 @@ protected:
     }
 
 private:
-    double k_max() const { return std::numbers::pi / grid1d_.spacing(); }
-
     ses::Field1D ground() const {
         // sigma = 1/sqrt(2 omega): the exact HO ground state.
         return ses::gaussian_wavepacket(grid1d_, 0.0,
