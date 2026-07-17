@@ -4,6 +4,7 @@ module;
 #include <complex>
 #include <random>
 #include <string>
+#include <utility>
 export module ses.scenario.harmonic1d_director;
 export import ses.scenario.line1d_director;
 import ses.ladder;
@@ -36,10 +37,17 @@ constexpr double kHo1dOmegaMin = 0.05;
 // (~13 at w = 4): cranking the well past the peak now visibly LOWERS the
 // ladder cap, the payoff of the empirical ladder_cap probe.
 constexpr double kHo1dOmegaMax = 4.0;
-constexpr double kHo1dBox = 20.0;     // Bohr half-extent
-// 256 points: k_max ~ 20 vs the low-n band -- see tests/ladder_test.cpp
-// (grid Nyquist matched to the physics band keeps the chain clean).
-constexpr int kHo1dPoints = 256;
+// A 1D line is ~4 decades cheaper than the 256^3 volumes, so the box is
+// widened to raise the BOX-LIMITED level ceiling (turning point x_n =
+// sqrt((2n+1)/w) must fit): +-60 holds n ~ 450 at w = 0.25 vs ~42 in the
+// old +-20 box. 2048 points keep h fine; the raw spectral chain hates the
+// larger k_max, but eigenstates rung via the stable oracle path and
+// superpositions via the Fock-basis path -- neither cares about k_max.
+constexpr double kHo1dBox = 60.0;     // Bohr half-extent
+constexpr int kHo1dPoints = 2048;
+// Fock band for superposition laddering (ladder_fock): plenty above any
+// state the scene builds, capped by representability at soft omega.
+constexpr int kHo1dFockTop = 63;
 constexpr double kHo1dDt = 0.04;
 constexpr double kHo1dRScale = 18.0;  // radius = 18 |psi|^2 (~5 Bohr at n=0)
 constexpr double kHo1dEScale = 0.8;   // V display: Ha -> Bohr height
@@ -72,43 +80,53 @@ public:
     double level_energy() const override {
         return ses::mean_energy(psi_, potential_);
     }
-    // Two regimes, two caps: a classified EIGENSTATE rungs via the stable
-    // oracle-rebuilt path (noise resets every rung -> the grid's
-    // representability ceiling applies); a superposition must take the raw
-    // spectral operator (no single oracle to rebuild from), so the raw
-    // chain's noise cap applies -- superpositions live at low n anyway.
+    // Two regimes, two noise-free paths: a classified EIGENSTATE rungs via
+    // the stable oracle-rebuilt path (representability ceiling applies); a
+    // superposition rungs in the truncated Fock basis (ladder_fock: exact
+    // coefficient action, capped by the tracked band). The raw spectral
+    // chain -- whose noise cap collapses at this grid's k_max -- remains
+    // only as the honest fallback for a state outside the Fock band.
     int max_level() const override {
-        return level_ >= 0 ? cap_level_ : cap_raw_;
+        return level_ >= 0 ? cap_level_ : fock_top();
     }
     double omega() const override { return omega_; }
 
     bool ladder(bool up) override {
         const bool eigen = level_ >= 0;
         if (up) {
-            const int cap = eigen ? cap_level_ : cap_raw_;
+            const int cap = eigen ? cap_level_ : fock_top();
             const double mean_n =
                 ses::mean_energy(psi_, potential_) / omega_ - 0.5;
             if (mean_n >= static_cast<double>(cap)) {
                 note_ = strf("n = %d cap (%s)", cap,
-                             eigen ? "grid band" : "raw-chain noise");
+                             eigen ? "grid band" : "fock band");
                 title_dirty_ = true;
                 return false;
             }
-            if (eigen) {
-                ses::ladder_rung_stable(psi_, omega_, level_, true);
-            } else {
-                ses::ladder_raise(psi_, omega_);
-            }
+        }
+        double norm2 = 0.0;
+        if (eigen) {
+            norm2 = ses::ladder_rung_stable(psi_, omega_, level_, up);
         } else {
-            // ||a psi||^2 = <N>; ~0 means annihilation (psi untouched).
-            const double norm2 =
-                eigen ? ses::ladder_rung_stable(psi_, omega_, level_, false)
-                      : ses::ladder_lower(psi_, omega_);
-            if (norm2 < 1e-6) {
-                note_ = "a|0> = 0: refused";
-                title_dirty_ = true;
-                return false;
+            double residual = 0.0;
+            ses::Field1D trial = psi_;
+            norm2 = ses::ladder_fock(trial, omega_, up, fock_top(), &residual);
+            if (residual < 1e-6) {
+                if (norm2 >= 1e-6) {
+                    psi_ = std::move(trial);
+                }
+            } else {
+                // Outside the Fock band: the raw operator is the honest
+                // (noise-amplifying) fallback.
+                norm2 = up ? ses::ladder_raise(psi_, omega_)
+                           : ses::ladder_lower(psi_, omega_);
             }
+        }
+        if (norm2 < 1e-6) {
+            // ||a psi||^2 = <N> ~ 0: annihilation (psi untouched).
+            note_ = "a|0> = 0: refused";
+            title_dirty_ = true;
+            return false;
         }
         note_.clear();
         classify();
@@ -135,7 +153,7 @@ public:
         ses::Field1D acc{grid1d_};
         ses::Field1D basis = ground();
         std::normal_distribution<double> gauss;
-        const int top = std::min(kHo1dRandomTop, cap_raw_);
+        const int top = std::min(kHo1dRandomTop, fock_top());
         for (int n = 0; n <= top; ++n) {
             if (n > 0) {
                 ses::ladder_raise(basis, omega_);
@@ -223,12 +241,13 @@ private:
 
     void remeasure_caps() {
         cap_level_ = ses::ho_level_cap(grid1d_, omega_);
-        cap_raw_ = ses::ladder_cap(grid1d_, omega_);
     }
+    // Fock band top for superposition laddering: below the representability
+    // ceiling (an up-rung targets fock_top() + 1).
+    int fock_top() const { return std::min(kHo1dFockTop, cap_level_ - 1); }
 
     double omega_ = kHo1dOmega;
     int cap_level_ = 0;  // stable rungs: grid representability ceiling
-    int cap_raw_ = 0;    // raw spectral chain (superpositions): noise cap
     int level_ = 0;
     std::string note_;
     std::mt19937 rng_;

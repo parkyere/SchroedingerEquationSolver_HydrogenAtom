@@ -589,26 +589,31 @@ void register_verification_arcs(ShellT* shell) {
                 }
                 trip_ok = trip_ok && ln->level() == 0 &&
                           std::abs(ln->level_energy() - 0.25) < 1e-3;
-                // Measured cap peaks near w ~ 1 then FALLS: cranking the
-                // well past the peak lowers the clean ladder cap (the whole
-                // point of the empirical probe + widened slider). The
-                // quenched state is a superposition, so these report the
-                // raw-chain caps.
+                // The quenched state is a superposition: it must ladder
+                // through the truncated Fock basis (exact coefficient
+                // action -- the raw spectral chain is useless at this
+                // grid's k_max) with the band as its cap.
                 ln->set_omega(1.0);
-                const int cap_peak = ln->max_level();
-                ln->set_omega(4.0);
-                const int cap_high = ln->max_level();
-                const bool peak_ok = cap_peak >= 14 && cap_peak > cap_high;
+                const int cap_mix = ln->max_level();
+                const bool fock_ok =
+                    ln->level() == -1 && cap_mix >= 50 && ln->ladder(true);
+                // Back on an eigenstate the cap is the representability
+                // ceiling of the widened box -- far above the old raw
+                // chain's teens.
+                shell->press('2');
+                const int cap_eigen = ln->max_level();
+                const bool ceiling_ok = ln->level() == 0 && cap_eigen >= 100;
                 const bool pass = up_ok && e_ok && down_ok && refuse_ok &&
-                                  mix_ok && quench_ok && trip_ok && peak_ok;
+                                  mix_ok && quench_ok && trip_ok && fock_ok &&
+                                  ceiling_ok;
                 std::fprintf(stderr,
                              "selftest-ladder1d: up %d (E2 = %.4f Ha, ok %d), "
                              "down %d, ground-refuse %d, superposition %d, "
-                             "quench %d, stable-trip20 %d, cap-peak %d "
-                             "(w=1 cap %d > w=4 cap %d)  [%s]\n",
+                             "quench %d, stable-trip20 %d, fock-mix %d "
+                             "(band %d), eigen-ceiling %d (cap %d)  [%s]\n",
                              up_ok, e2, e_ok, down_ok, refuse_ok, mix_ok,
-                             quench_ok, trip_ok, peak_ok, cap_peak, cap_high,
-                             pass ? "PASS" : "FAIL");
+                             quench_ok, trip_ok, fock_ok, cap_mix, ceiling_ok,
+                             cap_eigen, pass ? "PASS" : "FAIL");
                 shell->request_exit(pass ? 0 : 1);
             });
         });

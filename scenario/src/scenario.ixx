@@ -88,7 +88,7 @@ struct Ladder1dApi {
     // Largest ladder level reachable cleanly from the CURRENT state: an
     // eigenstate rungs via the stable oracle-rebuilt path (grid
     // representability ceiling, ses.ladder ho_level_cap); a superposition
-    // takes the raw spectral chain (noise cap, ses.ladder ladder_cap).
+    // rungs in the truncated Fock basis (ses.ladder ladder_fock band).
     virtual int max_level() const = 0;
     // Prepare a random coherent superposition over the low Fock levels (a
     // PURE state -- a density-matrix mixture is not representable in a
