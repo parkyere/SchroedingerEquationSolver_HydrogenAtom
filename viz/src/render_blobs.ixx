@@ -15,6 +15,8 @@ module;
 #include <shadow_spv.h>
 #include <flow_vert_spv.h>
 #include <flow_frag_spv.h>
+#include <overlay_vert_spv.h>
+#include <overlay_frag_spv.h>
 export module ses.vk.render_blobs;
 export import ses.vk.render;
 
@@ -59,6 +61,10 @@ inline RenderKernels render_blobs() {
     r.flow_vert_size = k_flow_vert_spv_size;
     r.flow_frag = k_flow_frag_spv;
     r.flow_frag_size = k_flow_frag_spv_size;
+    r.overlay_vert = k_overlay_vert_spv;
+    r.overlay_vert_size = k_overlay_vert_spv_size;
+    r.overlay_frag = k_overlay_frag_spv;
+    r.overlay_frag_size = k_overlay_frag_spv_size;
     return r;
 }
 

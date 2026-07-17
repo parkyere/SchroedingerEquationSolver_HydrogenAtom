@@ -15,7 +15,7 @@ foreach(_k IN ITEMS accum bloom_down bloom_up compose particles
 endforeach()
 foreach(_k IN ITEMS mesh.vert mesh.frag volume.vert volume.frag
         slice.vert slice.frag
-        flow.vert flow.frag blit.vert blit.frag)
+        flow.vert flow.frag overlay.vert overlay.frag blit.vert blit.frag)
     string(REPLACE "." "_" _x "${_k}")
     if(_k MATCHES "\\.vert$")
         set(_stage vertex)

@@ -92,10 +92,27 @@ struct RenderKernels {
     std::size_t flow_vert_size = 0;
     const unsigned char* flow_frag = nullptr;
     std::size_t flow_frag_size = 0;
+    const unsigned char* overlay_vert = nullptr;  // 1D-scene polylines
+    std::size_t overlay_vert_size = 0;
+    const unsigned char* overlay_frag = nullptr;
+    std::size_t overlay_frag_size = 0;
 };
 
 class SceneRenderer {
 public:
+    // A 1D-scene overlay polyline: packed (x, y, z) float triples drawn as
+    // one LINE_STRIP in world space with a constant color (the phasor curve
+    // is white, the potential profile red -- no phase hue in the 1D scenes).
+    struct OverlayCurve {
+        const float* xyz = nullptr;  // 3 * count floats, valid through render()
+        int count = 0;               // vertices
+        float r = 1.0f;
+        float g = 1.0f;
+        float b = 1.0f;
+        float a = 1.0f;              // coverage; rgb premultiplied at draw
+    };
+    static constexpr int kMaxOverlayCurves = 4;
+
     // Per-frame inputs computed by the shell. Non-null mesh/volume_staging
     // pointers request a (re)upload before the pass records.
     struct FrameInput {
@@ -137,6 +154,9 @@ public:
         int slice_axis = 2;
         float slice_offset = 0.0f;
         int slice_map = 0;      // 0 density, 1 Re, 2 phase
+        // 1D-scene overlay polylines; count 0 = none (the 3D scenes).
+        OverlayCurve overlay[kMaxOverlayCurves]{};
+        int overlay_count = 0;
     };
 
     SceneRenderer() = default;
@@ -154,7 +174,8 @@ public:
         if (!create_samplers() || !create_ubos() ||
             !create_pipelines(blobs) || !create_static_geometry() ||
             !create_phase_lut() || !create_post_kernels(blobs) ||
-            !create_flow(blobs) || !create_volume_aux(blobs)) {
+            !create_flow(blobs) || !create_overlay(blobs) ||
+            !create_volume_aux(blobs)) {
             return false;
         }
         scene_set_ = arena_.allocate(*ctx_, mesh_dsl_holder_.set);
@@ -234,6 +255,9 @@ public:
         }
         if (in.cloud) {
             point_volume_binding(in.psi_volume);
+        }
+        if (in.overlay_count > 0 && !upload_overlay(in)) {
+            return false;
         }
 
         OneShot shot;
@@ -424,6 +448,31 @@ public:
             }
         }
 
+        // 1D-scene overlay polylines (phasor curve + potential profile) on
+        // top of either view: one LINE_STRIP per curve out of the shared
+        // packed SSBO, constant premultiplied color via push constant.
+        if (in.overlay_count > 0 && overlay_pipe_ != VK_NULL_HANDLE) {
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              overlay_pipe_);
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    overlay_pl_, 0, 1, &overlay_set_, 0,
+                                    nullptr);
+            const int nc = std::min(in.overlay_count, kMaxOverlayCurves);
+            for (int c = 0; c < nc; ++c) {
+                const OverlayCurve& cv = in.overlay[c];
+                if (cv.xyz == nullptr || cv.count < 2) {
+                    continue;
+                }
+                const float col[4] = {cv.r * cv.a, cv.g * cv.a, cv.b * cv.a,
+                                      cv.a};
+                vkCmdPushConstants(cb, overlay_pl_,
+                                   VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(col),
+                                   col);
+                vkCmdDraw(cb, static_cast<std::uint32_t>(cv.count), 1,
+                          static_cast<std::uint32_t>(overlay_first_[c]), 0);
+            }
+        }
+
         // XYZ gizmo in the bottom-left corner, over both views. The corner
         // viewport maps to depth range [0, 0.01]: always in front of the
         // scene, self-occlusion within the gizmo intact. Coordinates convert
@@ -504,6 +553,10 @@ public:
         particles_k_.destroy(*ctx_);
         ctx_->destroy_buffer(&flow_ubo_);
         ctx_->destroy_buffer(&flow_buf_);
+        destroy_pipe(overlay_pipe_);
+        destroy_layout(overlay_pl_);
+        overlay_dsl_holder_.destroy(*ctx_);
+        ctx_->destroy_buffer(&overlay_buf_);
         compose_k_.destroy(*ctx_);
         up_k_.destroy(*ctx_);
         down_k_.destroy(*ctx_);
@@ -557,6 +610,7 @@ public:
         staging_bytes_ = 0;
         mesh_vbuf_bytes_ = 0;
         mesh_vertex_count_ = 0;
+        overlay_buf_bytes_ = 0;
         volume_bound_view_ = VK_NULL_HANDLE;
         flow_vel_bound_view_ = VK_NULL_HANDLE;
         aux_valid_ = false;
@@ -583,6 +637,7 @@ public:
         shadow_set_ = VK_NULL_HANDLE;
         particles_set_ = VK_NULL_HANDLE;
         flow_set_ = VK_NULL_HANDLE;
+        overlay_set_ = VK_NULL_HANDLE;
         ctx_ = nullptr;
     }
 
@@ -1393,6 +1448,113 @@ private:
         return true;
     }
 
+    // 1D-scene overlay polylines: a LINE_STRIP pipeline vertex-pulling one
+    // packed host-visible (x,y,z) SSBO; constant color per draw via push
+    // constant. The mvp comes from the shared scene MeshUbo (the shader
+    // declares the layout-compatible prefix).
+    bool create_overlay(const RenderKernels& blobs) {
+        const auto sbuf = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        const auto ubo = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        {
+            const VkDescriptorSetLayoutBinding bs[2] = {
+                {0, sbuf, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr},
+                {1, ubo, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr},
+            };
+            VkDescriptorSetLayoutCreateInfo ci{};
+            ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+            ci.bindingCount = 2;
+            ci.pBindings = bs;
+            if (vkCreateDescriptorSetLayout(ctx_->device, &ci, nullptr,
+                                            &overlay_dsl_holder_.set) !=
+                VK_SUCCESS) {
+                return false;
+            }
+        }
+        const VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT, 0,
+                                      4 * sizeof(float)};
+        VkPipelineLayoutCreateInfo plci{};
+        plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        plci.setLayoutCount = 1;
+        plci.pSetLayouts = &overlay_dsl_holder_.set;
+        plci.pushConstantRangeCount = 1;
+        plci.pPushConstantRanges = &pcr;
+        if (vkCreatePipelineLayout(ctx_->device, &plci, nullptr,
+                                   &overlay_pl_) != VK_SUCCESS) {
+            return false;
+        }
+        overlay_pipe_ = build_pipeline(
+            blobs.overlay_vert, blobs.overlay_vert_size, blobs.overlay_frag,
+            blobs.overlay_frag_size, overlay_pl_, nullptr, nullptr, 0,
+            /*depth=*/false, VK_CULL_MODE_NONE, kBlendPremultiplied,
+            VK_PRIMITIVE_TOPOLOGY_LINE_STRIP);
+        if (overlay_pipe_ == VK_NULL_HANDLE) {
+            return false;
+        }
+        // Seed a minimal SSBO so the set is never invalid before the first
+        // real upload grows it.
+        const float zeros[12] = {};
+        if (!write_host(&overlay_buf_, zeros, sizeof(zeros),
+                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)) {
+            return false;
+        }
+        overlay_buf_bytes_ = sizeof(zeros);
+        overlay_set_ = arena_.allocate(*ctx_, overlay_dsl_holder_.set);
+        if (overlay_set_ == VK_NULL_HANDLE) {
+            return false;
+        }
+        arena_.write_buffer(*ctx_, overlay_set_, 0, sbuf, overlay_buf_.buf);
+        arena_.write_buffer(*ctx_, overlay_set_, 1, ubo, scene_ubuf_.buf,
+                            sizeof(MeshUbo));
+        return true;
+    }
+
+    // Pack the frame's overlay curves back to back into the host-visible
+    // SSBO (grow-only, descriptor re-pointed on regrow) and remember each
+    // curve's first vertex for its draw's firstVertex.
+    bool upload_overlay(const FrameInput& in) {
+        const int nc = std::min(in.overlay_count, kMaxOverlayCurves);
+        std::size_t total = 0;
+        for (int c = 0; c < nc; ++c) {
+            if (in.overlay[c].xyz != nullptr && in.overlay[c].count > 0) {
+                total += static_cast<std::size_t>(in.overlay[c].count);
+            }
+        }
+        if (total == 0) {
+            return true;
+        }
+        const VkDeviceSize bytes = total * 3 * sizeof(float);
+        if (bytes > overlay_buf_bytes_) {
+            vkDeviceWaitIdle(ctx_->device);
+            ctx_->destroy_buffer(&overlay_buf_);
+            if (!ctx_->create_host_buffer(
+                    bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                    &overlay_buf_)) {
+                overlay_buf_bytes_ = 0;
+                return false;
+            }
+            overlay_buf_bytes_ = bytes;
+            arena_.write_buffer(*ctx_, overlay_set_, 0,
+                                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                overlay_buf_.buf);
+        }
+        float* dst = static_cast<float*>(overlay_buf_.mapped);
+        int first = 0;
+        for (int c = 0; c < nc; ++c) {
+            overlay_first_[c] = first;
+            const OverlayCurve& cv = in.overlay[c];
+            if (cv.xyz == nullptr || cv.count <= 0) {
+                continue;
+            }
+            std::memcpy(dst + 3 * first, cv.xyz,
+                        static_cast<std::size_t>(cv.count) * 3 *
+                            sizeof(float));
+            first += cv.count;
+        }
+        vmaFlushAllocation(ctx_->allocator, overlay_buf_.alloc, 0,
+                           VK_WHOLE_SIZE);
+        return true;
+    }
+
     // Record the post chain into the frame's command buffer: accumulation
     // (only while accumulating -- interactive frames feed the bloom and the
     // composite from the scene color directly), the dual-filter bloom
@@ -1979,6 +2141,15 @@ private:
     Buffer flow_ubo_{};
     VkDescriptorSet particles_set_ = VK_NULL_HANDLE;
     VkDescriptorSet flow_set_ = VK_NULL_HANDLE;
+
+    // 1D-scene overlay polylines (phasor curve + potential profile).
+    DslHolder overlay_dsl_holder_;
+    VkPipelineLayout overlay_pl_ = VK_NULL_HANDLE;
+    VkPipeline overlay_pipe_ = VK_NULL_HANDLE;
+    Buffer overlay_buf_{};
+    VkDeviceSize overlay_buf_bytes_ = 0;
+    VkDescriptorSet overlay_set_ = VK_NULL_HANDLE;
+    int overlay_first_[kMaxOverlayCurves] = {};
 
     DslHolder mesh_dsl_holder_;
     DslHolder vol_dsl_holder_;
