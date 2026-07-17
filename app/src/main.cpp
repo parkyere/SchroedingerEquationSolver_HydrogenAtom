@@ -55,7 +55,9 @@ import ses.scenario.tunneling_director;
 
 import app.scheduler;
 import ses.scenario.harmonic_director;
+import ses.scenario.harmonic1d_director;
 import ses.scenario.hydrogen_director;
+import ses.scenario.tunneling1d_director;
 import ses.scenario.selftest_arcs;
 import ses.vk.render_blobs;
 import app.imgui_ui;
@@ -72,15 +74,23 @@ namespace {
 
 constexpr std::uint64_t kTickMs = 16;
 
-// The three demo scenes, panel-selectable at runtime (and picked at boot by
+// The demo scenes, panel-selectable at runtime (and picked at boot by
 // --scene=). Index order is the panel combo's order.
-constexpr const char* kSceneNames[] = {"hydrogen", "harmonic", "tunnel"};
+constexpr const char* kSceneNames[] = {"hydrogen", "harmonic", "tunnel",
+                                       "harmonic1d", "tunnel1d"};
+constexpr int kSceneCount = 5;
 std::unique_ptr<ses_shell::ScenarioDirector> make_scene_director(int idx) {
     if (idx == 1) {
         return std::make_unique<ses_shell::HarmonicDirector>();
     }
     if (idx == 2) {
         return std::make_unique<ses_shell::TunnelingDirector>();
+    }
+    if (idx == 3) {
+        return std::make_unique<ses_shell::Harmonic1DDirector>();
+    }
+    if (idx == 4) {
+        return std::make_unique<ses_shell::Tunneling1DDirector>();
     }
     return std::make_unique<ses_shell::HydrogenDirector>();
 }
@@ -299,6 +309,11 @@ public:
             ImGui::NewFrame();
             if (auto* hy = director_->hydrogen()) {
                 app::draw_hydrogen_panel(*this, ui_, *hy);
+            } else if (director_->ladder1d() != nullptr) {
+                app::draw_generic_panel(*this, ui_,
+                                        {{"Ladder up (U)", 'U'},
+                                         {"Ladder down (D)", 'D'},
+                                         {"Ground state (2)", '2'}});
             } else if (director_->tunnel() != nullptr) {
                 app::draw_generic_panel(*this, ui_, {});
             } else {
@@ -379,7 +394,7 @@ public:
     // ---- runtime scene switch (panel combo / selftest arc) ------------------
     int scene_index() const { return scene_index_; }
     void request_scene(int idx) {
-        if (idx >= 0 && idx < 3) {
+        if (idx >= 0 && idx < kSceneCount) {
             pending_scene_ = idx;
         }
     }
@@ -390,6 +405,7 @@ public:
     ses_shell::ScenarioDirector& director() { return *director_; }
     ses_shell::HydrogenApi* hy() { return director_->hydrogen(); }
     ses_shell::TunnelApi* tn() { return director_->tunnel(); }
+    ses_shell::Ladder1dApi* ln() { return director_->ladder1d(); }
     bool solving() const { return director_->solving(); }
     bool manifold_ready() const { return director_->scene_ready(); }
     void debug_set_camera_distance(double d) {
@@ -652,6 +668,15 @@ private:
             volume_written || absorbance_ != acc_prev_.absorbance;
         acc_prev_ = {azimuth_, elevation_, distance_, in.peak, absorbance_,
                      in.flash, in.cloud, plane_tag};
+        // 1D-scene overlay polylines (phasor curve + potential profile);
+        // the 3D scenes report 0 and skip this entirely.
+        const int nov = std::min(director_->overlay_curve_count(),
+                                 ses_vk::SceneRenderer::kMaxOverlayCurves);
+        for (int c = 0; c < nov; ++c) {
+            const ses_shell::OverlayCurve oc = director_->overlay_curve(c);
+            in.overlay[c] = {oc.xyz, oc.count, oc.r, oc.g, oc.b, oc.a};
+        }
+        in.overlay_count = nov;
         // Scene props: origin marker + visualized barrier slab.
         in.marker = director_->center_marker();
         double barrier_lo = 0.0;
@@ -755,6 +780,12 @@ int main(int argc, char* argv[]) {
     } else if (std::find(args.begin(), args.end(), "--selftest-trapdecay") !=
                args.end()) {
         scene = "harmonic";  // the trap ladder arc drives its own scene
+    } else if (std::find(args.begin(), args.end(), "--selftest-ladder1d") !=
+               args.end()) {
+        scene = "harmonic1d";  // the 1D ladder arc drives its own scene
+    } else if (std::find(args.begin(), args.end(), "--selftest-tunnel1d") !=
+               args.end()) {
+        scene = "tunnel1d";  // the 1D tunneling arc drives its own scene
     } else {
         // Every other selftest arc drives the hydrogen scene (it reaches the
         // director through hydrogen()); force it so a mismatched --scene
@@ -772,6 +803,10 @@ int main(int argc, char* argv[]) {
         scene_index = 2;
     } else if (scene == "harmonic") {
         scene_index = 1;
+    } else if (scene == "harmonic1d") {
+        scene_index = 3;
+    } else if (scene == "tunnel1d") {
+        scene_index = 4;
     } else if (scene != "hydrogen") {
         std::fprintf(stderr, "scene: unknown '%s' -- using hydrogen\n",
                      scene.c_str());

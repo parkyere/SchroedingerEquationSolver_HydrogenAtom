@@ -502,6 +502,68 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
+    // 1D ladder arc (main forces --scene=harmonic1d): the Fock chain through
+    // the Ladder1dApi seam. Two raises must land n = 2 with <H> = 2.5 w; two
+    // lowers return to ground; the third lower must be REFUSED by the
+    // operator itself (a|0> = 0) with the level untouched. Condition-polled
+    // (the CPU scene ticks immediately, but the poll keeps the boot-order
+    // contract explicit).
+    if (shell->has_arg("--selftest-ladder1d")) {
+        shell->sched().after(1000, [shell] {
+            selftest_scene_wait_running(shell, "harmonic1d", 0, [shell](
+                                                                    bool runs) {
+                auto* ln = shell->ln();
+                if (!runs || ln == nullptr) {
+                    std::fprintf(stderr, "selftest-ladder1d: scene not "
+                                         "running or no api  [FAIL]\n");
+                    shell->request_exit(1);
+                    return;
+                }
+                const bool up_ok = ln->ladder(true) && ln->ladder(true) &&
+                                   ln->level() == 2;
+                const double e2 = ln->level_energy();
+                const bool e_ok = std::abs(e2 - 2.5 * 0.25) < 1e-3;
+                const bool down_ok = ln->ladder(false) && ln->ladder(false) &&
+                                     ln->level() == 0;
+                const bool refuse_ok = !ln->ladder(false) && ln->level() == 0;
+                const bool pass = up_ok && e_ok && down_ok && refuse_ok;
+                std::fprintf(stderr,
+                             "selftest-ladder1d: up %d (E2 = %.4f Ha, ok %d), "
+                             "down %d, ground-refuse %d  [%s]\n",
+                             up_ok, e2, e_ok, down_ok, refuse_ok,
+                             pass ? "PASS" : "FAIL");
+                shell->request_exit(pass ? 0 : 1);
+            });
+        });
+    }
+
+    // 1D tunneling arc (main forces --scene=tunnel1d): same physics as the
+    // 3D arc on its textbook axis. CPU steps are cheap, so time_scale 8
+    // (~40 au/s) settles the transmitted lobe within seconds; assert a
+    // classically-forbidden T in a sane band.
+    if (shell->has_arg("--selftest-tunnel1d")) {
+        shell->sched().after(1000, [shell] {
+            selftest_scene_wait_running(shell, "tunnel1d", 0, [shell](
+                                                                  bool runs) {
+                if (!runs || shell->tn() == nullptr) {
+                    std::fprintf(stderr, "selftest-tunnel1d: scene not "
+                                         "running or no api  [FAIL]\n");
+                    shell->request_exit(1);
+                    return;
+                }
+                shell->set_time_scale(8);
+                shell->sched().after(20000, [shell] {
+                    const double t = shell->tn()->transmitted_max();
+                    const bool pass = t > 1e-3 && t < 0.5;
+                    std::fprintf(stderr,
+                                 "selftest-tunnel1d: max T = %.4f  [%s]\n", t,
+                                 pass ? "PASS" : "FAIL");
+                    shell->request_exit(pass ? 0 : 1);
+                });
+            });
+        });
+    }
+
     // Tunneling arc (main forces --scene=tunnel): the packet launched at
     // x = -30 with v = 0.5 reaches the slab at ~60 au; the transmitted lobe
     // is fully past it well before ~150 au (~2.5 min at ~1 au/s). Assert a
