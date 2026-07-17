@@ -2,6 +2,7 @@ module;
 #include <cmath>
 #include <complex>
 #include <cstddef>
+#include <utility>
 #include <vector>
 export module ses.ladder;
 export import ses.field;
@@ -81,6 +82,40 @@ inline double ladder_raise(Field1D& psi, double omega) {
     const double norm2 = ladder_detail::norm_sq_h(out, psi.grid().spacing());
     ladder_detail::store_normalized(psi, out, norm2);
     return norm2;
+}
+
+// The exact HO eigenstate |n> built DIRECTLY from the normalized
+// Hermite-Gauss recurrence in x-space (atomic units, m = hbar = 1):
+//     psi_0 = (omega/pi)^{1/4} exp(-omega x^2 / 2)
+//     psi_1 = sqrt(2 omega) x psi_0
+//     psi_{k} = sqrt(2 omega / k) x psi_{k-1} - sqrt((k-1)/k) psi_{k-2}
+// The NORMALIZED recurrence keeps every intermediate O(1) (no 2^n n!
+// overflow) and -- crucially -- uses NO derivative, so unlike the ladder
+// chain it suffers no spectral round-off amplification: it is exact to
+// round-off for every level the grid can represent. A final discrete
+// normalize absorbs the sampling error. This is the ground-truth oracle
+// the ladder is measured against, and lets the scene jump to any level.
+inline Field1D ho_eigenstate(const Grid1D& g, double omega, int n) {
+    const double pi = 3.14159265358979323846;
+    Field1D prev{g};   // psi_{k-2}
+    Field1D cur{g};    // psi_{k-1}
+    const double a0 = std::pow(omega / pi, 0.25);
+    for (int i = 0; i < g.n; ++i) {
+        const double x = g.coord(i);
+        cur[i] = a0 * std::exp(-0.5 * omega * x * x);  // psi_0
+    }
+    for (int k = 1; k <= n; ++k) {
+        const double c1 = std::sqrt(2.0 * omega / k);
+        const double c2 = std::sqrt(static_cast<double>(k - 1) / k);
+        Field1D next{g};
+        for (int i = 0; i < g.n; ++i) {
+            next[i] = c1 * g.coord(i) * cur[i] - c2 * prev[i];
+        }
+        prev = std::move(cur);
+        cur = std::move(next);
+    }
+    normalize(cur);
+    return cur;
 }
 
 // The largest Fock level the FFT ladder reaches cleanly on a given grid.
