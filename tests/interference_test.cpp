@@ -44,6 +44,19 @@ ses::Field1D incident() {
     return ses::gaussian_wavepacket(kGrid, 0.0, 30.0, 0.0);
 }
 
+// Spectrum value AT the bin nearest k_target (for dark-point checks: a
+// windowed max would ride up the fringe flank and read ~10% instead).
+double value_at(const std::vector<double>& spec,
+                const std::vector<double>& axis, double k_target) {
+    std::size_t best = 0;
+    for (std::size_t j = 1; j < axis.size(); ++j) {
+        if (std::abs(axis[j] - k_target) < std::abs(axis[best] - k_target)) {
+            best = j;
+        }
+    }
+    return spec[best];
+}
+
 // Index of the |psi~|^2 peak nearest to wavenumber k_target.
 int peak_near(const std::vector<double>& spec, const std::vector<double>& axis,
               double k_target, double window) {
@@ -128,9 +141,8 @@ TEST(DoubleSlit, YoungFringesUnderTheSingleSlitEnvelope) {
     EXPECT_NEAR(axis[static_cast<std::size_t>(c)], 0.0, 2.0 * bin);
     EXPECT_NEAR(axis[static_cast<std::size_t>(p)], dk, 0.05 * dk + 2.0 * bin);
     EXPECT_NEAR(axis[static_cast<std::size_t>(m)], -dk, 0.05 * dk + 2.0 * bin);
-    // Dark fringe between them: destructive to a few percent.
-    const int dark = peak_near(spec, axis, 0.5 * dk, 0.1 * dk);
-    EXPECT_LT(spec[static_cast<std::size_t>(dark)],
+    // Dark fringe between them: destructive to a few percent AT the null.
+    EXPECT_LT(value_at(spec, axis, 0.5 * dk),
               0.05 * spec[static_cast<std::size_t>(c)]);
     // Single-slit envelope zero at k = 2 pi / w kills the fringe there.
     const double kz = 2.0 * std::numbers::pi / kWidth;
@@ -175,8 +187,7 @@ TEST(DoubleSlit, SolenoidPhaseSlidesFringesButNotTheEnvelope) {
     const double dk = 2.0 * std::numbers::pi / kSep;
     // Phi = pi: the center becomes DARK, the maxima move to +-pi/d.
     const int c0 = peak_near(s0, axis, 0.0, 0.3 * dk);
-    const int cpi = peak_near(spi, axis, 0.0, 0.1 * dk);
-    EXPECT_LT(spi[static_cast<std::size_t>(cpi)],
+    EXPECT_LT(value_at(spi, axis, 0.0),
               0.05 * s0[static_cast<std::size_t>(c0)]);
     const int half = peak_near(spi, axis, 0.5 * dk, 0.3 * dk);
     const double bin = axis[1] - axis[0];
@@ -255,17 +266,19 @@ TEST(AbRing, OneFluxQuantumIsALargeGaugeTransformation) {
     const ses::SplitOperator1D pq{kRing, zero, dt, a + q};
     pq.step(direct, steps);
 
+    // e^{+iqx} (p - A)^2 e^{-iqx} = (p - A - q)^2: gauge IN with e^{-iqx},
+    // evolve under A, gauge OUT with e^{+iqx}.
     ses::Field1D gauged{kRing};
     for (int i = 0; i < kRing.n; ++i) {
         const double x = kRing.coord(i);
-        gauged[i] = std::complex<double>{std::cos(q * x), std::sin(q * x)} *
+        gauged[i] = std::complex<double>{std::cos(q * x), -std::sin(q * x)} *
                     psi0[i];
     }
     const ses::SplitOperator1D pa{kRing, zero, dt, a};
     pa.step(gauged, steps);
     for (int i = 0; i < kRing.n; ++i) {
         const double x = kRing.coord(i);
-        gauged[i] *= std::complex<double>{std::cos(q * x), -std::sin(q * x)};
+        gauged[i] *= std::complex<double>{std::cos(q * x), std::sin(q * x)};
     }
 
     std::complex<double> ov{};
