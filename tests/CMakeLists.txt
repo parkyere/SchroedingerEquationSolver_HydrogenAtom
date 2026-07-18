@@ -64,6 +64,7 @@ add_executable(sesolver_tests
     sampling_test.cpp
     simulation_state_test.cpp
     simulation_test.cpp
+    solvable_wells_test.cpp
     spectral_test.cpp
     sphere_test.cpp
     trap_ladder_test.cpp

@@ -83,6 +83,48 @@ TEST(AbsorbingMask, OneDimensionalRampMatchesTheAxisFormula) {
     }
 }
 
+TEST(DoubleWellPotential, MinimaBarrierAndSymmetryExact) {
+    // V(x) = vb ((x/a)^2 - 1)^2: minima V = 0 at +-a, barrier vb at 0.
+    const ses::Grid1D g{-8.0, 8.0, 16};  // h = 1: coords -8 .. 7
+    const std::vector<double> v = ses::double_well_potential(g, 0.1, 4.0);
+    ASSERT_EQ(v.size(), 16u);
+    EXPECT_EQ(v[8], 0.1);                 // x = 0: the barrier top
+    EXPECT_EQ(v[4], 0.0);                 // x = -4: left minimum
+    EXPECT_EQ(v[12], 0.0);                // x = +4: right minimum
+    EXPECT_EQ(v[0], 0.1 * 9.0);           // x = -8: ((4)-1)^2 = 9
+    EXPECT_EQ(v[6], v[10]);               // symmetry about the origin
+    EXPECT_EQ(v[2], v[14]);
+}
+
+TEST(PoschlTellerPotential, DepthAndSechProfileExact) {
+    // V(x) = -v0 sech^2((x - x0)/a); reflectionless at v0 = l(l+1)/(2 a^2).
+    const ses::Grid1D g{-8.0, 8.0, 16};
+    const std::vector<double> v = ses::poschl_teller_potential(g, 0.375, 2.0);
+    ASSERT_EQ(v.size(), 16u);
+    EXPECT_DOUBLE_EQ(v[8], -0.375);  // x = 0: the well bottom
+    const double c1 = std::cosh(1.0);
+    EXPECT_DOUBLE_EQ(v[10], -0.375 / (c1 * c1));  // x = 2 = a
+    EXPECT_DOUBLE_EQ(v[6], v[10]);                // even about the center
+    for (double x : v) {
+        EXPECT_LT(x, 0.0);  // attractive everywhere
+    }
+}
+
+TEST(MorsePotential, MinimumDissociationAndInnerWall) {
+    // V(x) = d (1 - e^{-alpha (x - x0)})^2: min 0 at x0, -> d far right,
+    // steep wall on the left.
+    const ses::Grid1D g{-8.0, 8.0, 16};
+    const std::vector<double> v = ses::morse_potential(g, 0.3, 0.5, -2.0);
+    ASSERT_EQ(v.size(), 16u);
+    EXPECT_EQ(v[6], 0.0);  // x = -2 = x0: the minimum
+    const double e3 = std::exp(-0.5 * 3.0);  // x = 1: alpha (x - x0) = 1.5
+    EXPECT_DOUBLE_EQ(v[9], 0.3 * (1.0 - e3) * (1.0 - e3));
+    EXPECT_LT(v[15], 0.3);        // approaches d from below on the right
+    EXPECT_GT(v[15], 0.25);
+    EXPECT_GT(v[0], 0.3);         // the left wall towers past d
+    EXPECT_GT(v[0], 10.0 * v[15]);
+}
+
 TEST(HarmonicPotential, ExactValuesAndMinimum) {
     // omega = 2, x0 = 1:  V(x) = 2 (x-1)^2
     const std::vector<double> v = ses::harmonic_potential(kGrid, 2.0, 1.0);
