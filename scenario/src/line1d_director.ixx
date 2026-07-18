@@ -82,7 +82,7 @@ public:
     }
 
     // ---- generic controls ----
-    void set_real_time() override {}  // 1D scenes are always real-time
+    void do_set_real_time() override {}  // 1D scenes are always real-time
     void reset_simulation() override {
         psi_ = initial_;
         sim_time_ = 0.0;

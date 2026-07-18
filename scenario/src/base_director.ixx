@@ -185,7 +185,7 @@ public:
 
     // ---- generic controls ----
 
-    void set_real_time() override {
+    void do_set_real_time() override {
         stepping_ = BaseStepping::RealTime;
         engine_.release_relax_tables();
     }

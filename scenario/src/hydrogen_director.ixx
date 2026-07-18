@@ -349,7 +349,7 @@ public:
 
     // ---- controls (the shell's key/toolbar entry points) ----
 
-    void set_real_time() override {
+    void do_set_real_time() override {
         if (stepping_ != BaseStepping::RealTime) {
             reset_ionized_tally();  // manual relax exit = fresh preparation
         }

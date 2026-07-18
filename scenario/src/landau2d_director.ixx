@@ -131,7 +131,7 @@ public:
     }
 
     // ---- controls ----
-    void set_real_time() override {}
+    void do_set_real_time() override {}
     void reset_simulation() override { fire(); }
     void measure_now() override {}
     void toggle_view_mode() override {}

@@ -324,7 +324,14 @@ public:
     virtual void tick() = 0;
 
     // ---- controls every scenario supports ----
-    virtual void set_real_time() = 0;
+    // Real time = x1 pacing: every route back (key 1 / panel button) must
+    // also clear the visualized time scale, or a raised slider survives as
+    // a sticky speedup. NVI: scenes override do_set_real_time().
+    void set_real_time() {
+        do_set_real_time();
+        set_time_scale(1);
+    }
+    virtual void do_set_real_time() = 0;
     virtual void reset_simulation() = 0;
     virtual void measure_now() = 0;
     virtual void toggle_view_mode() = 0;
