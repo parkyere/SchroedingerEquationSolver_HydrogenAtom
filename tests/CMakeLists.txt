@@ -70,6 +70,7 @@ add_executable(sesolver_tests
     solvable_wells_test.cpp
     spectral_test.cpp
     sphere_test.cpp
+    time_scale_realtime_test.cpp
     trap_ladder_test.cpp
     volume_test.cpp
     vram_budget_test.cpp
@@ -79,6 +80,7 @@ add_executable(sesolver_tests
 target_link_libraries(sesolver_tests
     PRIVATE
         sesolver_core
+        ses_scenario
         GTest::gtest_main
 )
 target_compile_features(sesolver_tests PRIVATE cxx_std_20)
