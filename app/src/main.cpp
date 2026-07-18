@@ -59,6 +59,7 @@ import ses.scenario.doublewell1d_director;
 import ses.scenario.harmonic_director;
 import ses.scenario.harmonic1d_director;
 import ses.scenario.hydrogen_director;
+import ses.scenario.molecule_director;
 import ses.scenario.morse1d_director;
 import ses.scenario.ptwell1d_director;
 import ses.scenario.tunneling1d_director;
@@ -82,8 +83,9 @@ constexpr std::uint64_t kTickMs = 16;
 // --scene=). Index order is the panel combo's order.
 constexpr const char* kSceneNames[] = {"hydrogen",   "harmonic", "tunnel",
                                        "harmonic1d", "tunnel1d", "doublewell1d",
-                                       "ptwell1d",   "morse1d"};
-constexpr int kSceneCount = 8;
+                                       "ptwell1d",   "morse1d",  "h2plus",
+                                       "benzene"};
+constexpr int kSceneCount = 10;
 std::unique_ptr<ses_shell::ScenarioDirector> make_scene_director(int idx) {
     if (idx == 1) {
         return std::make_unique<ses_shell::HarmonicDirector>();
@@ -105,6 +107,12 @@ std::unique_ptr<ses_shell::ScenarioDirector> make_scene_director(int idx) {
     }
     if (idx == 7) {
         return std::make_unique<ses_shell::Morse1DDirector>();
+    }
+    if (idx == 8) {
+        return std::make_unique<ses_shell::H2PlusDirector>();
+    }
+    if (idx == 9) {
+        return std::make_unique<ses_shell::BenzeneDirector>();
     }
     return std::make_unique<ses_shell::HydrogenDirector>();
 }
@@ -339,6 +347,12 @@ public:
             } else if (director_->reflect() != nullptr) {
                 app::draw_generic_panel(*this, ui_,
                                         {{"Swap well (W)", 'W'}});
+            } else if (auto* mol = director_->molecule()) {
+                if (scene_index_ == 8) {
+                    app::draw_h2plus_panel(*this, ui_, *mol);
+                } else {
+                    app::draw_benzene_panel(*this, ui_, *mol);
+                }
             } else if (director_->tunnel() != nullptr) {
                 app::draw_generic_panel(*this, ui_, {});
             } else {
@@ -441,6 +455,7 @@ public:
     ses_shell::DoubleWellApi* dw() { return director_->doublewell(); }
     ses_shell::ReflectApi* rf() { return director_->reflect(); }
     ses_shell::MorseApi* mo() { return director_->morse(); }
+    ses_shell::MoleculeApi* ml() { return director_->molecule(); }
     bool solving() const { return director_->solving(); }
     bool manifold_ready() const { return director_->scene_ready(); }
     void debug_set_camera_distance(double d) {
@@ -834,6 +849,12 @@ int main(int argc, char* argv[]) {
     } else if (std::find(args.begin(), args.end(), "--selftest-morse1d") !=
                args.end()) {
         scene = "morse1d";
+    } else if (std::find(args.begin(), args.end(), "--selftest-h2p") !=
+               args.end()) {
+        scene = "h2plus";
+    } else if (std::find(args.begin(), args.end(), "--selftest-benzene") !=
+               args.end()) {
+        scene = "benzene";
     } else {
         // Every other selftest arc drives the hydrogen scene (it reaches the
         // director through hydrogen()); force it so a mismatched --scene
@@ -861,6 +882,10 @@ int main(int argc, char* argv[]) {
         scene_index = 6;
     } else if (scene == "morse1d") {
         scene_index = 7;
+    } else if (scene == "h2plus") {
+        scene_index = 8;
+    } else if (scene == "benzene") {
+        scene_index = 9;
     } else if (scene != "hydrogen") {
         std::fprintf(stderr, "scene: unknown '%s' -- using hydrogen\n",
                      scene.c_str());

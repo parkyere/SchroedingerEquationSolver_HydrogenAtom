@@ -794,6 +794,134 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
+    // H2+ arc (main forces --scene=h2plus): sigma_g then sigma_u at the
+    // equilibrium R, then the stretched geometry -- asserting the bond:
+    // E_total(R_eq) < E_total(R_far), and sigma_u above sigma_g. State
+    // preparation is ITP over frames: poll prepared(k), never wall-clock.
+    if (shell->has_arg("--selftest-h2p")) {
+        shell->sched().after(1000, [shell] {
+            selftest_scene_wait_running(shell, "h2plus", 0, [shell](bool runs) {
+                auto* ml = shell->ml();
+                if (!runs || ml == nullptr) {
+                    std::fprintf(stderr, "selftest-h2p: scene not running or "
+                                         "no api  [FAIL]\n");
+                    shell->request_exit(1);
+                    return;
+                }
+                shell->set_time_scale(16);
+                ml->prepare(1);  // chain: sigma_g then sigma_u
+                auto poll = std::make_shared<int>(-1);
+                *poll = shell->sched().every(2000, [shell, poll] {
+                    auto* m = shell->ml();
+                    if (!m->prepared(1)) {
+                        return;
+                    }
+                    shell->sched().cancel(*poll);
+                    const double e_g = m->energy(0);
+                    const double e_u = m->energy(1);
+                    const double et_eq = e_g + m->nuclear_repulsion();
+                    m->set_geometry(1);  // stretched: auto re-relax sigma_g
+                    auto poll2 = std::make_shared<int>(-1);
+                    *poll2 = shell->sched().every(2000, [shell, poll2, e_g,
+                                                        e_u, et_eq] {
+                        auto* m2 = shell->ml();
+                        if (!m2->prepared(0)) {
+                            return;
+                        }
+                        shell->sched().cancel(*poll2);
+                        const double et_far =
+                            m2->energy(0) + m2->nuclear_repulsion();
+                        const bool order_ok = e_u > e_g;
+                        const bool bond_ok = et_eq < et_far;
+                        const bool pass = order_ok && bond_ok;
+                        std::fprintf(stderr,
+                                     "selftest-h2p: E_g = %.4f, E_u = %.4f, "
+                                     "E_tot(eq) = %.4f < E_tot(far) = %.4f?  "
+                                     "[%s]\n",
+                                     e_g, e_u, et_eq, et_far,
+                                     pass ? "PASS" : "FAIL");
+                        shell->request_exit(pass ? 0 : 1);
+                    });
+                    shell->sched().after(240000, [shell, poll2] {
+                        shell->sched().cancel(*poll2);
+                        std::fprintf(stderr, "selftest-h2p: stretched relax "
+                                             "TIMEOUT  [FAIL]\n");
+                        shell->request_exit(1);
+                    });
+                });
+                shell->sched().after(240000, [shell, poll] {
+                    shell->sched().cancel(*poll);
+                    if (!shell->ml()->prepared(1)) {
+                        std::fprintf(stderr, "selftest-h2p: chain TIMEOUT  "
+                                             "[FAIL]\n");
+                        shell->request_exit(1);
+                    }
+                });
+            });
+        });
+    }
+
+    // Benzene arc (main forces --scene=benzene): the uniform ring's excited
+    // pair must be near-degenerate above the ground state; the Kekule
+    // geometry swap must re-prepare cleanly (its pair physics is locked at
+    // 32^3 in tests/molecule_test.cpp).
+    if (shell->has_arg("--selftest-benzene")) {
+        shell->sched().after(1000, [shell] {
+            selftest_scene_wait_running(shell, "benzene", 0, [shell](bool runs) {
+                auto* ml = shell->ml();
+                if (!runs || ml == nullptr) {
+                    std::fprintf(stderr, "selftest-benzene: scene not running "
+                                         "or no api  [FAIL]\n");
+                    shell->request_exit(1);
+                    return;
+                }
+                shell->set_time_scale(16);
+                ml->prepare(2);  // chain: ground, pair member 1, pair member 2
+                auto poll = std::make_shared<int>(-1);
+                *poll = shell->sched().every(2000, [shell, poll] {
+                    auto* m = shell->ml();
+                    if (!m->prepared(2)) {
+                        return;
+                    }
+                    shell->sched().cancel(*poll);
+                    const double gap = std::min(m->energy(1), m->energy(2)) -
+                                       m->energy(0);
+                    const double split = std::abs(m->energy(2) - m->energy(1));
+                    m->set_geometry(1);  // Kekule: swap + auto ground relax
+                    auto poll2 = std::make_shared<int>(-1);
+                    *poll2 = shell->sched().every(2000, [shell, poll2, gap,
+                                                        split] {
+                        auto* m2 = shell->ml();
+                        if (!m2->prepared(0)) {
+                            return;
+                        }
+                        shell->sched().cancel(*poll2);
+                        const bool pass = gap > 0.005 && split < 0.02;
+                        std::fprintf(stderr,
+                                     "selftest-benzene: gap01 = %.4f, pair "
+                                     "split = %.4f, kekule reprep ok  [%s]\n",
+                                     gap, split, pass ? "PASS" : "FAIL");
+                        shell->request_exit(pass ? 0 : 1);
+                    });
+                    shell->sched().after(240000, [shell, poll2] {
+                        shell->sched().cancel(*poll2);
+                        std::fprintf(stderr, "selftest-benzene: kekule relax "
+                                             "TIMEOUT  [FAIL]\n");
+                        shell->request_exit(1);
+                    });
+                });
+                shell->sched().after(300000, [shell, poll] {
+                    shell->sched().cancel(*poll);
+                    if (!shell->ml()->prepared(2)) {
+                        std::fprintf(stderr, "selftest-benzene: chain TIMEOUT "
+                                             " [FAIL]\n");
+                        shell->request_exit(1);
+                    }
+                });
+            });
+        });
+    }
+
     // Tunneling arc (main forces --scene=tunnel): the packet launched at
     // x = -30 with v = 0.5 reaches the slab at ~60 au; the transmitted lobe
     // is fully past it well before ~150 au (~2.5 min at ~1 au/s). Assert a

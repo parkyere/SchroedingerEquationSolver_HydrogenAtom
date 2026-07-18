@@ -375,7 +375,10 @@ protected:
         after_step_batch();
     }
 
-    void run_relax_batch() {
+    // Virtual so scenes with richer relaxation flows (the molecules'
+    // deflated excited chain) can substitute their own batch while reusing
+    // the rest of the frame plumbing.
+    virtual void run_relax_batch() {
         const ses_vk::Engine::RelaxStats stats =
             engine_.relax_step(pending_gpu_steps_);
         relax_energy_display_ = stats.energy;

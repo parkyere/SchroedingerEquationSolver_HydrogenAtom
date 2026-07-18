@@ -35,6 +35,10 @@ struct UiState {
     float ho_omega = 0.25f;
     // 1D double well: live barrier height (matches kDw1dBarrier at boot).
     float dw_barrier = 0.12f;
+    // H2+ bond length knob (snapped to the grid by the director).
+    float h2p_r = 2.0f;
+    // Benzene Kekule angle alternation (0 = the uniform X-ray geometry).
+    float bz_delta = 0.0f;
 };
 
 // The x/y/z axis-cycle button shared by the cross-section controls.
@@ -104,7 +108,9 @@ void draw_scene_picker(ShellT& shell) {
                      "1D tunneling barrier\0"
                      "1D double well\0"
                      "1D reflectionless well\0"
-                     "1D Morse well\0")) {
+                     "1D Morse well\0"
+                     "H2+ molecular ion\0"
+                     "Benzene ring (1e toy)\0")) {
         shell.request_scene(cur);
     }
     if (ImGui::IsItemHovered()) {
@@ -373,6 +379,80 @@ void draw_doublewell_panel(ShellT& shell, UiState& ui,
                           "the slider re-prepares\nthe left-well state "
                           "(currently dE = %.2e Ha).",
                           dw.splitting());
+    }
+    draw_time_scale(shell, ui);
+    ImGui::Separator();
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextUnformatted(shell.status_text().c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::End();
+}
+
+// H2+ panel: state preparation + the bond-length scan (E_total(R) has its
+// minimum near R = 2 -- the chemical bond, found by dragging).
+template <typename ShellT>
+void draw_h2plus_panel(ShellT& shell, UiState& ui, ses_shell::MoleculeApi& ml) {
+    ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(430, 0), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Controls", nullptr, ImGuiWindowFlags_NoCollapse);
+    draw_scene_picker(shell);
+    draw_perf_readout(shell);
+    if (ImGui::Button("Relax sigma_g (2)")) shell.press('2');
+    ImGui::SameLine();
+    if (ImGui::Button("Relax sigma_u (3)")) shell.press('3');
+    ImGui::SameLine();
+    if (ImGui::Button("Reset (R)")) shell.reset_simulation();
+    if (ImGui::Button("Pause (Space)")) shell.toggle_pause();
+    ImGui::SameLine();
+    if (ImGui::Button("Face z (Z)")) shell.snap_camera_z();
+    if (ImGui::SliderFloat("Bond R (Bohr)", &ui.h2p_r, 1.0f, 8.0f, "%.2f")) {
+        ml.set_parameter(static_cast<double>(ui.h2p_r));
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Fixed nuclei (Born-Oppenheimer); the director "
+                          "snaps R to grid\npoints and re-relaxes sigma_g. "
+                          "Watch E_total = E + 1/R dip near\nR ~ 2: that dip "
+                          "IS the chemical bond.");
+    }
+    if (ml.prepared(0)) {
+        ImGui::Text("E_total(R) = %.4f Ha", ml.energy(0) + ml.nuclear_repulsion());
+    }
+    draw_time_scale(shell, ui);
+    ImGui::Separator();
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextUnformatted(shell.status_text().c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::End();
+}
+
+// Benzene panel: state chain + the uniform <-> Kekule geometry knob.
+template <typename ShellT>
+void draw_benzene_panel(ShellT& shell, UiState& ui, ses_shell::MoleculeApi& ml) {
+    ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(430, 0), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Controls", nullptr, ImGuiWindowFlags_NoCollapse);
+    draw_scene_picker(shell);
+    draw_perf_readout(shell);
+    if (ImGui::Button("Ground (2)")) shell.press('2');
+    ImGui::SameLine();
+    if (ImGui::Button("Excited 1 (3)")) shell.press('3');
+    ImGui::SameLine();
+    if (ImGui::Button("Excited 2 (4)")) shell.press('4');
+    ImGui::SameLine();
+    if (ImGui::Button("Reset (R)")) shell.reset_simulation();
+    if (ImGui::Button("Pause (Space)")) shell.toggle_pause();
+    ImGui::SameLine();
+    if (ImGui::Button("Face z (Z)")) shell.snap_camera_z();
+    if (ImGui::SliderFloat("Kekule delta (deg)", &ui.bz_delta, 0.0f, 10.0f,
+                           "%.1f")) {
+        ml.set_parameter(static_cast<double>(ui.bz_delta));
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("0 = the uniform ring X-ray diffraction settled "
+                          "on;\n> 0 alternates the bond lengths 1-2-1-2 "
+                          "(Kekule).\nThe excited pair stays degenerate "
+                          "(D3h!) but the ground\nstate's bond charge piles "
+                          "onto the short bonds.");
     }
     draw_time_scale(shell, ui);
     ImGui::Separator();

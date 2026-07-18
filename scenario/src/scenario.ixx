@@ -117,6 +117,22 @@ struct ReflectApi {
     virtual void toggle_well() = 0;  // sech^2 <-> equal square, relaunch
 };
 
+// One-electron fixed-nuclei molecules (Born-Oppenheimer): staged state
+// preparation (ITP ground, then the deflated excited chain) + geometry
+// control. prepare(k) is ASYNC (the relax runs over frames); the arcs and
+// the panel poll prepared(k).
+struct MoleculeApi {
+    virtual ~MoleculeApi() = default;
+    virtual bool prepared(int k) const = 0;  // state k solved and cached
+    virtual double energy(int k) const = 0;  // captured E_k (Ha); 0 = none
+    virtual void prepare(int k) = 0;         // relax the chain up to k
+    virtual double nuclear_repulsion() const = 0;  // sum_{i<j} Z^2 / r_ij
+    virtual void set_geometry(int variant) = 0;    // scene-defined presets
+    virtual int geometry() const = 0;
+    virtual void set_parameter(double p) = 0;  // scene knob (R / delta)
+    virtual double parameter() const = 0;
+};
+
 // The Morse anharmonic-ladder scene (eigenstate jumps, shrinking gaps).
 struct MorseApi {
     virtual ~MorseApi() = default;
@@ -151,6 +167,7 @@ public:
     virtual DoubleWellApi* doublewell() { return nullptr; }
     virtual ReflectApi* reflect() { return nullptr; }
     virtual MorseApi* morse() { return nullptr; }
+    virtual MoleculeApi* molecule() { return nullptr; }
 
     // 1D-scene overlay polylines (phasor curve + potential profile); the 3D
     // scenes return 0 and the renderer draws nothing extra.
