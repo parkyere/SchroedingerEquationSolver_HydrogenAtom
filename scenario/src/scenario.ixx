@@ -57,6 +57,14 @@ struct HydrogenApi {
     virtual double channel_a(int from, int to) const = 0;
     virtual double state_energy(int idx) const = 0;
     virtual long long photon_count() const = 0;
+    // Spectrometer record: the energies (eV) of the photons emitted by
+    // quantum jumps since the last reset, in emission order. spectro_max_ev
+    // is the strip's full scale (the ionization limit) -- 0 hides the
+    // strip (the trap scene shares this Api but hydrogen's emission rules
+    // are hydrogen-only).
+    virtual int spectro_count() const { return 0; }
+    virtual double spectro_ev(int /*i*/) const { return 0.0; }
+    virtual double spectro_max_ev() const { return 0.0; }
     virtual int last_measured_index() const = 0;
     virtual double mean_z() = 0;
     virtual double peak_excited_population() const = 0;

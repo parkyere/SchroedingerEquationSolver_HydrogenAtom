@@ -1,5 +1,6 @@
 module;
 #include <imgui.h>
+#include <cstdio>
 #include <initializer_list>
 #include <string>
 #include <utility>
@@ -123,7 +124,12 @@ void draw_scene_picker(ShellT& shell) {
                      "1D reflectionless well\0"
                      "1D Morse well\0"
                      "H2+ molecular ion\0"
-                     "Stripped benzene (1e)\0")) {
+                     "Stripped benzene (1e)\0"
+                     "2D double slit + AB\0"
+                     "2D Landau / cyclotron\0"
+                     "1D crystal lattice (Bloch)\0"
+                     "2D quantum corral\0"
+                     "2D quantum dot\0")) {
         shell.request_scene(cur);
     }
     if (ImGui::IsItemHovered()) {
@@ -163,6 +169,95 @@ void draw_time_scale(ShellT& shell, UiState& ui) {
                           "dt -- accuracy is unchanged).\nWhen the GPU "
                           "saturates, the frame rate drops instead.");
     }
+}
+
+// The emission spectrometer: a vertical strip on the RIGHT, energy rising
+// bottom to top over the full un-ionized range [0, 13.6 eV]. The rainbow
+// is an ENERGY SCALE decoration (red low, violet high) -- deliberately
+// NOT physical color: most hydrogen lines are UV/IR and a "real-color"
+// strip would show nothing. Every quantum-jump photon since the last
+// reset appears as a thin bright line with its energy labeled in eV
+// (repeat lines brighten instead of stacking labels).
+inline void draw_spectrometer(ses_shell::HydrogenApi& hy) {
+    const double emax = hy.spectro_max_ev();
+    if (emax <= 0.0) {
+        return;  // not an emission scene (the trap shares this Api)
+    }
+    const ImGuiIO& io = ImGui::GetIO();
+    const float win_w = 190.0f;
+    const float win_h = io.DisplaySize.y * 0.78f;
+    ImGui::SetNextWindowPos(
+        ImVec2(io.DisplaySize.x - win_w - 10.0f, 48.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(win_w, win_h), ImGuiCond_Always);
+    ImGui::Begin("Spectrometer", nullptr,
+                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
+                     ImGuiWindowFlags_NoMove);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const float bx = origin.x + 4.0f;
+    const float bw = 30.0f;
+    const float by = origin.y + 12.0f;
+    const float bh = win_h - 70.0f;
+    // Rainbow scale, 7 stops red(bottom) -> violet(top).
+    const ImU32 stops[7] = {
+        IM_COL32(225, 40, 40, 255),  IM_COL32(235, 140, 35, 255),
+        IM_COL32(235, 215, 45, 255), IM_COL32(60, 195, 85, 255),
+        IM_COL32(55, 130, 235, 255), IM_COL32(45, 60, 180, 255),
+        IM_COL32(150, 60, 220, 255)};
+    for (int s = 0; s < 6; ++s) {
+        const float y_lo = by + bh * (1.0f - s / 6.0f);
+        const float y_hi = by + bh * (1.0f - (s + 1) / 6.0f);
+        dl->AddRectFilledMultiColor(ImVec2(bx, y_hi), ImVec2(bx + bw, y_lo),
+                                    stops[s + 1], stops[s + 1], stops[s],
+                                    stops[s]);
+    }
+    dl->AddRect(ImVec2(bx - 1, by - 1), ImVec2(bx + bw + 1, by + bh + 1),
+                IM_COL32(200, 200, 210, 160));
+    // Scale ticks.
+    char buf[32];
+    for (int t = 0; t <= 4; ++t) {
+        const double ev = emax * t / 4.0;
+        const float y = by + bh * static_cast<float>(1.0 - ev / emax);
+        dl->AddLine(ImVec2(bx + bw, y), ImVec2(bx + bw + 4, y),
+                    IM_COL32(200, 200, 210, 160));
+        std::snprintf(buf, sizeof(buf), "%.1f", ev);
+        dl->AddText(ImVec2(bx + bw + 6, y - 7), IM_COL32(180, 180, 190, 200),
+                    buf);
+    }
+    // Emitted lines, deduplicated to 0.01 eV buckets (repeats brighten).
+    const int n = hy.spectro_count();
+    int cents[64];
+    int counts[64];
+    int distinct = 0;
+    for (int i = 0; i < n; ++i) {
+        const int c = static_cast<int>(hy.spectro_ev(i) * 100.0 + 0.5);
+        int k = 0;
+        while (k < distinct && cents[k] != c) {
+            ++k;
+        }
+        if (k == distinct && distinct < 64) {
+            cents[distinct] = c;
+            counts[distinct] = 0;
+            ++distinct;
+        }
+        if (k < 64) {
+            ++counts[k];
+        }
+    }
+    for (int k = 0; k < distinct; ++k) {
+        const double ev = cents[k] / 100.0;
+        const float y = by + bh * static_cast<float>(1.0 - ev / emax);
+        const int a = counts[k] > 3 ? 255 : 160 + 32 * counts[k];
+        dl->AddRectFilled(ImVec2(bx - 3, y - 1),
+                          ImVec2(bx + bw + 3, y + 1),
+                          IM_COL32(255, 255, 255, a));
+        std::snprintf(buf, sizeof(buf), "%.2f eV x%d", ev, counts[k]);
+        dl->AddText(ImVec2(bx + bw + 34, y - 7),
+                    IM_COL32(255, 255, 255, 230), buf);
+    }
+    ImGui::Dummy(ImVec2(win_w - 20.0f, bh + 20.0f));
+    ImGui::TextDisabled("photons: %d", n);
+    ImGui::End();
 }
 
 template <typename ShellT>
@@ -283,6 +378,7 @@ void draw_hydrogen_panel(ShellT& shell, UiState& ui, ses_shell::HydrogenApi& hy)
     ImGui::TextUnformatted(shell.status_text().c_str());
     ImGui::PopTextWrapPos();
     ImGui::End();
+    draw_spectrometer(hy);
 }
 
 template <typename ShellT>

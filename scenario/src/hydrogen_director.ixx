@@ -394,6 +394,7 @@ public:
         if (solving()) {
             return;  // the startup atlas build owns the GPU state
         }
+        spectro_ev_.clear();  // a fresh run gets a fresh spectrometer
         sim_ = make_simulation();
         stepping_ = BaseStepping::RealTime;
         free_deflation_buffers();  // drop any owned deflation phi
@@ -636,6 +637,17 @@ public:
     // incrementally during the pair phase -- do not race it).
     bool manifold_ready() const { return atlas_done_ && !atom_.channels().empty(); }
     double state_energy(int idx) const override { return atom_.state_energy(idx); }
+    int spectro_count() const override {
+        return static_cast<int>(spectro_ev_.size());
+    }
+    double spectro_ev(int i) const override {
+        return i >= 0 && i < static_cast<int>(spectro_ev_.size())
+                   ? spectro_ev_[static_cast<std::size_t>(i)]
+                   : 0.0;
+    }
+    // Full scale: the ionization limit 0.5 Ha = 13.6 eV -- every bound-
+    // bound photon of the un-ionized atom sits below it.
+    double spectro_max_ev() const override { return 0.5 * kHaToEv; }
     long long photon_count() const override { return photon_count_; }
     // Cumulative absorbed (ionized) fraction since the last collapse/prep.
     double ionized_fraction() const override {
@@ -1202,6 +1214,11 @@ private:
                     flush_collapse_error(ch.to);
                     flash_ticks_ = kFlashTicks;
                     ++photon_count_;
+                    // Spectrometer record: the photon carried exactly the
+                    // level gap.
+                    spectro_ev_.push_back((atom_.state_energy(ch.from) -
+                                           atom_.state_energy(ch.to)) *
+                                          kHaToEv);
                     last_jump_ = strf("%s->%s", kStateSpec[ch.from].name,
                                       kStateSpec[ch.to].name);
                     std::fprintf(stderr,
@@ -1604,6 +1621,7 @@ private:
     bool decay_on_ = true;
     int flash_ticks_ = 0;
     long long photon_count_ = 0;
+    std::vector<double> spectro_ev_;  // emitted photon energies (eV)
 
     // Laser (resonant dipole drive) bookkeeping.
     LaserPol laser_pol_ = LaserPol::Off;

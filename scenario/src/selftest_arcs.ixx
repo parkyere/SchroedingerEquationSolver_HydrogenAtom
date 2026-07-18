@@ -303,9 +303,19 @@ void register_verification_arcs(ShellT* shell) {
                 shell->hy()->toggle_decay();  // ON: the window starts NOW
                 shell->sched().after(30000, [shell, baseline] {
                     const long long fresh = shell->hy()->photon_count() - baseline;
-                    std::fprintf(stderr, "selftest-decay: photons = %lld  [%s]\n",
-                                 fresh, fresh >= 1 ? "PASS" : "FAIL");
-                    shell->request_exit(fresh >= 1 ? 0 : 1);
+                    // The spectrometer must have recorded the 2p -> 1s
+                    // photon at the Lyman-alpha energy 10.20 eV.
+                    const int nl = shell->hy()->spectro_count();
+                    const double ev =
+                        nl > 0 ? shell->hy()->spectro_ev(nl - 1) : 0.0;
+                    const bool line_ok =
+                        fresh < 1 || std::abs(ev - 10.20) < 0.15;
+                    const bool pass = fresh >= 1 && line_ok;
+                    std::fprintf(stderr,
+                                 "selftest-decay: photons = %lld, last line "
+                                 "%.2f eV  [%s]\n",
+                                 fresh, ev, pass ? "PASS" : "FAIL");
+                    shell->request_exit(pass ? 0 : 1);
                 });
             });
         });
