@@ -208,25 +208,21 @@ TEST(RegularizedCoulombPotential, MultiCenterSuperposesWithPerCenterRegularizati
     }
 }
 
-TEST(SoftCoulombPotential, MultiCenterHexagonExactAtTheRingCenter) {
-    // Six equal soft cores on a hexagon of radius r: at the ring center
-    // every center contributes -Z/sqrt(r^2 + a^2) -- exact by symmetry.
+TEST(SnapToGrid, RoundsEachAxisToTheNearestGridPointAndClamps) {
+    // Bare multi-center Coulomb regularizes ONLY exact-hit nucleus cells,
+    // so molecular geometries must snap to lattice points (an off-grid
+    // center would give its nearest cell an arbitrary -Z/r depth). h = 1
+    // coords -8..7; xmax is not a point (periodic), so 7.7 clamps to 7.
     const ses::Grid1D ax{-8.0, 8.0, 16};
     const ses::Grid3D g{ax, ax, ax};
-    const double r = 2.63;
-    const double a = 0.8;
-    std::vector<ses::Vec3d> ring;
-    for (int i = 0; i < 6; ++i) {
-        const double th = 3.14159265358979323846 / 3.0 * i;
-        ring.push_back({r * std::cos(th), r * std::sin(th), 0.0});
-    }
-    const std::vector<double> v = ses::soft_coulomb_potential(g, 1.0, a, ring);
-    EXPECT_NEAR(v[static_cast<std::size_t>(g.flat(8, 8, 8))],
-                -6.0 / std::sqrt(r * r + a * a), 1e-12);
-    for (double x : v) {
-        EXPECT_LT(x, 0.0);
-        EXPECT_TRUE(std::isfinite(x));
-    }
+    const ses::Vec3d s = ses::snap_to_grid(g, {0.4, -0.6, 7.7});
+    EXPECT_DOUBLE_EQ(s.x, 0.0);
+    EXPECT_DOUBLE_EQ(s.y, -1.0);
+    EXPECT_DOUBLE_EQ(s.z, 7.0);
+    const ses::Vec3d lo = ses::snap_to_grid(g, {-9.3, -8.4, 0.2});
+    EXPECT_DOUBLE_EQ(lo.x, -8.0);
+    EXPECT_DOUBLE_EQ(lo.y, -8.0);
+    EXPECT_DOUBLE_EQ(lo.z, 0.0);
 }
 
 TEST(RegularizedCoulombPotential, NucleusCellScalesWithChargeAndInverseSpacing) {
