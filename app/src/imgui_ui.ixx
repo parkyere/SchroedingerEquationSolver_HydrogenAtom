@@ -37,8 +37,6 @@ struct UiState {
     float dw_barrier = 0.12f;
     // H2+ bond length knob (snapped to the grid by the director).
     float h2p_r = 2.0f;
-    // Benzene Kekule angle alternation (0 = the uniform X-ray geometry).
-    float bz_delta = 0.0f;
 };
 
 // The x/y/z axis-cycle button shared by the cross-section controls.
@@ -425,7 +423,8 @@ void draw_h2plus_panel(ShellT& shell, UiState& ui, ses_shell::MoleculeApi& ml) {
     ImGui::End();
 }
 
-// Benzene panel: state chain + the uniform <-> Kekule geometry knob.
+// Stripped-benzene panel: the state-preparation chain over the REAL
+// (uniform) geometry -- no counterfactual knobs.
 template <typename ShellT>
 void draw_benzene_panel(ShellT& shell, UiState& ui, ses_shell::MoleculeApi& ml) {
     ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_FirstUseEver);
@@ -443,17 +442,16 @@ void draw_benzene_panel(ShellT& shell, UiState& ui, ses_shell::MoleculeApi& ml) 
     if (ImGui::Button("Pause (Space)")) shell.toggle_pause();
     ImGui::SameLine();
     if (ImGui::Button("Face z (Z)")) shell.snap_camera_z();
-    if (ImGui::SliderFloat("Kekule delta (deg)", &ui.bz_delta, 0.0f, 10.0f,
-                           "%.1f")) {
-        ml.set_parameter(static_cast<double>(ui.bz_delta));
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("0 = the uniform ring X-ray diffraction settled "
-                          "on;\n> 0 alternates the bond lengths 1-2-1-2 "
-                          "(Kekule).\nBare nuclei (all electrons stripped): "
-                          "the first electron's\nstates are deep carbon-core "
-                          "orbitals, so the geometry\nchange moves the "
-                          "skeleton more than the spectrum.");
+    if (ml.prepared(0)) {
+        ImGui::Text("E0 = %.3f Ha", ml.energy(0));
+        if (ml.prepared(1)) {
+            ImGui::SameLine();
+            ImGui::Text("E1 = %.3f", ml.energy(1));
+        }
+        if (ml.prepared(2)) {
+            ImGui::SameLine();
+            ImGui::Text("E2 = %.3f", ml.energy(2));
+        }
     }
     draw_time_scale(shell, ui);
     ImGui::Separator();

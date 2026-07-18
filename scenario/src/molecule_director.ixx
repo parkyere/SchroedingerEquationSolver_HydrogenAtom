@@ -21,12 +21,14 @@ import ses.wavepacket;
 //    two-center member of the "solvable" family.)
 //  - Stripped benzene: ALL electrons removed, then the FIRST electron of
 //    C6H6^41+ over the BARE nuclei (Z_C = 6, Z_H = 1, regularized cells,
-//    centers lattice-snapped). No soft cores, no free parameters -- the
-//    project rule is bare regularized Coulomb everywhere. The low spectrum
-//    is a deep quasi-degenerate carbon-core band (inter-carbon hopping at
-//    1s(Z=6) size is ~e^{-16}: the states are core orbitals, not a
-//    delocalized pi system -- that is the honest physics of the stripped
-//    molecule's first electron).
+//    centers lattice-snapped). No soft cores, no free parameters, and the
+//    REAL (uniform, X-ray) geometry only -- the project rules are bare
+//    regularized Coulomb everywhere and no counterfactual knobs. The low
+//    spectrum is a deep quasi-degenerate carbon-core band (inter-carbon
+//    hopping at 1s(Z=6) size is ~e^{-16}: core orbitals, not a delocalized
+//    pi system -- the honest physics of the stripped molecule's first
+//    electron). CPK-convention markers: carbon-black and hydrogen-white
+//    atom discs over a gray bond skeleton.
 //
 // State preparation is a CHAIN: ITP ground, then deflated excited states
 // against the captured lower ones (fp32 state buffers, engine-resident),
@@ -144,6 +146,13 @@ protected:
         }
     }
 
+    // Boot straight into the ground state: an un-relaxed Gaussian seed is
+    // NOT an eigenstate -- its unbound components disperse and wrap the
+    // periodic (absorber-free) box as lattice-wide ripples, and its deep
+    // core components phase-rotate at |E| dt ~ rad/step. Auto-relaxing
+    // makes the scene open on the stationary physics.
+    void on_gpu_ready() override { prepare(0); }
+
     void advance_chain() {
         int next = -1;
         for (int k = 0; k <= want_; ++k) {
@@ -154,6 +163,9 @@ protected:
         }
         if (next < 0) {
             return;  // everything up to want_ is already cached
+        }
+        if (next == target_ && stepping_ == BaseStepping::Relaxing) {
+            return;  // that state's relax is already in flight
         }
         start_relax_for(next);
     }
@@ -252,6 +264,38 @@ protected:
                                         ses::Vec3d{});
     }
 
+    // Append a filled hexagonal disc (in the molecular z-plane) to a
+    // TRIANGLE_STRIP overlay buffer -- the CPK-style atom marker. Discs
+    // are chained with repeated (degenerate, zero-area) bridge vertices so
+    // MANY atoms fit in ONE overlay curve.
+    static void append_disc(std::vector<float>& out, const ses::Vec3d& c,
+                            double r) {
+        static constexpr int kOrder[6] = {0, 1, 5, 2, 4, 3};  // 6-gon strip
+        const double kPi = 3.14159265358979323846;
+        float px[6];
+        float py[6];
+        for (int i = 0; i < 6; ++i) {
+            const double th = kPi / 3.0 * i;
+            px[i] = static_cast<float>(c.x + r * std::cos(th));
+            py[i] = static_cast<float>(c.y + r * std::sin(th));
+        }
+        auto put = [&](int i) {
+            out.push_back(px[i]);
+            out.push_back(py[i]);
+            out.push_back(static_cast<float>(c.z));
+        };
+        if (!out.empty()) {
+            const std::size_t n = out.size();
+            out.push_back(out[n - 3]);  // repeat the previous strip's tail
+            out.push_back(out[n - 2]);
+            out.push_back(out[n - 1]);
+            put(kOrder[0]);  // and this disc's head: degenerate bridge
+        }
+        for (int i : kOrder) {
+            put(i);
+        }
+    }
+
     int geom_ = 0;
     double param_ = 0.0;
     int buf_[kStates] = {-1, -1, -1};
@@ -282,10 +326,11 @@ public:
     double default_camera_elevation() const override { return 0.28; }
     double default_camera_distance() const override { return 55.0; }
 
-    int overlay_curve_count() const override { return 2; }
-    OverlayCurve overlay_curve(int i) const override {
-        // Two proton diamonds (warm orange, like the atomic marker).
-        return {marker_[i == 0 ? 0 : 1].data(), 5, 1.0f, 0.45f, 0.20f, 1.0f};
+    int overlay_curve_count() const override { return 1; }
+    OverlayCurve overlay_curve(int /*i*/) const override {
+        // Two protons as CPK hydrogen-white discs.
+        return {disc_.data(), static_cast<int>(disc_.size() / 3),
+                0.95f, 0.95f, 0.95f, 1.0f, true};
     }
 
 protected:
@@ -369,15 +414,12 @@ private:
 
     void rebuild_markers() {
         const std::vector<ses::Vec3d> c = centers();
-        for (int n = 0; n < 2; ++n) {
-            const float x = static_cast<float>(c[static_cast<std::size_t>(n)].x);
-            const float s = 0.5f;
-            marker_[n] = {x - s, 0.0f, 0.0f, x, s, 0.0f, x + s, 0.0f, 0.0f,
-                          x, -s, 0.0f, x - s, 0.0f, 0.0f};
-        }
+        disc_.clear();
+        append_disc(disc_, c[0], 0.4);
+        append_disc(disc_, c[1], 0.4);
     }
 
-    std::vector<float> marker_[2];
+    std::vector<float> disc_;
 };
 
 // ---- Benzene one-electron toy --------------------------------------------
@@ -390,27 +432,38 @@ constexpr double kBzCH = 2.06;      // C-H 1.09 A in bohr: H at r + this
 // BARE nuclear charges of the stripped molecule -- nothing to calibrate.
 constexpr double kBzZC = 6.0;
 constexpr double kBzZH = 1.0;
-constexpr double kBzKekDeg = 5.0;   // Kekule angle alternation (deg)
-constexpr double kBzKekMax = 10.0;
 
 class BenzeneDirector final : public MoleculeDirectorBase {
 public:
-    BenzeneDirector() : MoleculeDirectorBase(make(0.0)) {
-        param_ = 0.0;  // uniform ring at boot
+    BenzeneDirector() : MoleculeDirectorBase(make()) {
         rebuild_markers();
     }
+
+    // The REAL benzene geometry only (uniform ring, as X-ray settled) --
+    // no counterfactual knobs in this simulator.
+    void set_geometry(int /*variant*/) override {}
+    void set_parameter(double /*p*/) override {}
 
     double default_camera_azimuth() const override { return 0.3; }
     double default_camera_elevation() const override { return 0.7; }
     double default_camera_distance() const override { return 40.0; }
 
-    int overlay_curve_count() const override { return 1; }
-    OverlayCurve overlay_curve(int /*i*/) const override {
-        // The closed C hexagon with C-H spokes: bond alternation AND the
-        // hydrogens are visible in the one skeleton curve.
-        return {ring_marker_.data(),
-                static_cast<int>(ring_marker_.size() / 3),
-                1.0f, 0.45f, 0.20f, 1.0f};
+    // CPK-convention rendering: neutral gray bond skeleton underneath,
+    // then carbon-black and hydrogen-white atom discs on top.
+    int overlay_curve_count() const override { return 3; }
+    OverlayCurve overlay_curve(int i) const override {
+        if (i == 0) {  // bonds (hexagon + C-H spokes)
+            return {ring_marker_.data(),
+                    static_cast<int>(ring_marker_.size() / 3),
+                    0.55f, 0.55f, 0.60f, 0.9f};
+        }
+        if (i == 1) {  // carbons: CPK black (charcoal against the dark bg)
+            return {c_disc_.data(), static_cast<int>(c_disc_.size() / 3),
+                    0.22f, 0.22f, 0.25f, 1.0f, true};
+        }
+        // hydrogens: CPK white
+        return {h_disc_.data(), static_cast<int>(h_disc_.size() / 3),
+                0.95f, 0.95f, 0.95f, 1.0f, true};
     }
 
 protected:
@@ -419,15 +472,15 @@ protected:
     }
 
     ses::WavepacketSimulation remake_simulation() const override {
-        return make(param_);
+        return make();
     }
 
     // Carbons first, then their hydrogens (each riding its carbon's angle);
     // every center lattice-snapped for the bare-cell regularization.
     std::vector<ses::Vec3d> centers() const override {
-        std::vector<ses::Vec3d> c = snapped_ring(sim_.grid(), param_, kBzRingR);
+        std::vector<ses::Vec3d> c = snapped_ring(sim_.grid(), kBzRingR);
         const std::vector<ses::Vec3d> h =
-            snapped_ring(sim_.grid(), param_, kBzRingR + kBzCH);
+            snapped_ring(sim_.grid(), kBzRingR + kBzCH);
         c.insert(c.end(), h.begin(), h.end());
         return c;
     }
@@ -447,19 +500,12 @@ protected:
                                         ses::Vec3d{1.5, 1.5, 1.2},
                                         ses::Vec3d{});
     }
-    double geometry_parameter(int variant) const override {
-        return variant == 1 ? kBzKekDeg : 0.0;  // 0 = uniform, 1 = Kekule
-    }
-    double clamp_parameter(double p) const override {
-        return std::clamp(p, 0.0, kBzKekMax);
-    }
+    double geometry_parameter(int /*variant*/) const override { return 0.0; }
+    double clamp_parameter(double /*p*/) const override { return 0.0; }
     void geometry_changed() override { rebuild_markers(); }
 
     std::string title_suffix() override {
-        std::string s =
-            param_ == 0.0
-                ? std::string("  UNIFORM ring (X-ray's verdict)")
-                : strf("  KEKULE 1-2-1-2 (delta = %.1f deg)", param_);
+        std::string s{"  uniform ring (the X-ray geometry)"};
         if (prepared_[0]) {
             s += strf("  E0 = %.4f", e_[0]);
         }
@@ -477,27 +523,24 @@ protected:
 
 private:
     static std::vector<ses::Vec3d> snapped_ring(const ses::Grid3D& g,
-                                                double delta_deg,
                                                 double radius) {
         const double kPi = 3.14159265358979323846;
         std::vector<ses::Vec3d> c;
         for (int i = 0; i < 6; ++i) {
-            const double th =
-                kPi / 3.0 * i +
-                (i % 2 == 0 ? 1.0 : -1.0) * delta_deg * kPi / 180.0;
+            const double th = kPi / 3.0 * i;
             c.push_back(ses::snap_to_grid(
                 g, {radius * std::cos(th), radius * std::sin(th), 0.0}));
         }
         return c;
     }
 
-    static ses::WavepacketSimulation make(double delta_deg) {
+    static ses::WavepacketSimulation make() {
         const ses::Grid1D axis{-kBzBox, kBzBox, kBzPoints};
         const ses::Grid3D grid{axis, axis, axis};
         std::vector<double> v = ses::regularized_coulomb_potential(
-            grid, kBzZC, snapped_ring(grid, delta_deg, kBzRingR));
+            grid, kBzZC, snapped_ring(grid, kBzRingR));
         const std::vector<double> vh = ses::regularized_coulomb_potential(
-            grid, kBzZH, snapped_ring(grid, delta_deg, kBzRingR + kBzCH));
+            grid, kBzZH, snapped_ring(grid, kBzRingR + kBzCH));
         for (std::size_t i = 0; i < v.size(); ++i) {
             v[i] += vh[i];
         }
@@ -516,9 +559,9 @@ private:
     void rebuild_markers() {
         const ses::Grid1D axis{-kBzBox, kBzBox, kBzPoints};
         const ses::Grid3D grid{axis, axis, axis};
-        const std::vector<ses::Vec3d> c = snapped_ring(grid, param_, kBzRingR);
+        const std::vector<ses::Vec3d> c = snapped_ring(grid, kBzRingR);
         const std::vector<ses::Vec3d> h =
-            snapped_ring(grid, param_, kBzRingR + kBzCH);
+            snapped_ring(grid, kBzRingR + kBzCH);
         ring_marker_.clear();
         auto put = [&](const ses::Vec3d& p) {
             ring_marker_.push_back(static_cast<float>(p.x));
@@ -531,9 +574,18 @@ private:
             put(c[static_cast<std::size_t>(i)]);
         }
         put(c[0]);  // close the hexagon
+        // CPK atom discs: carbon larger and dark, hydrogen smaller, white.
+        c_disc_.clear();
+        h_disc_.clear();
+        for (int i = 0; i < 6; ++i) {
+            append_disc(c_disc_, c[static_cast<std::size_t>(i)], 0.55);
+            append_disc(h_disc_, h[static_cast<std::size_t>(i)], 0.38);
+        }
     }
 
     std::vector<float> ring_marker_;
+    std::vector<float> c_disc_;
+    std::vector<float> h_disc_;
 };
 
 }  // namespace ses_shell

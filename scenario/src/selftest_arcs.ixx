@@ -862,10 +862,10 @@ void register_verification_arcs(ShellT* shell) {
     }
 
     // Stripped-benzene arc (main forces --scene=benzene): the first
-    // electron of C6H6^41+ over bare nuclei. The three prepared states
-    // must form a DEEP quasi-degenerate carbon-core band (no ordering or
-    // gap claims: deflated ITP finds band members in arbitrary order); the
-    // Kekule geometry swap must re-prepare cleanly.
+    // electron of C6H6^41+ over bare nuclei (the REAL uniform geometry;
+    // no counterfactual knobs). The three prepared states must form a
+    // DEEP quasi-degenerate carbon-core band (no ordering or gap claims:
+    // deflated ITP finds band members in arbitrary order).
     if (shell->has_arg("--selftest-benzene")) {
         shell->sched().after(1000, [shell] {
             selftest_scene_wait_running(shell, "benzene", 0, [shell](bool runs) {
@@ -890,29 +890,12 @@ void register_verification_arcs(ShellT* shell) {
                     const double e2 = m->energy(2);
                     const double lo = std::min(e0, std::min(e1, e2));
                     const double hi = std::max(e0, std::max(e1, e2));
-                    m->set_geometry(1);  // Kekule: swap + auto ground relax
-                    auto poll2 = std::make_shared<int>(-1);
-                    *poll2 = shell->sched().every(2000, [shell, poll2, lo,
-                                                        hi] {
-                        auto* m2 = shell->ml();
-                        if (!m2->prepared(0)) {
-                            return;
-                        }
-                        shell->sched().cancel(*poll2);
-                        const bool pass = hi < -8.0 && (hi - lo) < 1.0;
-                        std::fprintf(stderr,
-                                     "selftest-benzene: core band [%.3f, "
-                                     "%.3f] Ha (width %.3f), kekule reprep "
-                                     "ok  [%s]\n",
-                                     lo, hi, hi - lo, pass ? "PASS" : "FAIL");
-                        shell->request_exit(pass ? 0 : 1);
-                    });
-                    shell->sched().after(240000, [shell, poll2] {
-                        shell->sched().cancel(*poll2);
-                        std::fprintf(stderr, "selftest-benzene: kekule relax "
-                                             "TIMEOUT  [FAIL]\n");
-                        shell->request_exit(1);
-                    });
+                    const bool pass = hi < -8.0 && (hi - lo) < 1.0;
+                    std::fprintf(stderr,
+                                 "selftest-benzene: core band [%.3f, %.3f] "
+                                 "Ha (width %.3f)  [%s]\n",
+                                 lo, hi, hi - lo, pass ? "PASS" : "FAIL");
+                    shell->request_exit(pass ? 0 : 1);
                 });
                 shell->sched().after(300000, [shell, poll] {
                     shell->sched().cancel(*poll);
