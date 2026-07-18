@@ -35,6 +35,7 @@ target_sources(sesolver_core
         src/measurement.ixx
         src/radial.ixx
         src/observables.ixx
+        src/interference.ixx
         src/ladder.ixx
         src/phasor.ixx
         src/spectrum1d.ixx

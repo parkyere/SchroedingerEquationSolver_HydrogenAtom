@@ -24,7 +24,13 @@ export namespace ses {
 
 class SplitOperator1D {
 public:
-    SplitOperator1D(const Grid1D& g, const std::vector<double>& potential, double dt)
+    // a_field: uniform vector potential A for minimal coupling on the
+    // periodic grid (the grid IS a ring; flux through it = A * L). The
+    // kinetic factor becomes e^{-i (k - A)^2 dt / 2}; B = dA/dx = 0
+    // everywhere ON the ring, so any effect of A is pure Aharonov-Bohm
+    // topology. A = 0 (the default) reproduces the plain tables bitwise.
+    SplitOperator1D(const Grid1D& g, const std::vector<double>& potential,
+                    double dt, double a_field = 0.0)
         : dt_(dt) {
         assert(static_cast<int>(potential.size()) == g.n);
         const std::size_t n = potential.size();
@@ -38,7 +44,8 @@ public:
         const std::vector<double> k = wavenumbers(g);
         kinetic_.resize(n);
         for (std::size_t j = 0; j < n; ++j) {
-            const double th = -0.5 * k[j] * k[j] * dt;
+            const double km = k[j] - a_field;  // mechanical momentum
+            const double th = -0.5 * km * km * dt;
             kinetic_[j] = std::complex<double>{std::cos(th), std::sin(th)};
         }
     }
