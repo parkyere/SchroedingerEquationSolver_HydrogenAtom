@@ -143,7 +143,14 @@ TEST(PeierlsLattice2D, SolenoidLinksCarryPureTopology) {
 
 TEST(PeierlsLattice2D, GaugeCutDirectionIsInvisible) {
     // The SAME flux with the string cut running down instead of up is a
-    // gauge transformation: every density must match to round-off.
+    // gauge transformation G = diag(e^{i chi}): the link algebra
+    // (u_dn = u_up e^{i(chi_i - chi_{i+1})}, y-links force chi to be
+    // j-independent) gives chi = -phi on every site RIGHT of the solenoid
+    // column. U_down = G U_up G^dag, and gauge equivalence transforms the
+    // STATE too -- evolve G psi0 under the down cut and psi0 under the up
+    // cut, and every density matches to round-off. (Evolving the SAME
+    // psi0 under both differs at the packet-tail level: physically
+    // distinct preparations.)
     const Grid3D g = plane_grid(10.0, 64, 10.0, 64);
     const std::vector<double> v(static_cast<std::size_t>(g.size()), 0.0);
     const double phi = 2.4;
@@ -155,6 +162,19 @@ TEST(PeierlsLattice2D, GaugeCutDirectionIsInvisible) {
     down.set_solenoid(phi, xs, ys, false);
     Field3D a = plane_packet(g, -3.0, 0.5, 2.0, 1.0);
     Field3D b = a;
+    int is = -1;
+    for (int i = 0; i + 1 < g.x.n; ++i) {
+        if (g.x.coord(i) <= xs && xs < g.x.coord(i + 1)) {
+            is = i;
+        }
+    }
+    ASSERT_GE(is, 0);
+    const std::complex<double> gph{std::cos(phi), -std::sin(phi)};
+    for (int j = 0; j < g.y.n; ++j) {
+        for (int i = is + 1; i < g.x.n; ++i) {
+            b(i, j, 0) *= gph;
+        }
+    }
     up.step(a, 400);
     down.step(b, 400);
     for (int j = 0; j < g.y.n; j += 3) {
