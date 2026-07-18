@@ -168,6 +168,58 @@ inline std::vector<double> regularized_coulomb_potential(const Grid3D& g, double
     return v;
 }
 
+// Multi-center regularized bare Coulomb: the superposition of -Z/|r - c_k|
+// with each EXACT-hit nucleus cell taking its own analytic average (plus
+// the other centers' regular -Z/r there). Fixed nuclei, one electron --
+// the Born-Oppenheimer molecular potentials (H2+ and friends). Centers on
+// grid points keep every regularized cell honest; an off-point center
+// simply contributes bare -Z/r throughout (same convention as the
+// single-center builder).
+inline std::vector<double> regularized_coulomb_potential(
+    const Grid3D& g, double Z, const std::vector<Vec3d>& centers) {
+    const double h = g.x.spacing();
+    const double center_v = -Z * kCoulombCellAverage / h;
+    std::vector<double> v(static_cast<std::size_t>(g.size()), 0.0);
+    for (const Vec3d& c : centers) {
+        for (int k = 0; k < g.z.n; ++k) {
+            for (int j = 0; j < g.y.n; ++j) {
+                for (int i = 0; i < g.x.n; ++i) {
+                    const double dx = g.x.coord(i) - c.x;
+                    const double dy = g.y.coord(j) - c.y;
+                    const double dz = g.z.coord(k) - c.z;
+                    const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    v[static_cast<std::size_t>(g.flat(i, j, k))] +=
+                        (r < 1e-6 * h) ? center_v : -Z / r;
+                }
+            }
+        }
+    }
+    return v;
+}
+
+// Multi-center soft Coulomb: the molecular-toy pseudopotential (smooth, so
+// off-lattice centers keep their symmetry to O(h^2) -- the six-center
+// benzene ring cannot sit on a cubic lattice exactly).
+inline std::vector<double> soft_coulomb_potential(
+    const Grid3D& g, double Z, double a, const std::vector<Vec3d>& centers) {
+    std::vector<double> v(static_cast<std::size_t>(g.size()), 0.0);
+    const double a2 = a * a;
+    for (const Vec3d& c : centers) {
+        for (int k = 0; k < g.z.n; ++k) {
+            for (int j = 0; j < g.y.n; ++j) {
+                for (int i = 0; i < g.x.n; ++i) {
+                    const double dx = g.x.coord(i) - c.x;
+                    const double dy = g.y.coord(j) - c.y;
+                    const double dz = g.z.coord(k) - c.z;
+                    v[static_cast<std::size_t>(g.flat(i, j, k))] +=
+                        -Z / std::sqrt(dx * dx + dy * dy + dz * dz + a2);
+                }
+            }
+        }
+    }
+    return v;
+}
+
 // Absorbing mask for the periodic box: exactly 1 in the interior, cos^2
 // ramp to 0 within `width` of each wall. psi *= mask each real-time step
 // damps outgoing flux instead of periodic wrap-around; never applied during
