@@ -727,8 +727,8 @@ private:
                                  ses_vk::SceneRenderer::kMaxOverlayCurves);
         for (int c = 0; c < nov; ++c) {
             const ses_shell::OverlayCurve oc = director_->overlay_curve(c);
-            in.overlay[c] = {oc.xyz, oc.count, oc.r, oc.g, oc.b, oc.a,
-                             oc.fill};
+            in.overlay[c] = {oc.xyz, oc.count, oc.r,    oc.g,
+                             oc.b,   oc.a,     oc.fill, oc.rgba};
         }
         in.overlay_count = nov;
         // Scene props: origin marker + visualized barrier slab.

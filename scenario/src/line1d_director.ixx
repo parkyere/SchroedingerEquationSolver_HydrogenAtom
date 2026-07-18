@@ -25,9 +25,12 @@ export import ses.propagator;
 // microseconds per split-operator step, so no engine is involved and
 // gpu_ok() stays false by design. Display goes through the overlay polyline
 // seam: the wavefunction as the white phasor curve (radius = r_scale |psi|^2,
-// twist = arg psi -- phase is geometry here, never color) and the potential
-// as the red profile in the z = 0 plane. The 3D machinery (volume, mesh,
-// flow) is disabled wholesale: cloud() false, no staging, no marker.
+// twist = arg psi -- ON THE CURVE phase is geometry, never color), its
+// |psi|^2 shadow band on the z = 0 plane (phase as per-vertex hue there,
+// the volume view's wheel -- the plane is where color-coded phase lives),
+// and the potential as the red profile in the z = 0 plane. The 3D
+// machinery (volume, mesh, flow) is disabled wholesale: cloud() false, no
+// staging, no marker.
 // volk.h textually first: VK_* macros never cross module boundaries.
 
 
@@ -55,9 +58,10 @@ public:
             display_changed_ = true;
             after_batch();
         }
-        // Rebuild the phasor curve every frame: key handlers mutate psi
-        // between frames too, and 3 * n floats is trivial work.
-        psi_curve_ = ses::phasor_curve(psi_, r_scale_);
+        // Rebuild the phasor curve and its plane shadow every frame: key
+        // handlers mutate psi between frames too, and a few n floats is
+        // trivial work.
+        rebuild_psi_display();
         if (title_due_) {
             title_due_ = false;
             title_dirty_ = true;
@@ -120,12 +124,19 @@ public:
 
     bool center_marker() const override { return false; }
 
-    int overlay_curve_count() const override { return 3; }
+    int overlay_curve_count() const override { return 4; }
     OverlayCurve overlay_curve(int i) const override {
         if (i == 0) {  // faint xy (z = 0) reference sheet, drawn first
             return {plane_quad_.data(), 4, 0.45f, 0.55f, 0.75f, 0.07f, true};
         }
-        if (i == 1) {  // the potential profile: warm red, slightly translucent
+        if (i == 1) {
+            // |psi|^2 projected onto the plane as the phasor tube's shadow
+            // band, phase as per-vertex hue (the volume view's wheel) --
+            // constant rgba here is ignored, the color array wins.
+            return {dens_band_.data(), 2 * grid1d_.n, 1.0f, 1.0f,
+                    1.0f,              1.0f,          true, dens_cols_.data()};
+        }
+        if (i == 2) {  // the potential profile: warm red, slightly translucent
             return {pot_curve_.data(), grid1d_.n, 1.0f, 0.30f, 0.25f, 0.9f};
         }
         // The wavefunction: white phasor curve, on top.
@@ -170,7 +181,7 @@ protected:
     void set_state(ses::Field1D f) {
         initial_ = f;
         psi_ = std::move(f);
-        psi_curve_ = ses::phasor_curve(psi_, r_scale_);
+        rebuild_psi_display();
         display_changed_ = true;
     }
     // Boundary absorber (tunneling): psi *= mask each step.
@@ -192,9 +203,17 @@ protected:
     // Replace the live psi without touching the reset target.
     void replace_state(ses::Field1D f) {
         psi_ = std::move(f);
-        psi_curve_ = ses::phasor_curve(psi_, r_scale_);
+        rebuild_psi_display();
         display_changed_ = true;
         title_dirty_ = true;
+    }
+
+    // The white curve, its plane-shadow band, and the band's phase hues
+    // move together with psi.
+    void rebuild_psi_display() {
+        psi_curve_ = ses::phasor_curve(psi_, r_scale_);
+        dens_band_ = ses::density_band(psi_, r_scale_);
+        dens_cols_ = ses::phase_band_colors(psi_, kBandAlpha);
     }
 
     void step_batch(int n) {
@@ -237,9 +256,15 @@ protected:
     bool display_changed_ = true;
     bool compute_attempted_ = false;
 
+    // Loud enough to read hue, quiet enough that the white curve and the
+    // red potential stay the foreground.
+    static constexpr float kBandAlpha = 0.35f;
+
     std::vector<float> psi_curve_;
     std::vector<float> pot_curve_;
     std::vector<float> plane_quad_;
+    std::vector<float> dens_band_;
+    std::vector<float> dens_cols_;
 
 private:
     std::vector<float> no_staging_;

@@ -144,8 +144,10 @@ struct MorseApi {
 
 // A 1D-scene overlay primitive: packed (x, y, z) float triples drawn in
 // world space with a constant color -- a LINE_STRIP polyline, or with
-// `fill` a TRIANGLE_STRIP sheet (the faint xy reference plane). The xyz
-// pointer stays valid until the director's next run_frame().
+// `fill` a TRIANGLE_STRIP sheet (the faint xy reference plane). When
+// `rgba` is set (4 premultiplied floats per vertex) it REPLACES the
+// constant color -- the phase-hued density band. Both pointers stay valid
+// until the director's next run_frame().
 struct OverlayCurve {
     const float* xyz = nullptr;
     int count = 0;
@@ -154,6 +156,7 @@ struct OverlayCurve {
     float b = 1.0f;
     float a = 1.0f;
     bool fill = false;
+    const float* rgba = nullptr;  // per-vertex premultiplied color
 };
 
 class ScenarioDirector {

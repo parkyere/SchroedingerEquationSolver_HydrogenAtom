@@ -103,7 +103,9 @@ public:
     // A 1D-scene overlay primitive: packed (x, y, z) float triples drawn in
     // world space with a constant color -- a LINE_STRIP polyline (the white
     // phasor curve, the red potential profile) or, with `fill`, a
-    // TRIANGLE_STRIP sheet (the faint xy reference plane).
+    // TRIANGLE_STRIP sheet (the faint xy reference plane). A non-null
+    // `rgba` (4 premultiplied floats per vertex) REPLACES the constant
+    // color: the phase-hued density band.
     struct OverlayCurve {
         const float* xyz = nullptr;  // 3 * count floats, valid through render()
         int count = 0;               // vertices
@@ -112,8 +114,9 @@ public:
         float b = 1.0f;
         float a = 1.0f;              // coverage; rgb premultiplied at draw
         bool fill = false;           // triangle strip instead of line strip
+        const float* rgba = nullptr;  // 4 * count floats, premultiplied
     };
-    static constexpr int kMaxOverlayCurves = 4;
+    static constexpr int kMaxOverlayCurves = 6;
 
     // Per-frame inputs computed by the shell. Non-null mesh/volume_staging
     // pointers request a (re)upload before the pass records.
@@ -450,9 +453,13 @@ public:
             }
         }
 
-        // 1D-scene overlay polylines (phasor curve + potential profile) on
-        // top of either view: one LINE_STRIP per curve out of the shared
-        // packed SSBO, constant premultiplied color via push constant.
+        // 1D-scene overlay polylines (phasor curve + potential profile +
+        // phase-hued density band) on top of either view: one LINE_STRIP /
+        // TRIANGLE_STRIP per curve out of the shared packed SSBO. Push
+        // constants carry the constant premultiplied color plus the
+        // per-vertex-color switch (params.x) and color-region offset
+        // (params.y, float-index; may be negative after folding out the
+        // position base).
         if (in.overlay_count > 0 && overlay_pipe_ != VK_NULL_HANDLE) {
             vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     overlay_pl_, 0, 1, &overlay_set_, 0,
@@ -466,11 +473,23 @@ public:
                 vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                   cv.fill ? overlay_fill_pipe_
                                           : overlay_pipe_);
-                const float col[4] = {cv.r * cv.a, cv.g * cv.a, cv.b * cv.a,
-                                      cv.a};
+                // upload_overlay saw the same FrameInput this render(): a
+                // non-null rgba means overlay_col_off_[c] holds its base.
+                const bool per_vertex = cv.rgba != nullptr;
+                const float push[8] = {
+                    cv.r * cv.a,
+                    cv.g * cv.a,
+                    cv.b * cv.a,
+                    cv.a,
+                    per_vertex ? 1.0f : 0.0f,
+                    per_vertex ? static_cast<float>(overlay_col_off_[c])
+                               : 0.0f,
+                    0.0f,
+                    0.0f,
+                };
                 vkCmdPushConstants(cb, overlay_pl_,
-                                   VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(col),
-                                   col);
+                                   VK_SHADER_STAGE_VERTEX_BIT, 0,
+                                   sizeof(push), push);
                 vkCmdDraw(cb, static_cast<std::uint32_t>(cv.count), 1,
                           static_cast<std::uint32_t>(overlay_first_[c]), 0);
             }
@@ -1453,9 +1472,12 @@ private:
     }
 
     // 1D-scene overlay polylines: a LINE_STRIP pipeline vertex-pulling one
-    // packed host-visible (x,y,z) SSBO; constant color per draw via push
-    // constant. The mvp comes from the shared scene MeshUbo (the shader
-    // declares the layout-compatible prefix).
+    // packed host-visible SSBO laid out [positions 3f...][colors 4f...];
+    // constant color per draw via push constant, or -- when the curve
+    // carries per-vertex rgba (the phase-hued density band) -- pulled from
+    // the color region at a pushed float offset. The mvp comes from the
+    // shared scene MeshUbo (the shader declares the layout-compatible
+    // prefix).
     bool create_overlay(const RenderKernels& blobs) {
         const auto sbuf = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         const auto ubo = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -1475,7 +1497,7 @@ private:
             }
         }
         const VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT, 0,
-                                      4 * sizeof(float)};
+                                      8 * sizeof(float)};
         VkPipelineLayoutCreateInfo plci{};
         plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         plci.setLayoutCount = 1;
@@ -1523,20 +1545,26 @@ private:
     }
 
     // Pack the frame's overlay curves back to back into the host-visible
-    // SSBO (grow-only, descriptor re-pointed on regrow) and remember each
-    // curve's first vertex for its draw's firstVertex.
+    // SSBO (grow-only, descriptor re-pointed on regrow): all positions
+    // first, then the color arrays of the rgba curves. Remember each
+    // curve's first vertex for its draw's firstVertex, and each rgba
+    // curve's color base for the push-constant offset.
     bool upload_overlay(const FrameInput& in) {
         const int nc = std::min(in.overlay_count, kMaxOverlayCurves);
         std::size_t total = 0;
+        std::size_t ctotal = 0;
         for (int c = 0; c < nc; ++c) {
             if (in.overlay[c].xyz != nullptr && in.overlay[c].count > 0) {
                 total += static_cast<std::size_t>(in.overlay[c].count);
+                if (in.overlay[c].rgba != nullptr) {
+                    ctotal += static_cast<std::size_t>(in.overlay[c].count);
+                }
             }
         }
         if (total == 0) {
             return true;
         }
-        const VkDeviceSize bytes = total * 3 * sizeof(float);
+        const VkDeviceSize bytes = (total * 3 + ctotal * 4) * sizeof(float);
         if (bytes > overlay_buf_bytes_) {
             vkDeviceWaitIdle(ctx_->device);
             ctx_->destroy_buffer(&overlay_buf_);
@@ -1553,8 +1581,10 @@ private:
         }
         float* dst = static_cast<float*>(overlay_buf_.mapped);
         int first = 0;
+        std::size_t col = total * 3;  // color region starts after positions
         for (int c = 0; c < nc; ++c) {
             overlay_first_[c] = first;
+            overlay_col_off_[c] = -1;
             const OverlayCurve& cv = in.overlay[c];
             if (cv.xyz == nullptr || cv.count <= 0) {
                 continue;
@@ -1562,6 +1592,16 @@ private:
             std::memcpy(dst + 3 * first, cv.xyz,
                         static_cast<std::size_t>(cv.count) * 3 *
                             sizeof(float));
+            if (cv.rgba != nullptr) {
+                std::memcpy(dst + col, cv.rgba,
+                            static_cast<std::size_t>(cv.count) * 4 *
+                                sizeof(float));
+                // Shader color address = 4 * gl_VertexIndex + offset, with
+                // gl_VertexIndex including firstVertex -- fold the position
+                // base out here (may go negative; the shader uses ints).
+                overlay_col_off_[c] = static_cast<int>(col) - 4 * first;
+                col += static_cast<std::size_t>(cv.count) * 4;
+            }
             first += cv.count;
         }
         vmaFlushAllocation(ctx_->allocator, overlay_buf_.alloc, 0,
@@ -2165,6 +2205,7 @@ private:
     VkDeviceSize overlay_buf_bytes_ = 0;
     VkDescriptorSet overlay_set_ = VK_NULL_HANDLE;
     int overlay_first_[kMaxOverlayCurves] = {};
+    int overlay_col_off_[kMaxOverlayCurves] = {};  // -1: constant color
 
     DslHolder mesh_dsl_holder_;
     DslHolder vol_dsl_holder_;
