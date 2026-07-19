@@ -37,6 +37,18 @@ TEST(Wavenumbers, MatchesFftfreqLayout) {
     EXPECT_DOUBLE_EQ(k[7], -dk);
 }
 
+// RED: n = 1 (a squashed axis, e.g. the 2D scenes' z) has ONE bin -- DC.
+// The `j < n/2` branch maps it to j - n = -1, giving the flat axis a
+// spurious k = -2 pi / L: every 3D energy readout on an (nx, ny, 1) grid
+// then carries a constant +k^2/2 offset (pi^2/2 for L = 2 -- exactly the
+// corral's phantom +4.9348).
+TEST(Wavenumbers, SingleBinAxisIsDc) {
+    const Grid1D g{-1.0, 1.0, 1};
+    const std::vector<double> k = ses::wavenumbers(g);
+    ASSERT_EQ(k.size(), 1u);
+    EXPECT_DOUBLE_EQ(k[0], 0.0);
+}
+
 TEST(Wavenumbers, SpacingIsIndependentOfOffset) {
     // The mapping depends only on L and n, not on where the box sits.
     const Grid1D g{-13.0, -5.0, 8};  // same L = 8
