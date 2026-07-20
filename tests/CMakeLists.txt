@@ -86,6 +86,7 @@ add_executable(sesolver_tests
     solvable_wells_test.cpp
     spectral_test.cpp
     sphere_test.cpp
+    spheroidal_test.cpp
     time_scale_realtime_test.cpp
     trap_ladder_test.cpp
     volume_test.cpp
