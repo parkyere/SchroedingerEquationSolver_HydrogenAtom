@@ -158,6 +158,13 @@ struct MoleculeApi {
     // P(|r| < radius): the real-time containment probe -- a prepared bound
     // state must STAY on the nuclei (arc contract for the step accuracy).
     virtual double containment(double radius) = 0;
+    // Known molecular orbitals: how many the scene exposes (prepare(k) for
+    // k in [0, state_count)), and each one's term-symbol label.
+    virtual int state_count() const = 0;
+    virtual const char* orbital_label(int k) const = 0;
+    // Drop an arbitrary normalized wavefunction of random shape onto the
+    // scene and let it evolve (a superposition, not an eigenstate).
+    virtual void seed_random() = 0;
 };
 
 // The Morse anharmonic-ladder scene (eigenstate jumps, shrinking gaps).

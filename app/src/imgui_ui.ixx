@@ -585,9 +585,31 @@ void draw_h2plus_panel(ShellT& shell, UiState& ui, ses_shell::MoleculeApi& ml) {
     ImGui::Begin("Controls", nullptr, ImGuiWindowFlags_NoCollapse);
     draw_scene_picker(shell);
     draw_perf_readout(shell);
-    if (ImGui::Button("Relax sigma_g (2)")) shell.press('2');
-    ImGui::SameLine();
-    if (ImGui::Button("Relax sigma_u (3)")) shell.press('3');
+    // Known molecular orbitals: one button per exposed MO (keys 2..), each
+    // labeled by its term symbol; the chain relaxes up to the requested one.
+    const int nmo = ml.state_count();
+    for (int k = 0; k < nmo; ++k) {
+        char lbl[64];
+        std::snprintf(lbl, sizeof(lbl), "%s (%d)", ml.orbital_label(k),
+                      k + 2);
+        if (ImGui::Button(lbl)) {
+            shell.press(static_cast<char>('2' + k));
+        }
+        if (k + 1 < nmo) {
+            ImGui::SameLine();
+        }
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("The known H2+ molecular orbitals, resolved by "
+                          "symmetry (deflated imaginary time).\nHigher ones "
+                          "relax the whole chain below them first.");
+    }
+    if (ImGui::Button("Random wavefunction (S)")) shell.press('S');
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Drop an arbitrary normalized state of random "
+                          "shape and watch it evolve\n(a superposition of "
+                          "orbitals -- it beats and disperses).");
+    }
     ImGui::SameLine();
     if (ImGui::Button("Reset (R)")) shell.reset_simulation();
     if (ImGui::Button("Pause (Space)")) shell.toggle_pause();

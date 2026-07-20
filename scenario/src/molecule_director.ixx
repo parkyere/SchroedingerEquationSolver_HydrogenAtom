@@ -4,11 +4,13 @@ module;
 #include <cmath>
 #include <complex>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 export module ses.scenario.molecule_director;
 export import ses.scenario.base_director;
 import ses.wavepacket;
+import ses.scenario.molecular_seed;
 
 
 // One-electron molecules with FIXED nuclei (Born-Oppenheimer): the engine
@@ -54,6 +56,7 @@ public:
         if (!gpu_ok_ || k < 0 || k >= kStates) {
             return;  // the deflation chain runs on the GPU path only
         }
+        showing_random_ = false;
         want_ = k;
         advance_chain();
     }
@@ -79,6 +82,24 @@ public:
             }
         }
         return total > 0.0 ? inside / total : 0.0;
+    }
+    int state_count() const override { return exposed_states(); }
+    const char* orbital_label(int k) const override { return orbital_name(k); }
+    // Cancel any relax chain, drop an arbitrary normalized state, evolve it.
+    void seed_random() override {
+        if (!gpu_ok_) {
+            return;  // the scene lives on the GPU real-time path
+        }
+        fine_polish_ = false;
+        fine_left_ = 0;
+        engine_.release_relax_tables();
+        sim_.set_psi(ses_shell::random_molecular_seed(sim_.grid(),
+                                                      rand_seed_++));
+        cpu_is_truth_ = true;  // run_frame uploads the seed to the engine
+        stepping_ = BaseStepping::RealTime;
+        showing_random_ = true;
+        title_dirty_ = true;
+        stage_active_view();
     }
 
     double nuclear_repulsion() const override {
@@ -116,16 +137,13 @@ public:
     }
 
     bool handle_key(char key) override {
-        if (key == '2') {
-            prepare(0);
+        if (key == 'S' || key == 's') {
+            seed_random();
             return true;
         }
-        if (key == '3') {
-            prepare(1);
-            return true;
-        }
-        if (key == '4' && kStates > 2) {
-            prepare(2);
+        // Keys 2 .. 2+state_count()-1 prepare the known orbitals in order.
+        if (key >= '2' && key < static_cast<char>('2' + state_count())) {
+            prepare(key - '2');
             return true;
         }
         return false;
@@ -142,12 +160,15 @@ public:
     }
 
 protected:
-    static constexpr int kStates = 3;
+    static constexpr int kStates = 6;  // buffer capacity; scenes expose <= this
     // Fine-polish burst after the coarse plateau (see run_relax_batch).
     static constexpr double kMolFineDtau = 0.002;
     static constexpr int kMolFinePolishSteps = 600;  // tau ~ 1.2
 
     // ---- scene hooks ----
+    // How many known orbitals the scene exposes, and each one's label.
+    virtual int exposed_states() const = 0;
+    virtual const char* orbital_name(int /*k*/) const { return ""; }
     virtual std::vector<ses::Vec3d> centers() const = 0;
     // Per-center effective charges (parallel to centers()); default all 1.
     virtual std::vector<double> charges() const {
@@ -354,13 +375,15 @@ protected:
     std::vector<SceneMarker> balls_;
     int geom_ = 0;
     double param_ = 0.0;
-    int buf_[kStates] = {-1, -1, -1};
-    double e_[kStates] = {0.0, 0.0, 0.0};
-    bool prepared_[kStates] = {false, false, false};
+    int buf_[kStates] = {-1, -1, -1, -1, -1, -1};
+    double e_[kStates] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    bool prepared_[kStates] = {false, false, false, false, false, false};
     int want_ = 0;
     int target_ = 0;
     bool fine_polish_ = false;  // relax anneal stage (coarse -> fine)
     int fine_left_ = 0;         // remaining fine-burst steps (0 = coarse)
+    bool showing_random_ = false;  // last drop was a random seed, not an MO
+    std::uint64_t rand_seed_ = 0;  // random-seed counter (deterministic)
     std::vector<int> deflate_;
 };
 
@@ -395,25 +418,26 @@ protected:
         const double d = 0.5 * snap_r(param_);
         return {{-d, 0.0, 0.0}, {d, 0.0, 0.0}};
     }
-    // sigma_u: the x-odd seed keeps the flow in the odd sector; deflation
-    // against sigma_g is the belt to that suspender.
-    ses::Field3D excited_seed(int /*k*/) const override {
-        const ses::Grid3D& g = sim_.grid();
-        ses::Field3D seed{g};
-        for (int k = 0; k < g.z.n; ++k) {
-            for (int j = 0; j < g.y.n; ++j) {
-                for (int i = 0; i < g.x.n; ++i) {
-                    const double x = g.x.coord(i);
-                    const double y = g.y.coord(j);
-                    const double z = g.z.coord(k);
-                    const double env =
-                        std::exp(-(x * x + y * y + z * z) / (4.0 * 4.0));
-                    seed(i, j, k) = std::complex<double>{x * env, 0.0};
-                }
-            }
+    // The known MOs, resolved by symmetry sector (ses.scenario.molecular_
+    // seed): the seed's irrep factor keeps the deflated ITP in the right
+    // sector, so it converges to that sector's lowest orbital.
+    int exposed_states() const override { return 5; }
+    const char* orbital_name(int k) const override {
+        static const char* const kNames[5] = {
+            "1sigma_g (bonding)", "1sigma_u* (antibonding)", "1pi_u",
+            "1pi_u'", "2sigma_g"};
+        return (k >= 0 && k < 5) ? kNames[k] : "";
+    }
+    ses::Field3D excited_seed(int k) const override {
+        ses_shell::MolOrbital sym = ses_shell::MolOrbital::SigmaU;
+        switch (k) {
+            case 1: sym = ses_shell::MolOrbital::SigmaU; break;
+            case 2: sym = ses_shell::MolOrbital::PiUy; break;
+            case 3: sym = ses_shell::MolOrbital::PiUz; break;
+            case 4: sym = ses_shell::MolOrbital::SigmaG2; break;
+            default: sym = ses_shell::MolOrbital::SigmaU; break;
         }
-        ses::normalize(seed);
-        return seed;
+        return ses_shell::molecular_orbital_seed(sim_.grid(), sym);
     }
     double geometry_parameter(int variant) const override {
         return variant == 1 ? 6.0 : kH2pRDefault;  // 0 = equilibrium, 1 = stretched
@@ -427,13 +451,15 @@ protected:
         const double rep = nuclear_repulsion();
         std::string s = strf("  R = %.3f Bohr (fixed nuclei)", snap_r(param_));
         if (prepared_[0]) {
-            s += strf("  E(sigma_g) = %.4f, E_total = %.4f Ha", e_[0],
-                      e_[0] + rep);
+            s += strf("  E_total(sigma_g) = %.4f Ha", e_[0] + rep);
         }
-        if (prepared_[1]) {
-            s += strf("  E(sigma_u) = %.4f (antibonding)", e_[1]);
+        if (showing_random_) {
+            s += "  showing: random wavefunction (superposition)";
+        } else if (prepared_[target_]) {
+            s += strf("  showing %s: E = %.4f Ha", orbital_name(target_),
+                      e_[target_]);
         }
-        s += "  keys: 2 sigma_g / 3 sigma_u, R slider scans the bond";
+        s += "  keys: 2-6 orbitals / S random / R slider scans the bond";
         return s;
     }
 
@@ -498,6 +524,9 @@ public:
     // no counterfactual knobs in this simulator.
     void set_geometry(int /*variant*/) override {}
     void set_parameter(double /*p*/) override {}
+
+    // The deep carbon-core band: ground + two deflated members (keys 2/3/4).
+    int exposed_states() const override { return 3; }
 
     double default_camera_azimuth() const override { return 0.3; }
     double default_camera_elevation() const override { return 0.7; }

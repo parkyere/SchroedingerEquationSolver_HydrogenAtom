@@ -170,6 +170,7 @@ constexpr ArcScene kArcScenes[] = {
     {"selftest-spin", "spin"},
     {"selftest-spins", "spins"},
     {"selftest-h2p", "h2plus"},
+    {"selftest-h2p-orbitals", "h2plus"},
     {"selftest-benzene", "benzene"},
 };
 
@@ -1006,8 +1007,8 @@ int main(int argc, char* argv[]) {
           "selftest-cat",
           "selftest-corral", "selftest-decay", "selftest-doubleslit2d",
           "selftest-dw1d", "selftest-efield", "selftest-energy",
-          "selftest-h2p", "selftest-kepler", "selftest-ladder1d",
-          "selftest-landau",
+          "selftest-h2p", "selftest-h2p-orbitals", "selftest-kepler",
+          "selftest-ladder1d", "selftest-landau",
           "selftest-magnetic", "selftest-manifold", "selftest-morse1d",
           "selftest-partial", "selftest-pt1d", "selftest-qdot",
           "selftest-qpc2d",

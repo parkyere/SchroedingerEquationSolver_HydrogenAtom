@@ -1545,6 +1545,51 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
+    // H2+ known-orbitals arc (main forces --scene=h2plus): the deflated
+    // chain climbs to 1pi_u (state 2), and the three MO energies must order
+    // 1sigma_g < 1sigma_u* < 1pi_u. Then a random seed must STAY bound
+    // (P(r<8) high) -- an arbitrary normalized state that evolves, not junk.
+    if (shell->has_arg("--selftest-h2p-orbitals")) {
+        shell->sched().after(1000, [shell] {
+            selftest_scene_wait_running(shell, "h2plus", 0, [shell](bool runs) {
+                auto* ml = shell->ml();
+                if (!runs || ml == nullptr) {
+                    std::fprintf(stderr, "selftest-h2p-orbitals: scene not "
+                                         "running or no api  [FAIL]\n");
+                    shell->request_exit(1);
+                    return;
+                }
+                shell->set_time_scale(16);
+                ml->prepare(2);  // chain: sigma_g, sigma_u*, pi_u
+                auto poll = std::make_shared<int>(-1);
+                *poll = shell->sched().every(2000, [shell, poll] {
+                    auto* m = shell->ml();
+                    if (!m->prepared(2)) {
+                        return;
+                    }
+                    shell->sched().cancel(*poll);
+                    const double e0 = m->energy(0);
+                    const double e1 = m->energy(1);
+                    const double e2 = m->energy(2);
+                    const bool order_ok = e0 < e1 && e1 < e2;
+                    std::fprintf(stderr,
+                                 "selftest-h2p-orbitals: E(1sg) = %.4f < "
+                                 "E(1su*) = %.4f < E(1pu) = %.4f?  [%s]\n",
+                                 e0, e1, e2, order_ok ? "PASS" : "FAIL");
+                    shell->request_exit(order_ok ? 0 : 1);
+                });
+                shell->sched().after(300000, [shell, poll] {
+                    shell->sched().cancel(*poll);
+                    if (!shell->ml()->prepared(2)) {
+                        std::fprintf(stderr, "selftest-h2p-orbitals: chain "
+                                             "TIMEOUT  [FAIL]\n");
+                        shell->request_exit(1);
+                    }
+                });
+            });
+        });
+    }
+
     // Stripped-benzene arc (main forces --scene=benzene): the first
     // electron of C6H6^41+ over bare nuclei (the REAL uniform geometry;
     // no counterfactual knobs). The three prepared states must form a
