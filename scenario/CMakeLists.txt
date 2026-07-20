@@ -27,6 +27,7 @@ target_sources(ses_scenario
         src/lattice2d_director.ixx
         src/billiard2d_director.ixx
         src/anderson1d_director.ixx
+        src/carpet1d_director.ixx
         src/doubleslit2d_director.ixx
         src/landau2d_director.ixx
         src/bloch1d_director.ixx

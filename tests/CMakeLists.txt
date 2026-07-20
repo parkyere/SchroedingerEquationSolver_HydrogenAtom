@@ -24,6 +24,7 @@ add_executable(sesolver_tests
     billiard2d_test.cpp
     bloch_test.cpp
     camera_test.cpp
+    carpet1d_test.cpp
     colormap_test.cpp
     complex_test.cpp
     corral2d_test.cpp
