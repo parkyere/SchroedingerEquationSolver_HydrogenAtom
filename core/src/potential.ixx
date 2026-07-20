@@ -216,6 +216,10 @@ inline Vec3d snap_to_grid(const Grid3D& g, Vec3d p) {
 // imaginary-time state prep.
 inline std::vector<double> absorbing_mask(const Grid1D& g, double width) {
     std::vector<double> m(static_cast<std::size_t>(g.n));
+    if (g.n == 1) {
+        m[0] = 1.0;  // collapsed axis: dimensionless direction, no walls
+        return m;
+    }
     for (int i = 0; i < g.n; ++i) {
         const double x = g.coord(i);
         const double d_lo = x - g.xmin;

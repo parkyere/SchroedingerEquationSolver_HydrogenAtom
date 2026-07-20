@@ -210,7 +210,10 @@ inline Vec3d mean_momentum(const Field3D& f) {
                  obs_ratio(num.z, den)};
 }
 
-inline double mean_energy(const Field3D& f, const std::vector<double>& potential) {
+// mass: kinetic term <k^2>/(2 mass); default 1.0 is the legacy readout
+// (division by 1.0 is exact, so existing oracles are untouched).
+inline double mean_energy(const Field3D& f, const std::vector<double>& potential,
+                          double mass = 1.0) {
     double num_v = 0.0;
     double den_x = 0.0;
     for (std::size_t i = 0; i < f.data().size(); ++i) {
@@ -234,7 +237,7 @@ inline double mean_energy(const Field3D& f, const std::vector<double>& potential
                 const double kxx = kx[static_cast<std::size_t>(i)];
                 const double kyy = ky[static_cast<std::size_t>(j)];
                 const double kzz = kz[static_cast<std::size_t>(k)];
-                num_t += 0.5 * (kxx * kxx + kyy * kyy + kzz * kzz) * w;
+                num_t += 0.5 * (kxx * kxx + kyy * kyy + kzz * kzz) / mass * w;
                 den_k += w;
             }
         }

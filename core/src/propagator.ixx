@@ -72,7 +72,11 @@ private:
 // 3D split-operator: identical structure, kinetic phase over the 3D k-grid.
 class SplitOperator3D {
 public:
-    SplitOperator3D(const Grid3D& g, const std::vector<double>& potential, double dt)
+    // mass: kinetic phase exp(-i k^2/(2 mass) dt) -- the Cu(111) surface
+    // state (corral) runs m* != 1; the default 1.0 keeps every existing
+    // caller's tables bitwise identical (pinned by MassParameter tests).
+    SplitOperator3D(const Grid3D& g, const std::vector<double>& potential, double dt,
+                    double mass = 1.0)
         : dt_(dt) {
         assert(static_cast<int>(potential.size()) == g.size());
         const std::size_t n = potential.size();
@@ -93,7 +97,8 @@ public:
                     const double kxx = kx[static_cast<std::size_t>(i)];
                     const double kyy = ky[static_cast<std::size_t>(j)];
                     const double kzz = kz[static_cast<std::size_t>(k)];
-                    const double th = -0.5 * (kxx * kxx + kyy * kyy + kzz * kzz) * dt;
+                    const double th =
+                        -0.5 * (kxx * kxx + kyy * kyy + kzz * kzz) / mass * dt;
                     kinetic_[static_cast<std::size_t>(g.flat(i, j, k))] =
                         std::complex<double>{std::cos(th), std::sin(th)};
                 }

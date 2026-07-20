@@ -67,8 +67,10 @@ private:
 // 3D imaginary-time relaxation: identical structure over the 3D k-grid.
 class ImaginaryTimePropagator3D {
 public:
+    // mass: kinetic weight exp(-k^2/(2 mass) dtau); default 1.0 is bitwise
+    // the legacy tables (pinned by MassParameter tests).
     ImaginaryTimePropagator3D(const Grid3D& g, const std::vector<double>& potential,
-                              double dtau) {
+                              double dtau, double mass = 1.0) {
         assert(static_cast<int>(potential.size()) == g.size());
         const std::size_t n = potential.size();
 
@@ -87,8 +89,8 @@ public:
                     const double kxx = kx[static_cast<std::size_t>(i)];
                     const double kyy = ky[static_cast<std::size_t>(j)];
                     const double kzz = kz[static_cast<std::size_t>(k)];
-                    kinetic_[static_cast<std::size_t>(g.flat(i, j, k))] =
-                        std::exp(-0.5 * (kxx * kxx + kyy * kyy + kzz * kzz) * dtau);
+                    kinetic_[static_cast<std::size_t>(g.flat(i, j, k))] = std::exp(
+                        -0.5 * (kxx * kxx + kyy * kyy + kzz * kzz) / mass * dtau);
                 }
             }
         }
