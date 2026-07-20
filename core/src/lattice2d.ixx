@@ -308,4 +308,46 @@ double PeierlsLattice2D::energy(const Field3D& psi) const {
     return e / den;
 }
 
+// Landau-level ladder operator, in the SAME Landau gauge as
+// set_uniform_field (A = (-B y, 0), anchored at y = 0):
+//     a(-)    = (pi_x - i pi_y) / sqrt(2 B)   (lowers; annihilates the LLL)
+//     a(-dag) = (pi_x + i pi_y) / sqrt(2 B)   (raises <H> by omega_c = B)
+// with pi = -i grad - A discretized by central differences (periodic wrap;
+// the gauge is not wrap-consistent, so states must stay off the boundary --
+// magnetic length 1/sqrt(B) against the box, as the scene guarantees).
+// Result is UNNORMALIZED (a|n> = sqrt(n)|n-1>); callers renormalize.
+// CONTRACT: tests/lattice2d_test.cpp LandauLadderClimbsOneCyclotronQuantum.
+inline Field3D landau_ladder(const Field3D& psi, double b, bool up) {
+    const Grid3D& g = psi.grid();
+    const double h = g.x.spacing();
+    const double inv2h = 1.0 / (2.0 * h);
+    const double s = 1.0 / std::sqrt(2.0 * b);
+    Field3D out{g};
+    parallel_for(g.y.n, [&](int j) {
+        const int ny = g.y.n;
+        const int nx = g.x.n;
+        const double y = g.y.coord(j);
+        const int jp = (j + 1) % ny;
+        const int jm = (j - 1 + ny) % ny;
+        const std::complex<double> kI{0.0, 1.0};
+        for (int i = 0; i < nx; ++i) {
+            const int ip = (i + 1) % nx;
+            const int im = (i - 1 + nx) % nx;
+            const std::complex<double> ddx =
+                (psi(ip, j, 0) - psi(im, j, 0)) * inv2h;
+            const std::complex<double> ddy =
+                (psi(i, jp, 0) - psi(i, jm, 0)) * inv2h;
+            // pi_x = -i d_x - B y, pi_y = -i d_y: the lattice link
+            // theta = -B h y corresponds to A_x = +B y (empirically pinned
+            // by the contract -- the +B y sign made the pair the intra-level
+            // guiding-center operators, <H> unchanged).
+            const std::complex<double> pix = -kI * ddx - b * y * psi(i, j, 0);
+            const std::complex<double> piy = -kI * ddy;
+            out(i, j, 0) = s * (up ? (pix + kI * piy) : (pix - kI * piy));
+        }
+    });
+    return out;
+}
+
 }  // namespace ses
+
