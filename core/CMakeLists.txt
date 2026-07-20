@@ -34,6 +34,7 @@ target_sources(sesolver_core
         src/decay.ixx
         src/measurement.ixx
         src/radial.ixx
+        src/spheroidal.ixx
         src/observables.ixx
         src/bloch.ixx
         src/ladder.ixx
