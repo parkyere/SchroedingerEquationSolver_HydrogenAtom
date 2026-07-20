@@ -349,5 +349,14 @@ inline Field3D landau_ladder(const Field3D& psi, double b, bool up) {
     return out;
 }
 
+// 2D isotropic-HO CIRCULAR ladder at B = 0: a_R = (a_x - i a_y)/sqrt(2)
+// (right-circular quantum: a_R-dag adds exactly omega to <H> and +1 to
+// <L_z>). Central differences; UNNORMALIZED like landau_ladder.
+// CONTRACT: tests/ho2d_test.cpp.
+inline Field3D ho2d_ladder(const Field3D& psi, double /*omega*/,
+                           bool /*up*/) {
+    return Field3D{psi.grid()};  // RED stub
+}
+
 }  // namespace ses
 
