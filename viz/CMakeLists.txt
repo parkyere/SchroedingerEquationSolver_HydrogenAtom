@@ -13,7 +13,7 @@ foreach(_k IN ITEMS accum bloom_down bloom_up compose particles
     ses_bake_shader(_ses_viz_hdrs "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
                     "${_ses_viz_spv_dir}" "${_k}.comp" compute "${_k}")
 endforeach()
-foreach(_k IN ITEMS mesh.vert mesh.frag volume.vert volume.frag
+foreach(_k IN ITEMS mesh.vert mesh.frag marker.frag volume.vert volume.frag
         slice.vert slice.frag
         flow.vert flow.frag overlay.vert overlay.frag blit.vert blit.frag)
     string(REPLACE "." "_" _x "${_k}")

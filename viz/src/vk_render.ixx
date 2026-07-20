@@ -63,6 +63,8 @@ struct RenderKernels {
     std::size_t mesh_vert_size = 0;
     const unsigned char* mesh_frag = nullptr;
     std::size_t mesh_frag_size = 0;
+    const unsigned char* marker_frag = nullptr;  // glassy fresnel balls
+    std::size_t marker_frag_size = 0;
     const unsigned char* volume_vert = nullptr;
     std::size_t volume_vert_size = 0;
     const unsigned char* volume_frag = nullptr;
@@ -450,11 +452,7 @@ public:
             vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, mesh_pipe_);
             vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     mesh_pl_, 0, 1, &scene_set_, 0, nullptr);
-            if (in.marker_count > 0 && marker_vertex_count_ > 0) {
-                vkCmdBindVertexBuffers(cb, 0, 1, &marker_vbuf_.buf, &zero_off);
-                vkCmdDraw(cb, static_cast<std::uint32_t>(marker_vertex_count_),
-                          1, 0, 0);
-            }
+            // (Markers moved to the GLASSY pass after the overlays.)
             if (in.gpu_mesh_vbuf != VK_NULL_HANDLE &&
                 in.gpu_mesh_indirect != VK_NULL_HANDLE) {
                 // GPU-extracted mesh: the vertex count lives on the GPU
@@ -511,6 +509,21 @@ public:
                 vkCmdDraw(cb, static_cast<std::uint32_t>(cv.count), 1,
                           static_cast<std::uint32_t>(overlay_first_[c]), 0);
             }
+        }
+
+        // GLASSY marker balls: fresnel-translucent, depth-test on but
+        // depth-write off, drawn AFTER the overlays so the arrows and
+        // rings inside stay readable through the glass.
+        if (in.marker_count > 0 && marker_vertex_count_ > 0 &&
+            marker_pipe_ != VK_NULL_HANDLE) {
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              marker_pipe_);
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    mesh_pl_, 0, 1, &scene_set_, 0,
+                                    nullptr);
+            vkCmdBindVertexBuffers(cb, 0, 1, &marker_vbuf_.buf, &zero_off);
+            vkCmdDraw(cb, static_cast<std::uint32_t>(marker_vertex_count_),
+                      1, 0, 0);
         }
 
         // XYZ gizmo in the bottom-left corner, over both views. The corner
@@ -610,6 +623,7 @@ public:
         destroy_pipe(mesh_pipe_);
         destroy_pipe(volume_pipe_);
         destroy_pipe(slice_pipe_);
+        destroy_pipe(marker_pipe_);
         destroy_layout(mesh_pl_);
         destroy_layout(vol_pl_);
         mesh_dsl_holder_.destroy(*ctx_);
@@ -1195,8 +1209,16 @@ private:
             blobs.slice_frag_size, vol_pl_, nullptr, nullptr, 0,
             /*depth=*/false, VK_CULL_MODE_NONE, kBlendPremultiplied,
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+        // Glassy markers: mesh vertex stage + the fresnel fragment,
+        // premultiplied blend, depth-test WITHOUT depth-write.
+        marker_pipe_ = build_pipeline(
+            blobs.mesh_vert, blobs.mesh_vert_size, blobs.marker_frag,
+            blobs.marker_frag_size, mesh_pl_, &mesh_bind, mesh_attrs, 3,
+            /*depth=*/true, VK_CULL_MODE_NONE, kBlendPremultiplied,
+            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, /*depth_write=*/0);
         return mesh_pipe_ != VK_NULL_HANDLE && volume_pipe_ != VK_NULL_HANDLE &&
-               slice_pipe_ != VK_NULL_HANDLE;
+               slice_pipe_ != VK_NULL_HANDLE &&
+               marker_pipe_ != VK_NULL_HANDLE;
     }
 
     enum BlendMode { kBlendOff, kBlendPremultiplied, kBlendAdditive };
@@ -1208,7 +1230,8 @@ private:
                               const VkVertexInputAttributeDescription* attrs,
                               std::uint32_t attr_count, bool depth,
                               VkCullModeFlags cull, BlendMode blend,
-                              VkPrimitiveTopology topo) {
+                              VkPrimitiveTopology topo,
+                              int depth_write = -1) {  // -1: follow depth
         VkShaderModule vs = make_module(vs_spv, vs_size);
         VkShaderModule fs = make_module(fs_spv, fs_size);
         if (vs == VK_NULL_HANDLE || fs == VK_NULL_HANDLE) {
@@ -1259,7 +1282,9 @@ private:
         ds.sType =
             VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
         ds.depthTestEnable = depth ? VK_TRUE : VK_FALSE;
-        ds.depthWriteEnable = depth ? VK_TRUE : VK_FALSE;
+        ds.depthWriteEnable = depth_write < 0
+                                  ? (depth ? VK_TRUE : VK_FALSE)
+                                  : (depth_write != 0 ? VK_TRUE : VK_FALSE);
         ds.depthCompareOp = VK_COMPARE_OP_LESS;
 
         VkPipelineColorBlendAttachmentState ba{};
@@ -2282,6 +2307,7 @@ private:
     VkPipeline mesh_pipe_ = VK_NULL_HANDLE;
     VkPipeline volume_pipe_ = VK_NULL_HANDLE;
     VkPipeline slice_pipe_ = VK_NULL_HANDLE;
+    VkPipeline marker_pipe_ = VK_NULL_HANDLE;  // glassy fresnel balls
     VkSampler samp_3d_ = VK_NULL_HANDLE;
     VkSampler samp_1d_ = VK_NULL_HANDLE;
     DescriptorArena arena_;

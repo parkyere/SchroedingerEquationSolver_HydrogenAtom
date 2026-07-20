@@ -1,6 +1,7 @@
 module;
 #include <mesh_vert_spv.h>
 #include <mesh_frag_spv.h>
+#include <marker_frag_spv.h>
 #include <volume_vert_spv.h>
 #include <volume_frag_spv.h>
 #include <slice_vert_spv.h>
@@ -33,6 +34,8 @@ inline RenderKernels render_blobs() {
     r.mesh_vert_size = k_mesh_vert_spv_size;
     r.mesh_frag = k_mesh_frag_spv;
     r.mesh_frag_size = k_mesh_frag_spv_size;
+    r.marker_frag = k_marker_frag_spv;
+    r.marker_frag_size = k_marker_frag_spv_size;
     r.volume_vert = k_volume_vert_spv;
     r.volume_vert_size = k_volume_vert_spv_size;
     r.volume_frag = k_volume_frag_spv;
