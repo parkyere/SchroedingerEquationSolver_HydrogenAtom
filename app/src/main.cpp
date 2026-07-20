@@ -77,6 +77,7 @@ import ses.scenario.morse1d_director;
 import ses.scenario.ptwell1d_director;
 import ses.scenario.tunneling1d_director;
 import ses.scenario.selftest_arcs;
+import ses.camera;
 import ses.vk.render_blobs;
 import app.imgui_ui;
 import ses.vk.present;
@@ -676,7 +677,38 @@ private:
                         handle_key(e.key.key);
                     }
                     break;
+                case SDL_EVENT_MOUSE_BUTTON_DOWN:
+                    // RIGHT-drag on a 2D-HO surface point: grab the cloud
+                    // there (time freezes; pulling UP gathers the packet).
+                    if (!io.WantCaptureMouse &&
+                        e.button.button == SDL_BUTTON_RIGHT) {
+                        if (auto* qd = director_->qdot()) {
+                            double gx = 0.0;
+                            double gy = 0.0;
+                            if (pick_stage(e.button.x, e.button.y, &gx,
+                                           &gy)) {
+                                qd->begin_grab(gx, gy);
+                                grab_pixels_ = 0.0;
+                            }
+                        }
+                    }
+                    break;
+                case SDL_EVENT_MOUSE_BUTTON_UP:
+                    if (e.button.button == SDL_BUTTON_RIGHT) {
+                        if (auto* qd = director_->qdot()) {
+                            qd->end_grab();
+                        }
+                    }
+                    break;
                 case SDL_EVENT_MOUSE_MOTION:
+                    if (auto* qd = director_->qdot();
+                        qd != nullptr && qd->grabbing() &&
+                        (e.motion.state & SDL_BUTTON_RMASK) != 0) {
+                        grab_pixels_ -= e.motion.yrel;  // up = gather
+                        qd->update_grab(
+                            std::clamp(grab_pixels_ / 250.0, 0.0, 1.0));
+                        break;
+                    }
                     if (!io.WantCaptureMouse &&
                         (e.motion.state & SDL_BUTTON_LMASK) != 0) {
                         azimuth_ -= 0.01 * e.motion.xrel;
@@ -697,6 +729,24 @@ private:
                     break;
             }
         }
+    }
+
+    // Window point -> the z = 0 stage plane, through the renderer's exact
+    // orbit camera (ses.camera unproject_to_z0; CONTRACT: pick_test).
+    bool pick_stage(float mx, float my, double* out_x, double* out_y) {
+        int w = 0;
+        int h = 0;
+        SDL_GetWindowSize(window_, &w, &h);
+        if (w <= 0 || h <= 0) {
+            return false;
+        }
+        const double kPi = 3.14159265358979323846;
+        const double ndc_x = 2.0 * mx / w - 1.0;
+        const double ndc_y = 1.0 - 2.0 * my / h;
+        return ses::unproject_to_z0(azimuth_, elevation_, distance_,
+                                    45.0 * kPi / 180.0,
+                                    static_cast<double>(w) / h, ndc_x,
+                                    ndc_y, out_x, out_y);
     }
 
     // Generic keys live here; everything else is offered to the scenario as
@@ -871,6 +921,7 @@ private:
     int pending_scene_ = -1; // panel-requested switch, applied at frame top
 
     SDL_Window* window_ = nullptr;
+    double grab_pixels_ = 0.0;  // grab drag height (px, up = positive)
     VkSurfaceKHR surface_ = VK_NULL_HANDLE;
 
     std::vector<std::string> args_;

@@ -108,12 +108,29 @@ inline Vec3d orbit_eye(double azimuth, double elevation, double distance, Vec3d 
 // scenes' floor): NDC point -> world (x, y). False when the ray misses
 // (parallel or behind the eye). CONTRACT: tests/pick_test.cpp round-trips
 // through perspective * look_at.
-inline bool unproject_to_z0(double /*azimuth*/, double /*elevation*/,
-                            double /*distance*/, double /*fovy*/,
-                            double /*aspect*/, double /*ndc_x*/,
-                            double /*ndc_y*/, double* /*out_x*/,
-                            double* /*out_y*/) noexcept {
-    return false;  // RED stub
+inline bool unproject_to_z0(double azimuth, double elevation,
+                            double distance, double fovy, double aspect,
+                            double ndc_x, double ndc_y, double* out_x,
+                            double* out_y) noexcept {
+    const Vec3d eye = orbit_eye(azimuth, elevation, distance, Vec3d{});
+    const Vec3d f = normalized(Vec3d{} - eye);
+    const Vec3d s = normalized(cross(f, Vec3d{0.0, 1.0, 0.0}));
+    const Vec3d u = cross(s, f);
+    const double tf = std::tan(0.5 * fovy);
+    const double cx = ndc_x * tf * aspect;
+    const double cy = ndc_y * tf;
+    const Vec3d dir{f.x + s.x * cx + u.x * cy, f.y + s.y * cx + u.y * cy,
+                    f.z + s.z * cx + u.z * cy};
+    if (std::abs(dir.z) < 1e-12) {
+        return false;  // ray runs inside the plane
+    }
+    const double t = -eye.z / dir.z;
+    if (t <= 0.0) {
+        return false;  // plane behind the eye
+    }
+    *out_x = eye.x + t * dir.x;
+    *out_y = eye.y + t * dir.y;
+    return true;
 }
 
 }  // namespace ses
