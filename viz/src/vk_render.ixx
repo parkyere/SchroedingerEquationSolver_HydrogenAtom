@@ -679,6 +679,11 @@ public:
         particles_set_ = VK_NULL_HANDLE;
         flow_set_ = VK_NULL_HANDLE;
         overlay_set_ = VK_NULL_HANDLE;
+        // Marker memo trio: a byte-identical default marker list on the next
+        // scene would otherwise skip ensure_marker_vbuf's rebuild and draw
+        // from the destroyed (VK_NULL_HANDLE) vertex buffer.
+        marker_cached_count_ = -1;
+        marker_vertex_count_ = 0;
         ctx_ = nullptr;
     }
 

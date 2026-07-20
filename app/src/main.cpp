@@ -680,7 +680,11 @@ private:
                 measure_now();
                 return;
             case SDLK_F:
-                // Probability-current flow particles (Bohmian tracers).
+                // Scene hotkey first (corral Packet, qdot Displace); an
+                // unhandled F toggles the flow tracers (Bohmian current).
+                if (director_->handle_key('F')) {
+                    return;
+                }
                 flow_on_ = !flow_on_;
                 return;
             case SDLK_TAB:

@@ -68,6 +68,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # ---------------------------------------------------------------------------
 option(SES_BUILD_TESTS        "Build unit tests"                          ON)
 option(SES_BUILD_APP          "Build the SDL3/Vulkan app (requires SDL3)" ON)
+option(SES_BUILD_GPU          "Build the GPU layers solver/viz/scenario + vkcheck (requires vcpkg Vulkan packages)" ON)
 option(SES_BUILD_BENCH        "Build the manual micro-benchmark"          ON)
 option(SES_ENABLE_AVX2        "Compile with AVX2 (x86-64 CPUs from ~2013)" ON)
 option(SES_NATIVE             "Tune for the build host CPU (-march=native)" OFF)
@@ -165,16 +166,21 @@ if(SES_BUILD_TESTS)
     enable_testing()
 endif()
 
-# Shared build machinery for the GPU layers (slangc AOT bake, VkFFT probe).
-include(tools/cmake/ses_slang.cmake)
-include(tools/cmake/ses_vkfft.cmake)
-
-# The layered libraries. All windowing-free: the Schrodinger GPGPU solver
-# (with its headless vkcheck harness), the raw-Vulkan viz, and the physics
-# scenario orchestration. Always built -- only the SDL shell is gated below.
-add_subdirectory(solver)
-add_subdirectory(viz)
-add_subdirectory(scenario)
+# The layered GPU libraries. All windowing-free: the Schrodinger GPGPU
+# solver (with its headless vkcheck harness), the raw-Vulkan viz, and the
+# physics scenario orchestration. Gated so the documented core-only TDD
+# loop (-DSES_BUILD_GPU=OFF, no vcpkg) still configures -- solver/
+# hard-REQUIREs the vcpkg Vulkan packages.
+if(SES_BUILD_GPU)
+    # Shared build machinery for the GPU layers (slangc AOT bake, VkFFT probe).
+    include(tools/cmake/ses_slang.cmake)
+    include(tools/cmake/ses_vkfft.cmake)
+    add_subdirectory(solver)
+    add_subdirectory(viz)
+    add_subdirectory(scenario)
+else()
+    message(STATUS "SES_BUILD_GPU=OFF - core-only loop (no solver/viz/scenario/app).")
+endif()
 
 if(SES_BUILD_TESTS)
     add_subdirectory(tests)
@@ -186,7 +192,7 @@ endif()
 
 # GUI shell. Auto-skipped (with a warning) when SDL3 is not installed, so the
 # core library and the TDD test loop never depend on a windowing toolkit.
-if(SES_BUILD_APP)
+if(SES_BUILD_APP AND SES_BUILD_GPU)
     find_package(SDL3 CONFIG QUIET)
     if(SDL3_FOUND)
         message(STATUS "SDL3 ${SDL3_VERSION} found - building 'sesolver_app'.")

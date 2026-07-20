@@ -49,6 +49,7 @@ struct HydrogenApi {
     virtual int last_partial_outcome() const = 0;
     virtual void set_efield_e0(double e0) = 0;
     virtual void set_bfield_b(double b) = 0;
+    virtual double bfield_b() const = 0;  // director truth (panel syncs back)
     virtual void toggle_bfield_axis() = 0;
     virtual int bfield_axis() const = 0;
     virtual double ionized_fraction() const = 0;

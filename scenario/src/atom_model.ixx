@@ -358,10 +358,19 @@ public:
         }
         // Synthesis captures each state's grid norm (state_norm2_), which
         // projections and the MCWF terms divide by; the channel table itself
-        // is the factorized CPU build.
+        // is the factorized CPU build. TRANSIENT synthesis: only the norm is
+        // needed, so nothing stays resident (a resident loop pinned
+        // n_states x 134 MB fp32 forever -- ~2.7 GB the trap never read).
         bool ok = true;
         for (int idx = 0; idx < n_states_ && ok; ++idx) {
-            ok = ensure_state(engine, idx);
+            if (state_buf_[static_cast<std::size_t>(idx)] >= 0) {
+                continue;  // already resident elsewhere: norm is captured
+            }
+            const int h = synth_transient(engine, idx);
+            ok = h >= 0;
+            if (ok) {
+                engine.release_state(h);
+            }
         }
         if (!ok) {
             return false;

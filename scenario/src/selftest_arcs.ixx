@@ -150,6 +150,12 @@ void register_verification_arcs(ShellT* shell) {
     // both the volume clip path and the slice pipeline end to end.
     if (shell->has_arg("--dump-frame-slice")) {
         run_when_manifold_ready(shell, [shell] {
+            if (shell->hy() == nullptr) {  // arc needs the hydrogen manifold
+                std::fprintf(stderr, "dump-frame-slice: requires the hydrogen "
+                                     "scene (--scene=hydrogen)  [FAIL]\n");
+                shell->request_exit(1);
+                return;
+            }
             shell->hy()->debug_prepare_state(k3DZ0);  // a lobed orbital (3d_z2)
             shell->enable_cross_section_demo();
             shell->sched().after(2500, [shell] {

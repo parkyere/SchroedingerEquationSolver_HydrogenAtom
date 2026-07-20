@@ -582,6 +582,7 @@ public:
     // Magnetic field strength (au) along the current axis; 0 = off. Minimal
     // coupling: the diamagnetic term is folded into the half-potential here;
     // the per-frame magnetic_step adds only the paramagnetic rotation.
+    double bfield_b() const override { return bfield_b_; }
     void set_bfield_b(double b) override {
         bfield_b_ = b;
         if (b > 0.0) {

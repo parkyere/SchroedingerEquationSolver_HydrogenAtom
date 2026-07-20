@@ -344,6 +344,9 @@ void draw_hydrogen_panel(ShellT& shell, UiState& ui, ses_shell::HydrogenApi& hy)
         hy.toggle_bfield_axis();
     }
     ImGui::SameLine();
+    // Director truth first (the time-scale pattern): R / Laser zero B in the
+    // director, and the slider must follow, not keep its dragged value.
+    ui.bfield = static_cast<float>(hy.bfield_b());
     if (ImGui::SliderFloat("B-field (au)", &ui.bfield, 0.0f, 0.2f, "%.3f")) {
         hy.set_bfield_b(static_cast<double>(ui.bfield));
     }

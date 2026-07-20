@@ -133,7 +133,7 @@ Wayland dev stacks). The routinely exercised configuration is Windows/MSVC.
 Lightweight core-only loop (no vcpkg, no GUI, no GPU):
 
 ```sh
-cmake -S . -B build -DSES_BUILD_APP=OFF
+cmake -S . -B build -DSES_BUILD_GPU=OFF
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
