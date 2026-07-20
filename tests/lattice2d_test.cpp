@@ -414,4 +414,50 @@ TEST(PeierlsLattice2D, RelaxConfinesTheCorralGround) {
     EXPECT_LT(e, 2.0 * e_hard);
 }
 
+// RED: the Landau-level ladder operator, in the SAME Landau gauge as
+// set_uniform_field (A = (-B y, 0), anchored at y = 0):
+//     a(+-) = (pi_x -+ i pi_y) / sqrt(2 B),   pi = -i grad - A.
+// Contracts: a annihilates the relaxed lowest level (residual norm ~ 0);
+// a-dag climbs one rung, raising the lattice <H> by omega_c = B within the
+// O((kh)^2) lattice-band tolerance. Result is unnormalized (a|n> =
+// sqrt(n)|n-1>); the scene renormalizes for display.
+TEST(PeierlsLattice2D, LandauLadderClimbsOneCyclotronQuantum) {
+    const ses::Grid3D g{ses::Grid1D{-20.0, 20.0, 128},
+                        ses::Grid1D{-20.0, 20.0, 128}, ses::Grid1D{0.0, 2.0, 1}};
+    const std::vector<double> zero(static_cast<std::size_t>(g.size()), 0.0);
+    const double b = 0.5;
+    ses::PeierlsLattice2D prop{g, zero, 0.01};
+    prop.set_uniform_field(b);
+
+    // Relax to the lowest Landau level (magnetic length 1/sqrt(b) ~ 1.41).
+    ses::Field3D psi{g};
+    for (int j = 0; j < g.y.n; ++j) {
+        const double y = g.y.coord(j);
+        for (int i = 0; i < g.x.n; ++i) {
+            const double x = g.x.coord(i);
+            psi(i, j, 0) = std::exp(-(x * x + y * y) * 0.25);
+        }
+    }
+    ses::normalize(psi);
+    prop.relax(psi, 3000);
+    ses::normalize(psi);
+    const double e0 = prop.energy(psi);
+
+    // a annihilates the LLL: the residual is a small lattice artifact.
+    ses::Field3D down = ses::landau_ladder(psi, b, false);
+    EXPECT_LT(ses::norm_sq(down), 0.05);
+
+    // a-dag climbs to n = 1: <H> rises by omega_c = B (lattice-honest band).
+    ses::Field3D up = ses::landau_ladder(psi, b, true);
+    ses::normalize(up);
+    const double e1 = prop.energy(up);
+    EXPECT_NEAR((e1 - e0) / b, 1.0, 0.15);
+
+    // Second rung: another +B.
+    ses::Field3D up2 = ses::landau_ladder(up, b, true);
+    ses::normalize(up2);
+    const double e2 = prop.energy(up2);
+    EXPECT_NEAR((e2 - e1) / b, 1.0, 0.2);
+}
+
 }  // namespace
