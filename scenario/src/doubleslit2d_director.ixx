@@ -17,6 +17,7 @@ export import ses.grid;
 export import ses.lattice2d;
 export import ses.potential;
 import ses.parallel;
+import ses.heightfield;
 
 
 // The REAL double-slit + Aharonov-Bohm experiment, in 2D, literally: an
@@ -58,6 +59,16 @@ constexpr double kDs2dWidthMax = 4.0;
 constexpr double kDs2dScreenX = 45.0;
 constexpr double kDs2dAbsorb = 10.0;
 constexpr int kDs2dStepsPerTick = 10;  // ~6 au/s at 60 fps: 13 s transit
+// Continuous electron beam (user order): a coherent ON-SHELL source feeds
+// the box every step -- psi += A src e^{-i w t} dt, w = the lattice band
+// energy of k0 -- against the open edge absorbers; injection balances
+// absorption into a steady interference state.
+// CONTRACT: lattice2d_test BeamSourceWithOpenBoundaryReachesSteadyState.
+constexpr double kDs2dSrcAmp = 0.05;
+constexpr double kDs2dSrcSigX = 2.0;
+// IBM-style STM height surface (like the corral): z = |psi|^2 peak-tracked.
+constexpr double kDs2dSurfH = 6.0;
+constexpr int kDs2dMeshStride = 2;  // 512^2 physics -> 256^2 display mesh
 
 class DoubleSlit2DDirector final : public ScenarioDirector, public SlitApi {
 public:
@@ -68,7 +79,8 @@ public:
           disp_grid_{ses::Grid1D{-kDs2dBoxX, kDs2dBoxX, kDs2dNx},
                      ses::Grid1D{-kDs2dBoxY, kDs2dBoxY, kDs2dNy},
                      ses::Grid1D{-kDs2dZHalf, kDs2dZHalf, kDs2dNz}},
-          psi_{phys_grid_} {
+          psi_{phys_grid_},
+          src_{phys_grid_} {
         build_mask();
         rebuild_wall_and_prop();
         fire();
@@ -146,7 +158,20 @@ public:
         }
         if (staging_dirty_) {
             staging_dirty_ = false;
-            rebuild_staging();
+            // Peak SNAP then 0.98-decay (the corral rule).
+            double cur = 0.0;
+            for (int j = 0; j < kDs2dNy; ++j) {
+                for (int i = 0; i < kDs2dNx; ++i) {
+                    cur = std::max(cur, std::norm(psi_(i, j, 0)));
+                }
+            }
+            disp_peak_ = disp_peak_ <= 0.0 ? cur
+                                           : std::max(cur, 0.98 * disp_peak_);
+            if (disp_peak_ > 0.0) {
+                hf_ = ses::heightfield_surface(psi_, kDs2dSurfH, disp_peak_,
+                                               kDs2dMeshStride);
+                mesh_dirty_ = true;
+            }
             rebuild_screen_curve();
         }
         if (++frames_ % 10 == 0) {
@@ -181,7 +206,7 @@ public:
     double sim_dt() const override { return kDs2dDt; }
 
     // ---- display ----
-    bool cloud() const override { return true; }
+    bool cloud() const override { return false; }  // STM height surface
     double peak() const override { return peak_; }
     VkImageView psi_volume_view() override { return VK_NULL_HANDLE; }
     float next_flash_intensity() override { return 0.0f; }
@@ -191,7 +216,9 @@ public:
     bool take_volume_dirty() override {
         return std::exchange(vol_dirty_, false);
     }
-    bool take_mesh_dirty() override { return false; }
+    bool take_mesh_dirty() override {
+        return std::exchange(mesh_dirty_, false);
+    }
     void mark_display_dirty() override {
         display_changed_ = true;
         vol_dirty_ = true;
@@ -202,9 +229,9 @@ public:
     const std::vector<float>& psi_staging() const override {
         return staging_;
     }
-    const ses::Mesh& mesh() const override { return no_mesh_; }
+    const ses::Mesh& mesh() const override { return hf_.mesh; }
     const std::vector<ses::Rgb>& colors() const override {
-        return no_colors_;
+        return hf_.colors;
     }
     std::string title_text() override {
         const double pi = 3.14159265358979323846;
@@ -243,8 +270,8 @@ public:
                 0.35f, 0.85f, 1.0f, 0.95f};
     }
 
-    double default_camera_azimuth() const override { return 0.0; }
-    double default_camera_elevation() const override { return 0.0; }
+    double default_camera_azimuth() const override { return 0.35; }
+    double default_camera_elevation() const override { return 0.95; }
     double default_camera_distance() const override { return 170.0; }
 
 private:
@@ -299,27 +326,27 @@ private:
     }
 
     void fire() {
+        // Vacuum boot: the CONTINUOUS beam fills the box (no one-shot
+        // packet, no normalization -- the steady state balances the source
+        // against the edge absorbers). The emitter is a narrow column at
+        // the old launch x, wide in y, carrying the +x on-shell phase.
         ses::parallel_for(kDs2dNy, [&](int j) {
             const double y = phys_grid_.y.coord(j);
             for (int i = 0; i < kDs2dNx; ++i) {
                 const double x = phys_grid_.x.coord(i);
                 const double dx = x - kDs2dLaunchX;
-                const double env =
-                    std::exp(-(dx * dx + y * y) /
-                             (4.0 * kDs2dSigma * kDs2dSigma));
-                psi_(i, j, 0) =
-                    env * std::complex<double>{std::cos(kDs2dK0 * x),
-                                               std::sin(kDs2dK0 * x)};
+                psi_(i, j, 0) = 0.0;
+                src_(i, j, 0) =
+                    std::exp(-dx * dx / (2.0 * kDs2dSrcSigX * kDs2dSrcSigX) -
+                             y * y / (4.0 * kDs2dSigma * kDs2dSigma)) *
+                    std::complex<double>{std::cos(kDs2dK0 * x),
+                                         std::sin(kDs2dK0 * x)};
             }
         });
-        ses::normalize(psi_);
-        double pk = 0.0;
-        for (int j = 0; j < kDs2dNy; ++j) {
-            for (int i = 0; i < kDs2dNx; ++i) {
-                pk = std::max(pk, std::norm(psi_(i, j, 0)));
-            }
-        }
-        peak_ = pk;
+        const double hx = phys_grid_.x.spacing();
+        src_omega_ = (1.0 - std::cos(kDs2dK0 * hx)) / (hx * hx);
+        disp_peak_ = 0.0;
+        peak_ = 1.0;
         screen_.assign(static_cast<std::size_t>(kDs2dNy), 0.0);
         sim_time_ = 0.0;
         pending_steps_ = 0;
@@ -339,14 +366,21 @@ private:
         }
         for (int s = 0; s < n; ++s) {
             prop_->step(psi_);
-            // Edge absorbers (reflected wave + pattern leaving the stage).
+            // Edge absorbers (leaked flux VANISHES -- open stage) + the
+            // continuous on-shell source injection.
+            sim_beam_t_ += kDs2dDt;
+            const std::complex<double> ph{std::cos(src_omega_ * sim_beam_t_),
+                                          -std::sin(src_omega_ * sim_beam_t_)};
             ses::parallel_for(kDs2dNy, [&](int j) {
                 const std::size_t row =
                     static_cast<std::size_t>(j) *
                     static_cast<std::size_t>(kDs2dNx);
                 for (int i = 0; i < kDs2dNx; ++i) {
-                    psi_.data()[row + static_cast<std::size_t>(i)] *=
-                        mask_[static_cast<std::size_t>(j * kDs2dNx + i)];
+                    const std::size_t c = row + static_cast<std::size_t>(i);
+                    psi_.data()[c] =
+                        psi_.data()[c] *
+                            mask_[static_cast<std::size_t>(j * kDs2dNx + i)] +
+                        kDs2dSrcAmp * kDs2dDt * ph * src_.data()[c];
                 }
             });
             // The screen integrates arrivals: sum |psi|^2 dt on its line.
@@ -511,6 +545,12 @@ private:
     bool compute_attempted_ = false;
 
     ses::Mesh no_mesh_;
+    ses::Field3D src_;
+    double src_omega_ = 0.0;
+    double sim_beam_t_ = 0.0;
+    ses::Heightfield hf_;
+    bool mesh_dirty_ = false;
+    double disp_peak_ = 0.0;
     std::vector<ses::Rgb> no_colors_;
 };
 
