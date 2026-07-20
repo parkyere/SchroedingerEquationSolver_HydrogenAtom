@@ -47,6 +47,7 @@ target_sources(sesolver_core
         src/mcwf1d.ixx
         src/spin.ixx
         src/spinlattice.ixx
+        src/spinexact.ixx
         src/sampling.ixx
         src/projection.ixx
         src/drive.ixx
