@@ -54,6 +54,7 @@ add_executable(sesolver_tests
     lattice2d_test.cpp
     magnetic_test.cpp
     marching_cubes_test.cpp
+    mcwf1d_test.cpp
     mcwf_test.cpp
     measurement_test.cpp
     molecule_test.cpp

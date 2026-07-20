@@ -44,6 +44,7 @@ target_sources(sesolver_core
         src/rotation.ixx
         src/propagator.ixx
         src/imaginary_time.ixx
+        src/mcwf1d.ixx
         src/sampling.ixx
         src/projection.ixx
         src/drive.ixx
