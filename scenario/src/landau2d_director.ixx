@@ -114,6 +114,7 @@ public:
             return false;
         }
         psi_ = std::move(next);
+        measure();  // freshen <r>/energy caches (mean_n readout)
         trail_.clear();
         push_trail();
         antipode_dist_ = -1.0;
