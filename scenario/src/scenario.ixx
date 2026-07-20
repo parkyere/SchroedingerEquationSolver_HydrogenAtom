@@ -191,6 +191,9 @@ struct LandauApi {
     // antipode and from the T = 2 pi / B start point. -1 until reached.
     virtual double antipode_dist() const = 0;
     virtual double closure_dist() const = 0;
+    // Landau-level ladder (ses.lattice2d landau_ladder): a-dag / a jump one
+    // cyclotron quantum; false = refused (a annihilated the lowest level).
+    virtual bool ladder(bool up) = 0;
 };
 
 // 1D periodic-lattice (Bloch) scene: V0 sin^2(kL x) + tilt force F.

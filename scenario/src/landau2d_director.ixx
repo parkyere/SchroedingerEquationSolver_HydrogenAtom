@@ -16,6 +16,7 @@ export import ses.field;
 export import ses.grid;
 export import ses.lattice2d;
 import ses.parallel;
+import ses.heightfield;
 
 
 // Landau levels / cyclotron: 2D electron, uniform B along z (Peierls
@@ -42,6 +43,9 @@ constexpr double kLd2dK0Max = 2.5;
 constexpr double kLd2dSigma = 2.0;
 constexpr int kLd2dStepsPerTick = 8;
 constexpr int kLd2dTrailCap = 900;
+// IBM-style STM height surface (like the corral): z = |psi|^2 peak-tracked.
+constexpr double kLd2dSurfH = 6.0;
+constexpr int kLd2dMeshStride = 1;  // 256^2 physics = 256^2 display mesh
 
 class Landau2DDirector final : public ScenarioDirector, public LandauApi {
 public:
@@ -81,6 +85,25 @@ public:
     double mean_n() const override { return energy_ / b_ - 0.5; }
     double antipode_dist() const override { return antipode_dist_; }
     double closure_dist() const override { return closure_dist_; }
+    // One cyclotron quantum up/down (CONTRACT: lattice2d LandauLadder test);
+    // the orbit records reset -- a level jump invalidates the old circle.
+    bool ladder(bool up) override {
+        ses::Field3D next = ses::landau_ladder(psi_, b_, up);
+        if (ses::norm_sq(next) < 1e-6) {
+            return false;  // a|lowest> = 0: refuse the down-jump
+        }
+        psi_ = std::move(next);
+        ses::normalize(psi_);
+        trail_.clear();
+        push_trail();
+        antipode_dist_ = -1.0;
+        closure_dist_ = -1.0;
+        display_changed_ = true;
+        vol_dirty_ = true;
+        staging_dirty_ = true;
+        title_dirty_ = true;
+        return true;
+    }
 
     // ---- lifecycle ----
     const ses::Grid3D& grid() const override { return disp_grid_; }
@@ -115,7 +138,19 @@ public:
         }
         if (staging_dirty_) {
             staging_dirty_ = false;
-            rebuild_staging();
+            // Peak SNAP then 0.98-decay (the corral rule): first observed
+            // max sets the surface normalizer outright.
+            double cur = 0.0;
+            for (int j = 0; j < kLd2dN; ++j) {
+                for (int i = 0; i < kLd2dN; ++i) {
+                    cur = std::max(cur, std::norm(psi_(i, j, 0)));
+                }
+            }
+            disp_peak_ = disp_peak_ <= 0.0 ? cur
+                                           : std::max(cur, 0.98 * disp_peak_);
+            hf_ = ses::heightfield_surface(psi_, kLd2dSurfH, disp_peak_,
+                                           kLd2dMeshStride);
+            mesh_dirty_ = true;
         }
         if (++frames_ % 10 == 0) {
             title_dirty_ = true;
@@ -136,6 +171,12 @@ public:
             fire();
             return true;
         }
+        if (key == '3') {
+            return ladder(true);
+        }
+        if (key == '4') {
+            return ladder(false);
+        }
         return false;
     }
 
@@ -149,7 +190,7 @@ public:
     double sim_dt() const override { return kLd2dDt; }
 
     // ---- display ----
-    bool cloud() const override { return true; }
+    bool cloud() const override { return false; }  // STM height surface
     double peak() const override { return peak_; }
     VkImageView psi_volume_view() override { return VK_NULL_HANDLE; }
     float next_flash_intensity() override { return 0.0f; }
@@ -159,7 +200,9 @@ public:
     bool take_volume_dirty() override {
         return std::exchange(vol_dirty_, false);
     }
-    bool take_mesh_dirty() override { return false; }
+    bool take_mesh_dirty() override {
+        return std::exchange(mesh_dirty_, false);
+    }
     void mark_display_dirty() override {
         display_changed_ = true;
         vol_dirty_ = true;
@@ -170,16 +213,16 @@ public:
     const std::vector<float>& psi_staging() const override {
         return staging_;
     }
-    const ses::Mesh& mesh() const override { return no_mesh_; }
+    const ses::Mesh& mesh() const override { return hf_.mesh; }
     const std::vector<ses::Rgb>& colors() const override {
-        return no_colors_;
+        return hf_.colors;
     }
     std::string title_text() override {
         const double pi = 3.14159265358979323846;
         return strf(
             "Landau levels / cyclotron (2D lattice, uniform B)  |  t = %.1f "
             "au  B = %.2f  k0 = %.2f  r = %.2f (pred %.2f)  T = %.1f  "
-            "<n> = %.1f  keys: 2 refire",
+            "<n> = %.1f  keys: 2 refire / 3 up / 4 down",
             sim_time_, b_, k0_,
             std::hypot(mean_[0] - center_[0], mean_[1] - center_[1]),
             radius_pred(), 2.0 * pi / b_, mean_n());
@@ -200,8 +243,8 @@ public:
                 1.0f, 1.0f, 1.0f, 0.9f};
     }
 
-    double default_camera_azimuth() const override { return 0.0; }
-    double default_camera_elevation() const override { return 0.0; }
+    double default_camera_azimuth() const override { return 0.35; }
+    double default_camera_elevation() const override { return 0.95; }
     double default_camera_distance() const override { return 95.0; }
 
 private:
@@ -370,6 +413,9 @@ private:
     ses::Grid3D phys_grid_;
     ses::Grid3D disp_grid_;
     ses::Field3D psi_;
+    ses::Heightfield hf_;
+    bool mesh_dirty_ = false;
+    double disp_peak_ = 0.0;
     std::unique_ptr<ses::PeierlsLattice2D> prop_;
     std::vector<float> staging_;
     std::vector<float> orbit_curve_;
