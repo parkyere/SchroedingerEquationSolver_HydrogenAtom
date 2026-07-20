@@ -1,6 +1,4 @@
-// |psi|^2 into a scalar R32 buffer: the marching-cubes field. One read of
-// psi per cell; classify/emit then sample density (and its gradients)
-// without touching the complex field again.
+// marching-cubes density input
 import complex;
 
 [[vk::binding(0, 0)]] StructuredBuffer<Complex, Std430DataLayout> psi;

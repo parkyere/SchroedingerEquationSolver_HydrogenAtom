@@ -8,16 +8,9 @@ export module ses.spinlattice;
 export import ses.spin;
 
 
-// MEAN-FIELD Heisenberg lattice: nx x ny pinned spins, each a pure
-// per-site spinor (a PRODUCT ansatz -- no entanglement, honestly a
-// quantum-dressed classical Heisenberg/LLG lattice). Site i sees
-// B_eff = B_ext - 2 J sum_nn <sigma_j> (J > 0 aligns with neighbors:
-// ferromagnet; J < 0 staggers: Neel), steps by the EXACT SU(2) rotation,
-// and Gilbert damping alpha bleeds energy toward the local ground
-// (n -> -B_eff_hat for H = +1/2 B.sigma). Neighbor fields are read from
-// a simultaneous SNAPSHOT (no sweep-order bias). Open boundaries.
-// CONTRACT: tests/spinlattice_test.cpp (ferro order, Neel stagger,
-// undamped energy conservation, rigid Larmor of the aligned lattice).
+// MEAN-FIELD Heisenberg lattice: B_eff = B_ext - 2 J sum_nn <sigma_j>
+// (J>0 ferro, J<0 Neel), H = +1/2 B.sigma; exact SU(2) step + Gilbert alpha.
+// CONTRACT: tests/spinlattice_test.cpp (ferro, Neel, energy conservation, Larmor).
 
 
 export namespace ses {
@@ -28,8 +21,6 @@ struct SpinLattice {
     std::vector<Spinor> s;
 };
 
-// Pure spinor pointing along the UNIT Bloch vector n: rotate |up> onto n
-// about the axis z x n.
 inline Spinor spinor_from_bloch(double x, double y, double z) {
     Spinor s;
     const double th = std::acos(std::clamp(z, -1.0, 1.0));
@@ -42,10 +33,7 @@ inline Spinor spinor_from_bloch(double x, double y, double z) {
     return s;
 }
 
-// One dt of mean-field dynamics: SNAPSHOT every Bloch vector, then per
-// site the exact SU(2) rotation in B_eff = B_ext - 2 J sum_nn n_j,
-// followed by the Gilbert drift n += alpha dt (n (n.B_eff) - B_eff)
-// toward the local ground (n = -B_eff_hat for H = +1/2 B.sigma).
+// Snapshot all Bloch vectors first: neighbor fields carry no sweep-order bias.
 inline void spinlattice_step(SpinLattice& l, double bx, double by,
                              double bz, double j, double alpha,
                              double dt) {
@@ -54,9 +42,7 @@ inline void spinlattice_step(SpinLattice& l, double bx, double by,
     for (std::size_t i = 0; i < count; ++i) {
         bloch_vector(l.s[i], &n[3 * i], &n[3 * i + 1], &n[3 * i + 2]);
     }
-    // STRANG-SYMMETRIZED checkerboard (the square lattice is bipartite):
-    // black half-step, white full step, black half-step -- second order,
-    // and the intra-step skew of the plain leapfrog largely cancels.
+    // Strang-symmetrized checkerboard (bipartite): 2nd order, cancels leapfrog skew.
     auto sweep = [&](int parity, double h) {
         for (int yy = 0; yy < l.ny; ++yy) {
             for (int xx = 0; xx < l.nx; ++xx) {
@@ -74,7 +60,7 @@ inline void spinlattice_step(SpinLattice& l, double bx, double by,
                     const int qx = xx + dx[d];
                     const int qy = yy + dy[d];
                     if (qx < 0 || qx >= l.nx || qy < 0 || qy >= l.ny) {
-                        continue;  // open boundary
+                        continue;
                     }
                     const std::size_t q =
                         static_cast<std::size_t>(qy * l.nx + qx);
@@ -82,9 +68,7 @@ inline void spinlattice_step(SpinLattice& l, double bx, double by,
                     ey -= 2.0 * j * n[3 * q + 1];
                     ez -= 2.0 * j * n[3 * q + 2];
                 }
-                // Project out the n-parallel field component BEFORE the
-                // finite rotation: it exerts no torque (a pure per-site
-                // phase) but would tilt the discrete rotation axis.
+                // Project out the n-parallel field: no torque but would tilt the axis.
                 const double nb = n[3 * i] * ex + n[3 * i + 1] * ey +
                                   n[3 * i + 2] * ez;
                 double px = 0.0;
@@ -95,8 +79,7 @@ inline void spinlattice_step(SpinLattice& l, double bx, double by,
                           ez - nb * n[3 * i + 2], h);
                 bloch_vector(l.s[i], &px, &py, &pz);
                 if (alpha > 0.0) {
-                    // Gilbert drift off the POST-rotation vector (the
-                    // full field self-projects: n(n.B) - B = -B_perp).
+                    // Gilbert drift off the post-rotation vector: n(n.B) - B = -B_perp.
                     const double pb = px * ex + py * ey + pz * ez;
                     px += alpha * h * (px * pb - ex);
                     py += alpha * h * (py * pb - ey);
@@ -121,7 +104,6 @@ inline void spinlattice_step(SpinLattice& l, double bx, double by,
     sweep(0, 0.5 * dt);
 }
 
-// Mean magnetization <sigma> over the lattice.
 inline void lattice_magnetization(const SpinLattice& l, double* x,
                                   double* y, double* z) {
     double sx = 0.0;
@@ -142,7 +124,6 @@ inline void lattice_magnetization(const SpinLattice& l, double* x,
     *z = sz * inv;
 }
 
-// Checkerboard-signed (staggered) magnetization magnitude.
 inline double lattice_staggered(const SpinLattice& l) {
     double sx = 0.0;
     double sy = 0.0;

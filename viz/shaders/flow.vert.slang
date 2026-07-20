@@ -1,18 +1,12 @@
-// Streakline vertex: instanced LINE_STRIP, one strip per streak.
-//   SV_InstanceID = streak,  SV_VertexID = trail slot
-//   (0 = oldest tail .. trail_len-1 = newest head).
-// Premultiplied WHITE with a tail->head alpha fade (a weather-map Lagrangian
-// flux streak). Fade matches ses.flow::trail_fade. gl_VertexIndex /
-// gl_InstanceIndex (glsl module) map to the raw SPIR-V VertexIndex /
-// InstanceIndex builtins -- unlike SV_VertexID/SV_InstanceID they need no
-// shaderDrawParameters capability.
+// instance = streak, vertex = trail slot (0=oldest tail .. len-1=newest head); fade matches ses.flow::trail_fade.
+// gl_VertexIndex/gl_InstanceIndex avoid the shaderDrawParameters capability SV_VertexID/SV_InstanceID need.
 import glsl;
 
 [[vk::binding(0, 0)]] StructuredBuffer<float4, Std430DataLayout> trail;
 
 struct Ubo {
     float4x4 mvp;
-    float4 eye;             // .xyz (unused here; struct matches the shared write)
+    float4 eye;             // unused; matches shared UBO layout
     float4 box_min;
     float4 box_max;
     float4 proton_center;
@@ -45,8 +39,8 @@ VSOut main() {
     float fade = (push.trail_len > 1)
                      ? float(vid) / float(push.trail_len - 1)
                      : 1.0;
-    float a = fade * 0.85;              // near-full white at the head
-    o.v_color = float4(a, a, a, a);     // premultiplied white (coverage = a)
+    float a = fade * 0.85;
+    o.v_color = float4(a, a, a, a);     // premultiplied white: rgb = a
 
     o.pos = mul(ubo.mvp, float4(p, 1.0));
     return o;

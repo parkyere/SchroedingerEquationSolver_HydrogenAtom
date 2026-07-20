@@ -22,8 +22,7 @@ export module ses.vk.render_blobs;
 export import ses.vk.render;
 
 
-// The viz library's embedded SPIR-V blobs: every render/post shader the
-// raw-Vulkan scene renderer runs, baked offline from viz/shaders/.
+// Baked offline from viz/shaders/.
 
 
 export namespace ses_vk {

@@ -1,11 +1,5 @@
-# bin2h.cmake: embed a binary file as a C++ header (used to embed the baked
-# SPIR-V shader blobs; no Qt resource system involved).
-#
 # Usage: cmake -DIN=<file> -DOUT=<header> -DNAME=<symbol> -P bin2h.cmake
-# Emits: alignas(4) inline constexpr unsigned char <symbol>[];
-#        inline constexpr std::size_t <symbol>_size;
-# The 4-byte alignment matters: vkCreateShaderModule reads the array as
-# uint32_t words.
+# alignas(4): vkCreateShaderModule reads the SPIR-V array as uint32_t words.
 
 if(NOT IN OR NOT OUT OR NOT NAME)
     message(FATAL_ERROR "bin2h.cmake needs -DIN=, -DOUT=, -DNAME=")
@@ -15,7 +9,7 @@ file(READ "${IN}" _hex HEX)
 string(LENGTH "${_hex}" _hexlen)
 math(EXPR _bytes "${_hexlen} / 2")
 
-# 0xNN, pairs, wrapped every 16 bytes for readable diffs.
+# wrap 16 per line for readable diffs.
 string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," _arr "${_hex}")
 string(REGEX REPLACE "((0x[0-9a-f][0-9a-f],){16})" "\\1\n    " _arr "${_arr}")
 

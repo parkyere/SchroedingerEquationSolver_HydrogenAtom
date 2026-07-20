@@ -5,20 +5,15 @@ module;
 #include <cstddef>
 #include <vector>
 export module ses.heightfield;
-export import ses.marching_cubes;  // Mesh (triangle soup: vertices+normals)
-export import ses.colormap;       // Rgb + the shared phase wheel
+export import ses.marching_cubes;
+export import ses.colormap;
 export import ses.field;
 export import ses.grid;
 export import ses.vec;
 import ses.parallel;
 
 
-// 2D scene surface display: |psi|^2 as HEIGHT (z = z_scale * |psi|^2 / norm),
-// phase as per-vertex color (the shared ses::phase_color wheel), emitted as
-// the triangle soup the mesh render path consumes. stride decimates the
-// source lattice so a high-res physics grid can feed a lighter display mesh.
-// norm <= 0 yields a flat zero-height plane (no self-normalization here --
-// the scene owns its peak tracking).
+// norm <= 0 -> flat plane (no self-norm; scene owns peak).
 
 
 export namespace ses {
@@ -38,7 +33,7 @@ inline Heightfield heightfield_surface(const Field3D& psi, double z_scale,
         static_cast<std::size_t>(sx) * static_cast<std::size_t>(sy);
     const double gain = norm > 0.0 ? z_scale / norm : 0.0;
 
-    // Sampled height/phase per decimated vertex (disjoint rows: parallel).
+    // Disjoint rows -> parallel-safe.
     std::vector<double> hgt(samples);
     std::vector<double> phs(samples);
     parallel_for(sy, [&](int jj) {
@@ -53,8 +48,7 @@ inline Heightfield heightfield_surface(const Field3D& psi, double z_scale,
         }
     });
 
-    // Per-sample normals from height differences on the DECIMATED spacing
-    // (central inside, one-sided at the edges); flat field -> exact +z.
+    // Height finite-diff normals; one-sided at edges.
     const double hx = st * g.x.spacing();
     const double hy = st * g.y.spacing();
     std::vector<Vec3d> nrm(samples);
@@ -77,7 +71,7 @@ inline Heightfield heightfield_surface(const Field3D& psi, double z_scale,
         }
     });
 
-    // Triangle soup: per cell (a b / c d) the triangles (a,b,d) and (a,d,c).
+    // Two tris per cell: a,b,d and a,d,c (corners a b / c d).
     const int cx = sx - 1;
     const int cy = sy - 1;
     Heightfield hf;
@@ -94,7 +88,6 @@ inline Heightfield heightfield_surface(const Field3D& psi, double z_scale,
                 6;
             const int corner_i[4] = {ii, ii + 1, ii, ii + 1};
             const int corner_j[4] = {jj, jj, jj + 1, jj + 1};
-            // Soup order a b d, a d c (indices into the corner tables).
             const int pick[6] = {0, 1, 3, 0, 3, 2};
             for (int v = 0; v < 6; ++v) {
                 const int ci = corner_i[pick[v]];

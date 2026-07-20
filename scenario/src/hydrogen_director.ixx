@@ -32,10 +32,8 @@ export import ses.vram_budget;
 export import ses.emission;
 
 
-// The hydrogen scenario (ScenarioDirector implementation): the CPU truth
-// session, the ses_vk engine, the AtomModel, and the atom demo state machine
-// (atlas build, decay, laser, fields, measurement, relaxation), plus the
-// cpu_is_truth_ sync invariant.
+// The hydrogen ScenarioDirector: CPU-truth session + ses_vk engine + AtomModel
+// + the atom demo state machine, tied by the cpu_is_truth_ sync invariant.
 
 
 export namespace ses_shell {
@@ -47,45 +45,35 @@ constexpr int kStepsPerTick = 1;
 constexpr int kRelaxStepsPerTick = 1;
 constexpr double kRelaxDtau = 0.05;
 // Post-collapse flush budgets (contract: tests/eigenstate_flush_test.cpp).
-// Excited targets get tau = 0.3: enough for the Ha-scale cusp junk (~92% of
-// the <H> offset) while drain toward 1s stays negligible -- FIXED by design,
-// a longer or adaptive burst becomes non-radiative decay (see
-// start_excited_relax's deflation footgun). The 1s target is the ITP fixed
-// point (nothing below to drain into), so it gets the deeper tau = 1.2 that
-// actually CONVERGES to the grid ground state (6 steps left a visible
-// offset).
+// Excited tau=0.3 clears cusp junk (~92% of the <H> offset), negligible 1s
+// drain; longer becomes non-radiative decay. 1s is the ITP fixed point, so
+// tau=1.2 reaches the grid ground state.
 constexpr int kFlushSteps = 6;
 constexpr int kFlushStepsGround = 24;
 constexpr double kIsoFraction = 0.25;
-constexpr double kMeasureSigma = 1.25;  // Bohr; sigma keeps the measurement
-                                        // back-action 3/(8 sigma^2) = 0.24 Ha
-                                        // under the 0.5 Ha binding (a tighter
-                                        // packet ionizes on nearly every click)
-// Display decay rate: tau_display ~ 8 au (~3 s wall); true lifetimes are
-// ~1e8 au. The title reports the true lifetime and the acceleration factor.
+constexpr double kMeasureSigma = 1.25;  // Bohr; back-action 3/(8 sigma^2)=0.24
+                                        // Ha stays under the 0.5 Ha binding
+                                        // (tighter ionizes on nearly every click)
+// Display decay rate: tau_display ~ 8 au (~3 s wall); true lifetimes ~1e8 au.
 constexpr double kDecayGammaDisplay = 0.125;
-constexpr double kHaToEv = 27.211386;  // 1 Hartree in eV
-constexpr double kAuToFs = 2.4188843e-2;  // 1 au of time in femtoseconds
-constexpr double kAbsorbWidth = 10.0;  // Bohr; boundary absorber layer
-                                       // (interior +-70 untouched; real-time only)
-// Laser: E0 = kRabiTargetOmega / |<2p|z|1s>| (target Rabi frequency over the
-// computed dipole element); the carrier is tuned to the GRID resonance, not
-// the textbook 0.375 -- see toggle_laser.
+constexpr double kHaToEv = 27.211386;
+constexpr double kAuToFs = 2.4188843e-2;
+constexpr double kAbsorbWidth = 10.0;  // Bohr; interior +-70 untouched, real-time only
+// Target Rabi frequency: E0 = kRabiTargetOmega / |<2p|z|1s>|; carrier tuned to
+// the GRID resonance, not textbook 0.375 (see toggle_laser).
 constexpr double kRabiTargetOmega = 0.04;
 
 constexpr int kAtlasMontageFrames = 3;  // frames each synthesized orbital shows
 constexpr int kFlashTicks = 25;  // photon-flash duration AND the fade divisor
 
-// Potential: bare -Z/r with only the nucleus cell regularized (analytic cell
-// average), so synthesized orbitals stay eigenstates of the propagated
-// Hamiltonian; the s-state cusp gap shows up in the startup h-audit.
+// Potential: bare -Z/r, only the nucleus cell regularized (analytic cell
+// average) so synthesized orbitals stay eigenstates; the s-cusp gap shows in
+// the h-audit.
 inline ses::WavepacketSimulation make_simulation() {
-    // +-80 Bohr / 256^3 (power-of-two FFT): holds the n <= 6 shell; no
-    // resident atlas. This Gaussian is only the pre-solve placeholder and
-    // the no-GPU fallback: the GPU path replaces it with a random bound
-    // n <= 6 superposition at the atlas finale (seed_bound_superposition) --
-    // a free packet leaks continuum past the box, a bound seed essentially
-    // does not.
+    // +-80 Bohr / 256^3 (power-of-two FFT) holds the n<=6 shell; no resident
+    // atlas. This Gaussian is only the pre-solve placeholder / no-GPU fallback:
+    // the GPU path replaces it with a bound n<=6 superposition at the atlas
+    // finale (a free packet leaks continuum past the box; a bound seed does not).
     const ses::Grid1D axis{-80.0, 80.0, 256};
     const ses::Grid3D grid{axis, axis, axis};
     return ses::WavepacketSimulation{ses::WavepacketSimulation::Config{
@@ -100,18 +88,15 @@ inline ses::WavepacketSimulation make_simulation() {
 
 class HydrogenDirector final : public BaseDirector, public HydrogenApi {
 public:
-    // BaseDirector's ctor stages the initial mesh + volume from make_simulation().
     HydrogenDirector() : BaseDirector(make_simulation()) {}
 
-    // The specialized-control seam (ses.scenario): the shell reaches these
-    // through HydrogenApi, never a concrete down-cast.
+    // Shell reaches specialized controls through HydrogenApi, never a down-cast.
     HydrogenApi* hydrogen() override { return this; }
 
     // ---- lifecycle ----
 
-    // COMPUTE setup: engine init (fp32 tables verified by sesolver_vkcheck),
-    // atlas precision from probed VRAM, atom solve, projection index,
-    // absorber mask. Any failure falls back to CPU stepping.
+    // COMPUTE setup (engine, atlas precision, atom solve, projection, absorber).
+    // Any failure falls back to CPU stepping.
     void init_compute(ses_vk::DeviceContext& ctx, bool device_ok,
                       std::int64_t free_vram_bytes) override {
         compute_attempted_ = true;
@@ -121,9 +106,9 @@ public:
                                      sim_.potential(), sim_.dt(),
                                      sim_.psi().data());
         if (gpu_ok_) {
-            // Atlas precision from free VRAM: a resident fp32 manifold
-            // (~12 GB at 256^3) oversubscribes a small card and WDDM paging
-            // collapses the frame rate; fp16 halves it. Unmeasurable -> fp32.
+            // Atlas precision from free VRAM: a resident fp32 manifold (~12 GB
+            // at 256^3) oversubscribes a small card (WDDM paging collapses fps);
+            // fp16 halves it. Unmeasurable -> fp32.
             constexpr std::int64_t kVramHeadroomBytes = 2LL * 1024 * 1024 * 1024;
             const std::int64_t bytes_per_state =
                 static_cast<std::int64_t>(sim_.grid().size()) * 2 *
@@ -139,7 +124,7 @@ public:
                                     : "  [WARNING: even fp16 is tight -- consider a "
                                       "smaller box or manifold]");
             // Relax tables are TRANSIENT (uploaded on Key-2/3/4, freed on
-            // completion); only the gradient upload stays fallible-fatal.
+            // completion); only the gradient upload is fallible-fatal here.
             if (!engine_.set_potential_gradient(sim_.potential())) {
                 std::fprintf(stderr, "engine: gradient setup failed -- "
                                      "falling back to CPU stepping\n");
@@ -148,13 +133,12 @@ public:
                 atlas_done_ = true;
                 return;
             }
-            // Radial solve up front (all levels to n = 10); the 3D manifold
-            // is then synthesized chunked across frames so decay is armed by
-            // default.
+            // Radial solve up front (all levels to n=10); the 3D manifold is
+            // then synthesized chunked across frames.
             atom_.solve_radial_atom(sim_.grid().x.xmax);
-            // Orbital-free projection index: static counting-sort geometry,
-            // uploaded once; populations come from ONE project_psi deposit
-            // pass instead of per-state inner products.
+            // Orbital-free projection index (static counting-sort geometry,
+            // uploaded once): populations come from ONE project_psi deposit,
+            // not per-state inner products.
             {
                 const ses::RadialBinIndex bin_idx =
                     ses::build_radial_bin_index(sim_.grid(), atom_.radial_grid());
@@ -171,12 +155,12 @@ public:
             for (int idx = 0; idx < kNumStates; ++idx) {
                 synth_queue_.push_back(idx);
             }
-            // Boundary absorber: (mask, 0) complex buffer (interior = 1) so
-            // the elementwise multiply damps outgoing flux each real-time step.
+            // Boundary absorber: (mask, 0) complex buffer (interior = 1); the
+            // elementwise multiply damps outgoing flux each real-time step.
             absorber_on_ = engine_.set_absorber(
                 ses::absorbing_mask(sim_.grid(), kAbsorbWidth));
             // A slider moved before gpu_ok_ stored its value but could not
-            // upload the augmented half-potential: re-apply to match the UI.
+            // upload; re-apply to match the UI.
             if (efield_e0_ > 0.0 || bfield_b_ > 0.0) {
                 upload_field_tables();
             }
@@ -186,27 +170,24 @@ public:
         }
     }
 
-    // release_gpu(), use_gpu_path(): inherited from BaseDirector (identical).
-
     // ---- the compute half of a frame ----
-    // Engine stepping, atlas build, measurement service, decay/laser trials.
-    // Runs once per paint, BEFORE the widget frame (engine offscreen frames
-    // are illegal mid-frame).
+    // Runs once per paint, BEFORE the widget frame (engine offscreen frames are
+    // illegal mid-frame).
     void run_frame() override {
         if (gpu_ok_ && engine_.device_lost()) {
             std::fprintf(stderr,
                          "run_frame: GPU device lost -- falling back to CPU\n");
-            gpu_ok_ = false;       // stop every GPU submit; the CPU path takes over
+            gpu_ok_ = false;
             cpu_is_truth_ = true;
         }
-        // Reclaim last frame's async batch FIRST: flips the display volume
-        // at a host-observed completion point and frees the batch cb. All
-        // readouts below then see the post-step psi.
+        // Reclaim last frame's async batch FIRST: flips the display volume at a
+        // host-observed completion point; all readouts below then see post-step
+        // psi.
         if (gpu_ok_) {
             engine_.wait_async();
         }
-        // The atlas build advances regardless of view mode: a Tab to Surface
-        // during startup must not wedge solving() forever.
+        // Atlas build advances regardless of view mode: a Tab to Surface during
+        // startup must not wedge solving() forever.
         if (gpu_ok_ && !atlas_done_) {
             run_atlas_chunk();
             pending_gpu_steps_ = 0;
@@ -218,8 +199,8 @@ public:
         }
         if (use_gpu_path()) {
             if (cpu_is_truth_) {
-                // CPU state authoritative: refresh the brightness normalizer
-                // (post-M collapse, post-R reset), then upload.
+                // CPU state authoritative: refresh the brightness normalizer,
+                // then upload.
                 double pk = 0.0;
                 for (const std::complex<double>& z : sim_.psi().data()) {
                     pk = std::max(pk, std::norm(z));
@@ -230,13 +211,13 @@ public:
                 engine_.upload_state(sim_.psi().data());
                 cpu_is_truth_ = false;
                 volume_dirty_ = false;  // texture comes from the bridge now
-                // Bridge immediately: with an empty step queue (paused R/M,
-                // first frame) the display would keep the stale cloud.
+                // Bridge immediately: an empty step queue (paused R/M, first
+                // frame) would otherwise keep the stale cloud.
                 write_display_texture();
             }
             // Projective ENERGY measurement (Key E): sample n from
-            // P_n = |<phi_n|psi>|^2 and collapse; the deficit 1 - sum(P_n) is
-            // the continuum outcome (n = -1, manifold projected OUT).
+            // P_n=|<phi_n|psi>|^2 and collapse; the deficit 1-sum(P_n) is the
+            // continuum (n=-1).
             if (pending_energy_measure_) {
                 pending_energy_measure_ = false;
                 engine_.project_psi();
@@ -250,8 +231,7 @@ public:
                 if (n >= 0) {
                     atom_.collapse_onto(engine_, n);
                     reset_ionized_tally();
-                    flush_collapse_error(n);  // bridge below shows the
-                                              // flushed state
+                    flush_collapse_error(n);
                     write_display_texture();
                     last_measure_ = strf(
                         "%s (E %.3f eV)",
@@ -259,15 +239,14 @@ public:
                         atom_.state_energy(n) * kHaToEv);
                 } else {
                     // A continuum verdict must not leave bound populations
-                    // behind: project the manifold out (fp32-noise residuals
-                    // are left alone inside the helper).
+                    // behind: project the manifold out.
                     project_manifold_out();
                     last_measure_ = "outside tracked manifold";
                 }
                 title_dirty_ = true;
             }
-            // Partial projective measurement (n-shell / l / m buttons):
-            // deferred here like the energy measurement above.
+            // Partial projective measurement (n-shell/l/m): deferred here like
+            // the energy measurement.
             if (pending_partial_ != PartialBasis::None && manifold_ready()) {
                 const PartialBasis basis = pending_partial_;
                 pending_partial_ = PartialBasis::None;
@@ -294,9 +273,8 @@ public:
                     title_dirty_ = true;
                 }
             }
-            // Surface display: re-extract the GPU isosurface after any psi
-            // change (steps, collapses, uploads); kIsoFraction of the
-            // tracked density peak mirrors marching_cubes_at_fraction.
+            // Surface: re-extract the GPU isosurface after any psi change;
+            // kIsoFraction of the density peak mirrors marching_cubes_at_fraction.
             if (mode_ == BaseViewMode::Surface && engine_.mc_ready() &&
                 mc_dirty_) {
                 engine_.mc_extract(kIsoFraction * peak_);
@@ -309,11 +287,10 @@ public:
     // ---- the timer tick: accumulate work / CPU fallback stepping ----
     void tick() override {
         if (use_gpu_path()) {
-            // Steps execute in run_frame (once per paint). ONE tick's supply
-            // per rendered frame: a slow frame never bundles catch-up ticks
-            // (dropped ticks drop cleanly; time is credited at execution).
-            // Default = 1 step : 1 render; time_scale_ is the ONLY pacing
-            // dial -- no mode may add a hidden multiplier (unified contract).
+            // Steps execute in run_frame (once per paint): ONE tick's supply
+            // per frame, so a slow frame never bundles catch-up ticks.
+            // time_scale_ is the ONLY pacing dial -- no mode may add a hidden
+            // multiplier (unified contract).
             const int per_tick = kStepsPerTick * time_scale_;
             pending_gpu_steps_ =
                 std::min(pending_gpu_steps_ + per_tick, per_tick);
@@ -323,8 +300,8 @@ public:
             return;
         }
         ensure_cpu_current();
-        // CPU fallback: deliberately NOT time-scaled -- steps run
-        // synchronously inside the tick, so scaling would stall the UI.
+        // CPU fallback: deliberately NOT time-scaled -- synchronous steps would
+        // stall the UI.
         if (stepping_ == BaseStepping::RealTime) {
             sim_.advance(kStepsPerTick);
         } else {
@@ -337,10 +314,7 @@ public:
         }
     }
 
-    // set_time_scale(), time_scale(), sim_time(), sim_dt(): inherited from
-    // BaseDirector (identical).
-
-    // MCWF no-jump damping toggle (panel checkbox; see apply_mcwf_damping).
+    // MCWF no-jump damping toggle (see apply_mcwf_damping).
     void set_mcwf_damping(bool on) override { mcwf_damping_ = on; }
     bool mcwf_damping() const override { return mcwf_damping_; }
 
@@ -365,12 +339,10 @@ public:
             ensure_cpu_current();  // CPU relax (Surface view / no GPU)
             return;
         }
-        // ITP converges to the lowest component PRESENT in the seed: a state
-        // orthogonal to 1s (a pure excited eigenstate) would stall
-        // in-shell until fp32 noise leaks, and the plateau auto-complete
-        // would fire first. Mix in 1% of an s-symmetric Gaussian so the
-        // descent starts immediately. Only needed when the GPU state is
-        // authoritative -- a CPU-truth state gets re-uploaded next frame.
+        // ITP converges to the lowest component PRESENT in the seed; a state
+        // orthogonal to 1s would stall until fp32 noise leaks (plateau
+        // auto-complete fires first). Mix in 1% s-symmetric Gaussian to seed
+        // the descent. Only when the GPU state is authoritative.
         if (!cpu_is_truth_) {
             const ses::Field3D g = ses::gaussian_wavepacket(
                 sim_.grid(), ses::Vec3d{}, ses::Vec3d{2.0, 2.0, 2.0},
@@ -391,13 +363,13 @@ public:
         if (solving()) {
             return;  // the startup atlas build owns the GPU state
         }
-        spectro_ev_.clear();  // a fresh run gets a fresh spectrometer
+        spectro_ev_.clear();
         sim_ = make_simulation();
         stepping_ = BaseStepping::RealTime;
-        free_deflation_buffers();  // drop any owned deflation phi
+        free_deflation_buffers();
         drop_relax_tables();
-        laser_pol_ = LaserPol::Off;  // reset returns to the vanilla packet demo
-        bfield_b_ = 0.0;             // and to no magnetic field
+        laser_pol_ = LaserPol::Off;
+        bfield_b_ = 0.0;
         upload_field_tables();    // restore the base half-potential
         reset_ionized_tally();
         cpu_is_truth_ = true;  // GPU state discarded with the reset
@@ -409,8 +381,8 @@ public:
         stage_active_view();
     }
 
-    // Soft position measurement: sample from |psi|^2 (RNG lives here; core
-    // takes the uniform draw) and let the sharpened packet re-evolve.
+    // Soft position measurement: sample from |psi|^2 (RNG here, core takes the
+    // uniform draw), then re-evolve.
     void measure_now() override {
         if (solving()) {
             return;
@@ -423,9 +395,8 @@ public:
         stage_active_view();
     }
 
-    // Projective ENERGY measurement (Key E): deferred to run_frame (the GPU
-    // reductions + collapse run in the frame's compute half). Needs the
-    // manifold.
+    // Projective ENERGY measurement (Key E): deferred to run_frame's compute
+    // half. Needs the manifold.
     void measure_energy_now() override {
         if (solving() || !use_gpu_path() || !manifold_ready()) {
             return;
@@ -435,15 +406,14 @@ public:
         laser_pol_ = LaserPol::Off;
     }
 
-    // Partial projective measurements (panel buttons): sample ONE quantum
-    // number and project onto its DEGENERATE subspace -- coherence within
-    // survives ({H, L^2, L_z} commute). Key E stays the maximal (n,l,m)
-    // collapse. Deferred to run_frame like the energy measurement.
+    // Partial projective measurements: sample ONE quantum number, project onto
+    // its DEGENERATE subspace -- inner coherence survives ({H,L^2,L_z} commute).
+    // Key E stays the maximal (n,l,m) collapse.
     void measure_n_shell_now() override { queue_partial_measure(PartialBasis::NShell); }
     void measure_l_now() override { queue_partial_measure(PartialBasis::LTotal); }
     void measure_m_now() override { queue_partial_measure(PartialBasis::MZ); }
-    // Last partial outcome: the sampled n, l, or signed m (-99 = none yet,
-    // -1 = continuum verdict).
+    // Last partial outcome: sampled n, l, or signed m (-99 none yet, -1
+    // continuum).
     int last_partial_outcome() const override { return last_partial_outcome_; }
 
     void toggle_view_mode() override {
@@ -451,8 +421,8 @@ public:
             return;
         }
         mode_ = (mode_ == BaseViewMode::Cloud) ? BaseViewMode::Surface : BaseViewMode::Cloud;
-        // Re-stage for the newly selected mode: its data may be stale (tick
-        // only stages the active mode, and we may be paused).
+        // Re-stage the newly selected mode: its data may be stale (tick stages
+        // only the active mode).
         if (mode_ == BaseViewMode::Surface) {
             if (gpu_ok_ && engine_.mc_prepare(kMcMaxTris)) {
                 mc_dirty_ = true;  // GPU meshing: stepping/laser/decay stay live
@@ -473,8 +443,8 @@ public:
         stage_active_view();
     }
 
-    // Relax into the z-aligned 2p: the z-odd seed keeps the flow in the
-    // odd-parity sector, so it converges deterministically.
+    // Relax into z-aligned 2p: the z-odd seed keeps the flow in the odd-parity
+    // sector, so it converges deterministically.
     void relax_to_excited() override {
         start_excited_relax(make_axis_odd_seed(2), "2p", false);
     }
@@ -488,9 +458,8 @@ public:
             "2s", true);
     }
 
-    // Toggle spontaneous decay (quantum jumps) over the tracked manifold.
-    // All channels share one display acceleration factor (title reports it;
-    // relative lifetimes stay physical).
+    // Toggle spontaneous decay (quantum jumps). All channels share one display
+    // acceleration; relative lifetimes stay physical.
     void toggle_decay() override {
         if (!gpu_ok_ || solving()) {
             return;
@@ -530,10 +499,9 @@ public:
         stepping_ = BaseStepping::RealTime;
     }
 
-    // Rydberg Kepler packet (key K): Gaussian-in-n circular-state
-    // superposition (ses.scenario.kepler_seed) -- the lobe orbits the
-    // nucleus CCW at ~1/n_bar^3, disperses, and partially revives (the
-    // correspondence principle live). CONTRACT: --selftest-kepler.
+    // Rydberg Kepler packet (key K): Gaussian-in-n circular-state superposition
+    // (ses.scenario.kepler_seed); the lobe orbits CCW at ~1/n_bar^3, disperses,
+    // partially revives. CONTRACT: --selftest-kepler.
     void seed_kepler() override {
         if (!gpu_ok_ || solving() || !atom_.radial_ready()) {
             return;
@@ -578,9 +546,8 @@ public:
         volume_dirty_ = false;
     }
 
-    // Cycle the laser off -> Z -> X -> off. Carrier and E0 both come from
-    // our own spectrum / dipole element; X pumps 2p_x, so the monitored
-    // P(2pz) stays flat (selection rule).
+    // Cycle laser off->Z->X->off. Carrier and E0 come from our own spectrum /
+    // dipole; X pumps 2p_x, so monitored P(2pz) stays flat (selection rule).
     void toggle_laser() override {
         if (!gpu_ok_ || solving()) {
             return;  // the drive runs on the GPU path only
@@ -592,9 +559,9 @@ public:
             if (!manifold_ready()) {
                 return;
             }
-            // Drive the GRID resonance: the coarse-grid 1s carries a cusp gap
-            // and a relaxed 1s sits ~0.03 Ha below a synthesized one, so use
-            // the cooled <H> when available, else the h-audit grid energy.
+            // Drive the GRID resonance: the coarse-grid 1s has a cusp gap and a
+            // relaxed 1s sits ~0.03 Ha below a synthesized one, so prefer the
+            // cooled <H>, else the h-audit grid energy.
             const double e_1s = (relax_energy_display_ < -0.35)
                                     ? relax_energy_display_
                                     : (grid_energy_1s_ != 0.0 ? grid_energy_1s_
@@ -602,10 +569,9 @@ public:
             laser_omega_ = atom_.state_energy(kP2Z) - e_1s;
             laser_e0_ = atom_.dipole_z() > 0.0 ? kRabiTargetOmega / atom_.dipole_z() : 0.0;
             rabi_peak_ = 0.0;
-            // Laser and B are mutually exclusive: driven_step applies the
-            // diamagnetic fold but NOT the paramagnetic Larmor rotation, so
-            // running both is an inconsistent Hamiltonian. Drop B (E stays --
-            // it coexists correctly as a static potential term).
+            // Laser and B are mutually exclusive: driven_step folds diamagnetic
+            // but NOT the paramagnetic Larmor rotation, so both together is an
+            // inconsistent Hamiltonian. Drop B (E stays -- static potential term).
             if (bfield_b_ > 0.0) {
                 bfield_b_ = 0.0;
                 upload_field_tables();
@@ -619,8 +585,8 @@ public:
         }
     }
 
-    // Static uniform E-field magnitude along +z (au); 0 = off. GPU
-    // cloud/real-time path; the laser, if on, takes precedence.
+    // Static uniform E-field along +z (au); 0 = off. GPU cloud/real-time; the
+    // laser, if on, takes precedence.
     void set_efield_e0(double e0) override {
         efield_e0_ = e0;
         upload_field_tables();  // fold E*z into the half-potential (with diamag if B on)
@@ -630,8 +596,8 @@ public:
     }
 
     // Magnetic field strength (au) along the current axis; 0 = off. Minimal
-    // coupling: the diamagnetic term is folded into the half-potential here;
-    // the per-frame magnetic_step adds only the paramagnetic rotation.
+    // coupling: diamagnetic folded into the half-potential here; per-frame
+    // magnetic_step adds only the paramagnetic rotation.
     double bfield_b() const override { return bfield_b_; }
     void set_bfield_b(double b) override {
         bfield_b_ = b;
@@ -644,8 +610,8 @@ public:
         }
     }
 
-    // Cycle the field axis z -> x -> y; the diamagnetic term is
-    // axis-dependent, so the half-potential table is rebuilt.
+    // Cycle the field axis z->x->y; the diamagnetic term is axis-dependent, so
+    // the half-potential is rebuilt.
     void toggle_bfield_axis() override {
         bfield_axis_ = (bfield_axis_ == 2) ? 0 : (bfield_axis_ == 0 ? 1 : 2);
         upload_field_tables();
@@ -680,8 +646,8 @@ public:
     bool scene_ready() const override { return manifold_ready(); }
 
     bool solving() const override { return gpu_ok_ && !atlas_done_; }
-    // Ready = atlas finale done AND channel table built (empty table =
-    // build failed/skipped, e.g. the no-GPU give-up path).
+    // Ready = atlas finale done AND channel table built (empty table = build
+    // failed/skipped).
     bool manifold_ready() const { return atlas_done_ && !atom_.channels().empty(); }
     double state_energy(int idx) const override { return atom_.state_energy(idx); }
     int spectro_count() const override {
@@ -692,25 +658,25 @@ public:
                    ? spectro_ev_[static_cast<std::size_t>(i)]
                    : 0.0;
     }
-    // Full scale: the ionization limit 0.5 Ha = 13.6 eV -- every bound-
-    // bound photon of the un-ionized atom sits below it.
+    // Full scale = the ionization limit 0.5 Ha = 13.6 eV; every bound-bound
+    // photon sits below it.
     double spectro_max_ev() const override { return 0.5 * kHaToEv; }
     long long photon_count() const override { return photon_count_; }
     // Cumulative absorbed (ionized) fraction since the last collapse/prep.
     double ionized_fraction() const override {
         return std::max(0.0, 1.0 - bound_survival_);
     }
-    // Result of the most recent energy measurement: eigenstate index, -1 for
-    // the outside-the-manifold outcome, -2 if none has run yet.
+    // Most recent energy measurement: eigenstate index, -1 outside manifold, -2
+    // none yet.
     int last_measured_index() const override { return last_measured_index_; }
-    // <z> of the current cloud (bridges the GPU state to the CPU session
-    // first); the hook for the Stark polarization along +z.
+    // <z> of the current cloud (bridges GPU->CPU first); the Stark polarization
+    // hook.
     double mean_z() override {
         ensure_cpu_current();
         return ses::mean_position(sim_.psi()).z;
     }
     // Kepler-orbit readout: <x>,<y> off the same bridged field (the
-    // ensure_cpu_current dirty flag makes back-to-back polls one bridge).
+    // ensure_cpu_current dirty flag coalesces back-to-back polls into one bridge).
     double mean_x() override {
         ensure_cpu_current();
         return ses::mean_position(sim_.psi()).x;
@@ -721,8 +687,8 @@ public:
     }
     double peak_excited_population() const override { return rabi_peak_; }
 
-    // Magnetic Larmor hooks: prepare an eigenstate, probe another state's
-    // population -- proves the field evolves psi itself, not just the display.
+    // Magnetic Larmor hooks: prepare an eigenstate, probe another's population
+    // -- proves the field evolves psi, not just the display.
     void debug_prepare_state(int idx) override {
         if (!manifold_ready() || idx < 0 || idx >= kNumStates) {
             return;
@@ -739,8 +705,8 @@ public:
         engine_.project_psi();
         return atom_.project_population(engine_, idx);
     }
-    // Selftest hook: psi = (|a> + |b>)/sqrt(2) -- the intra-shell coherence
-    // probe the partial-measurement arc collapses.
+    // Selftest hook: psi = (|a>+|b>)/sqrt(2) -- the intra-shell coherence the
+    // partial-measurement arc collapses.
     void debug_prepare_superposition(int a, int b) override {
         if (!manifold_ready() || a < 0 || a >= kNumStates || b < 0 ||
             b >= kNumStates || a == b) {
@@ -763,9 +729,6 @@ public:
 
     // ---- display-facing accessors (the shell's FrameInput assembly) ----
 
-    // cloud(), surface_vbuf(), surface_indirect(), peak(), compute_attempted(),
-    // gpu_ok(), psi_volume_view(): inherited from BaseDirector (identical).
-
     // Photon flash: a brief warm background right after a quantum jump.
     float next_flash_intensity() override {
         if (flash_ticks_ <= 0) {
@@ -776,14 +739,9 @@ public:
         --flash_ticks_;
         return v;
     }
-    // take_volume_written(), take_volume_dirty(), take_mesh_dirty(),
-    // mark_display_dirty(), take_title_dirty(), psi_staging(), mesh(),
-    // colors(): inherited from BaseDirector (identical).
-
-    // The full window-title readout (rendered into the ImGui status block).
+    // The full window-title readout (ImGui status block).
     std::string title_text() override {
-        // While relaxing: exact <H> on the CPU session, or the free ITP
-        // estimator on the GPU path.
+        // While relaxing: exact <H> on CPU, or the free ITP estimator on GPU.
         const double t_au = sim_.time() + gpu_time_;
         std::string s = "Electron near a hydrogen nucleus   t = " +
                         strf("%.2f au (%.3f fs)", t_au, t_au * kAuToFs) + "   ";
@@ -858,8 +816,8 @@ private:
                                          : ses::Vec3d{0.0, 0.0, 1.0};
     }
 
-    // A collapse or a fresh preparation resolves the absorbed-flux record:
-    // the electron was found bound, so the tally restarts from norm 1.
+    // A collapse / fresh preparation resolves the absorbed-flux record: the
+    // electron was found bound, so the tally restarts from norm 1.
     void reset_ionized_tally() {
         bound_survival_ = 1.0;
         norm_baseline_ = 1.0;
@@ -875,9 +833,8 @@ private:
     }
 
     // Continuum verdict: subtract every tracked component (psi <- (1-P)psi,
-    // renormalized) -- unless the residual is fp32 noise (renormalizing it
-    // would fabricate a cloud; psi is left alone then). Precondition:
-    // project_psi() deposited for the CURRENT psi.
+    // renormalized) -- unless the residual is fp32 noise (renormalizing would
+    // fabricate a cloud). Precondition: project_psi() ran on the CURRENT psi.
     void project_manifold_out() {
         std::array<std::complex<double>, kNumStates> amp{};
         double bound = 0.0;
@@ -910,11 +867,10 @@ private:
         write_display_texture();
     }
 
-    // Partial projective measurement: Born-sample ONE quantum number (n, l,
-    // or signed m -- the latter via the real-pair L_z recombination) and
-    // rebuild psi from the kept tracked amplitudes. The continuum residual
-    // is discarded (the collapse_onto seam); the deficit samples the
-    // continuum verdict, which projects the manifold out instead.
+    // Partial projective measurement: Born-sample ONE quantum number (n, l, or
+    // signed m via the real-pair L_z recombination) and rebuild psi from the
+    // kept amplitudes. The 1-sum deficit samples the continuum verdict
+    // (project_manifold_out).
     void run_partial_measure(PartialBasis basis) {
         engine_.project_psi();
         std::array<std::complex<double>, kNumStates> amp{};
@@ -1018,9 +974,9 @@ private:
         return s;  // unreachable: the table is m-complete per level
     }
 
-    // psi <- sum keep[s] |s>, renormalized. The seed recipe: rotate the
-    // global phase so the anchor coefficient is real (engine scale() is
-    // real), overwrite psi with the anchor state, then add the rest.
+    // psi <- sum keep[s] |s>, renormalized. Rotate the global phase so the
+    // anchor coefficient is real (engine scale() is real), overwrite psi with
+    // the anchor, then add the rest.
     void rebuild_psi_from(const std::array<std::complex<double>, kNumStates>& keep) {
         int anchor = 0;
         for (int s = 1; s < kNumStates; ++s) {
@@ -1029,8 +985,8 @@ private:
                 anchor = s;
             }
         }
-        // std::abs (hypot) not sqrt(norm): overflow-safe, and CPU is oracle-only
-        // now, so the extra cost is free.
+        // std::abs (hypot) not sqrt(norm): overflow-safe, and the extra cost is
+        // free (CPU is oracle-only now).
         const double mag = std::abs(keep[static_cast<std::size_t>(anchor)]);
         if (mag <= 0.0) {
             return;  // empty subspace cannot be sampled (prob > 0 gate)
@@ -1067,17 +1023,13 @@ private:
         write_display_texture();
     }
 
-    // MCWF no-jump damping: psi += (e^{-gamma_n dt/2} - 1) c_n |n> for each
-    // occupied excited state, then renormalize -- the non-Hermitian H_eff
-    // conditioned on "no photon detected". This realizes ses::
-    // nojump_damped_amplitudes (ses.decay, unit-tested) in the {|n>}
-    // basis on the grid state (the renorm here spans the full field, not just
-    // the tracked amplitudes). A pure eigenstate is unchanged (the renorm
-    // cancels its damping); a superposition visibly breathes its excited
-    // fraction out between jumps. Cost control: only states with
-    // pop >= 1e-3, the strongest kMcwfMaxStates per tick (one transient
-    // synthesis + axpy each) -- exact once the cloud concentrates onto a
-    // few states, approximate-but-convergent for the 91-state seed.
+    // MCWF no-jump damping: psi += (e^{-gamma_n dt/2}-1) c_n |n> per occupied
+    // excited state, then renormalize -- the non-Hermitian H_eff conditioned on
+    // "no photon". Realizes ses::nojump_damped_amplitudes (ses.decay,
+    // unit-tested) on the grid state (renorm spans the full field, not just the
+    // tracked amplitudes). Cost control: only pop >= 1e-3, the strongest
+    // kMcwfMaxStates per tick -- exact once concentrated, approximate-but-
+    // convergent for the 91-state seed.
     void apply_mcwf_damping(const std::array<double, kNumStates>& pop,
                             double dt) {
         constexpr int kMcwfMaxStates = 8;
@@ -1158,8 +1110,8 @@ private:
         }
         if (damped) {
             const ses_vk::Engine::NormPeak np = engine_.norm_and_peak();
-            // Ionization tally: back out the analytically known H_eff loss
-            // so this renorm only launders the damping, not absorbed flux.
+            // Ionization tally: back out the known H_eff loss so this renorm
+            // launders only the damping, not absorbed flux.
             if (absorber_on_ && norm_baseline_ > 0.0) {
                 bound_survival_ *= ses::bound_survival_ratio(
                     np.sum, damp_loss, norm_baseline_);
@@ -1171,8 +1123,8 @@ private:
         }
     }
 
-    // One real-time step batch: propagate (driven / magnetic / plain),
-    // absorb at the walls, then the title-cadence readouts and trials.
+    // One real-time step batch: propagate (driven/magnetic/plain), absorb, then
+    // title-cadence readouts and trials.
     void run_real_time_batch() {
         if (gpu_title_due_) {
             // GPU-reduced norm+peak (2 KB readback), taken BEFORE enqueueing
@@ -1182,15 +1134,15 @@ private:
             if (np.peak > 0.0) {
                 peak_ = np.peak;  // brightness tracks the cloud
             }
-            // Absorbed (ionized) flux tally BEFORE the renorm below, which
-            // would otherwise silently pump the lost norm back into the
-            // cloud. Signed ratio: fp32 drift cancels as a zero-mean walk.
+            // Absorbed-flux tally BEFORE the renorm below, which would otherwise
+            // pump the lost norm back into the cloud. Signed ratio: fp32 drift
+            // cancels as a zero-mean walk.
             if (absorber_on_ && np.sum > 0.0 && norm_baseline_ > 0.0) {
                 bound_survival_ *=
                     ses::bound_survival_ratio(np.sum, 0.0, norm_baseline_);
             }
-            // fp32 drift renormalization: the split-operator is unitary in
-            // exact arithmetic; pinning norm = 1 removes numerical decay.
+            // fp32 drift renorm: the split-operator is unitary in exact
+            // arithmetic; pinning norm=1 removes numerical decay.
             if (np.sum > 0.0 && std::abs(np.sum - 1.0) > 1e-4) {
                 engine_.scale(static_cast<float>(1.0 / std::sqrt(np.sum)));
                 norm_baseline_ = 1.0;
@@ -1202,49 +1154,47 @@ private:
             radiated_power_ = ses::larmor_power(engine_.mean_force());
         }
         if (laser_pol_ != LaserPol::Off) {
-            // t0 is the same clock that credits gpu_time_, so the carrier
-            // phase cos(w t) stays continuous across batches/pauses.
+            // Same clock that credits gpu_time_, so the carrier phase cos(w t)
+            // stays continuous across batches/pauses.
             const ses::DipoleDrive d{laser_axis(), laser_e0_, laser_omega_};
             engine_.driven_step(d, sim_.time() + gpu_time_, sim_.dt(),
                                 pending_gpu_steps_, absorber_on_, true);
         } else if (bfield_b_ > 0.0) {
-            // Minimal-coupling magnetic step: static E + diamagnetic are
-            // already folded into the half-potential (upload_field_tables);
-            // the paramagnetic L_axis is the exact three-shear rotation.
+            // Minimal-coupling magnetic step: static E + diamagnetic already
+            // folded into the half-potential; the paramagnetic L_axis is the
+            // exact three-shear rotation.
             engine_.magnetic_step(bfield_axis_,
                                   0.5 * bfield_b_ * (0.5 * sim_.dt()),
                                   pending_gpu_steps_, absorber_on_, true);
         } else {
-            // The static E-field (if any) is folded into the half-potential,
-            // so a plain step polarizes / field-ionizes correctly. The
-            // absorbing mask damps after every step; the display bridge
-            // records into the same submission. ASYNC: the batch overlaps
-            // this frame's render (which samples the PREVIOUS display
-            // volume); next frame's run_frame waits and flips.
+            // Static E-field (if any) is folded into the half-potential, so a
+            // plain step polarizes / field-ionizes correctly. ASYNC: the batch
+            // overlaps this frame's render (which samples the PREVIOUS volume);
+            // next frame's run_frame waits and flips.
             engine_.step_async(pending_gpu_steps_, absorber_on_, true);
         }
-        // Time is credited where steps EXECUTE, so a stalled or
-        // occluded paint cannot desync the clock from the state.
+        // Time credited where steps EXECUTE, so a stalled paint cannot desync
+        // the clock from the state.
         gpu_time_ += pending_gpu_steps_ * sim_.dt();
 
-        // The title-cadence readouts below consume POST-step psi and submit
-        // on the batch's own queue: host-wait the async batch first --
-        // same-queue submission order alone carries no memory dependency.
+        // The readouts below consume POST-step psi on the batch's own queue:
+        // host-wait first -- same-queue submission order carries no memory
+        // dependency.
         if (gpu_title_due_) {
             engine_.wait_async();
         }
-        // Orbital-free populations: ONE deposit pass on the post-step psi,
-        // shared by the decay and laser readouts this title tick.
+        // Orbital-free populations: ONE deposit on the post-step psi, shared by
+        // the decay and laser readouts this tick.
         if (gpu_title_due_ && proj_ready_ &&
             ((decay_on_ && !atom_.channels().empty()) ||
              laser_pol_ != LaserPol::Off)) {
             engine_.project_psi();
         }
 
-        // Competing-channel Poisson trials on the TITLE cadence: the
-        // exponential is memoryless, so accumulated-dt trials give identical
-        // statistics with far fewer GPU reductions. A jump collapses psi
-        // onto the fired channel's destination.
+        // Competing-channel Poisson trials on the TITLE cadence: the exponential
+        // is memoryless, so accumulated-dt trials give identical statistics with
+        // far fewer GPU reductions. A jump collapses psi onto the fired
+        // destination.
         if (decay_on_ && !atom_.channels().empty()) {
             decay_accum_dt_ += pending_gpu_steps_ * sim_.dt();
             if (gpu_title_due_) {
@@ -1271,8 +1221,7 @@ private:
                     flush_collapse_error(ch.to);
                     flash_ticks_ = kFlashTicks;
                     ++photon_count_;
-                    // Spectrometer record: the photon carried exactly the
-                    // level gap.
+                    // Spectrometer record: the photon carried exactly the level gap.
                     spectro_ev_.push_back((atom_.state_energy(ch.from) -
                                            atom_.state_energy(ch.to)) *
                                           kHaToEv);
@@ -1284,12 +1233,10 @@ private:
                                  sim_.time() + gpu_time_);
                     title_dirty_ = true;
                 } else if (mcwf_damping_ && laser_pol_ == LaserPol::Off) {
-                    // No photon detected this interval: MCWF no-jump
-                    // evolution (H_eff) damps each excited amplitude by
-                    // e^{-gamma_n dt/2}. Skipped after a jump (the projected
-                    // amplitudes are stale post-collapse) and while the
-                    // laser drives (display-accelerated gammas would swamp
-                    // the coherent flop).
+                    // No photon this interval: MCWF no-jump evolution (H_eff).
+                    // Skipped after a jump (projected amplitudes stale
+                    // post-collapse) and while the laser drives
+                    // (display-accelerated gammas would swamp the coherent flop).
                     apply_mcwf_damping(pop, trial_dt);
                 }
             }
@@ -1305,9 +1252,9 @@ private:
         }
     }
 
-    // One imaginary-time batch: renormalized every step; the ITP estimator
-    // gives the convergence readout free. The excited flavor deflates the
-    // states below the target.
+    // One imaginary-time batch: renormalized every step; the ITP estimator gives
+    // the convergence readout free. The excited flavor deflates states below the
+    // target.
     void run_relax_batch() {
         const ses_vk::Engine::RelaxStats stats =
             (stepping_ == BaseStepping::RelaxingExcited &&
@@ -1338,7 +1285,7 @@ private:
                              "t=%.1f au)\n",
                              stats.energy, sim_.time() + gpu_time_);
                 reset_ionized_tally();  // fresh preparation
-                free_deflation_buffers();  // converged -> free the phi
+                free_deflation_buffers();
                 drop_relax_tables();
             }
         }
@@ -1358,8 +1305,8 @@ private:
         if (!manifold_ready() || !ensure_relax_tables()) {
             return;
         }
-        // Deflation set: OWNED transient fp32 buffers (no resident atlas),
-        // freed at auto-complete / reset / the next relaxation.
+        // Deflation set: OWNED transient fp32 buffers, freed at auto-complete /
+        // reset / next relaxation.
         free_deflation_buffers();
         relax_deflate_.push_back(atom_.synth_transient(engine_, kS1));
         if (deflate_p_triplet) {
@@ -1394,8 +1341,8 @@ private:
     }
 
     // Rebuild the GPU half-potential: V + E z (Stark) + (B^2/8) rho_perp^2
-    // (diamagnetic) -- both diagonal in position, so folding them in is
-    // exact; the per-frame magnetic_step adds only the paramagnetic rotation.
+    // (diamagnetic) -- both diagonal, so folding in is exact; magnetic_step adds
+    // only the paramagnetic rotation.
     void upload_field_tables() {
         if (!gpu_ok_) {
             return;
@@ -1403,8 +1350,8 @@ private:
         // An in-flight async batch reads v_buf_; upload_raw's copy has no
         // transfer-vs-compute ordering against it -- drain first.
         engine_.wait_async();
-        // Memo: sliders re-fire on every drag frame and reset always calls
-        // with 0/0 -- skip the two 67 MB uploads when nothing changed.
+        // Memo: sliders re-fire every drag frame and reset calls with 0/0 --
+        // skip the two 67 MB uploads when nothing changed.
         if (efield_e0_ == uploaded_e0_ && bfield_b_ == uploaded_b_ &&
             bfield_axis_ == uploaded_axis_) {
             return;
@@ -1427,11 +1374,10 @@ private:
                                                   bfield_b_, bfield_axis_};
             v = mprop.effective_potential();
         }
-        // The half-potential psi evolves under AND the Ehrenfest gradient must
-        // stay in sync (a stationary full-Hamiltonian state reads <grad V> = 0
-        // -- no fake Larmor power with fields on). On upload failure fall back
-        // to CPU like init_compute rather than evolving under a stale/desynced
-        // pair, and commit the memo only on success so a retry is not blocked.
+        // The half-potential AND the Ehrenfest gradient must stay in sync (a
+        // stationary state reads <grad V>=0 -- no fake Larmor power with fields
+        // on). On upload failure fall back to CPU; commit the memo only on
+        // success so a retry is not blocked.
         if (!engine_.set_potential(v) || !engine_.set_potential_gradient(v)) {
             std::fprintf(stderr, "engine: field-table upload failed -- "
                                  "falling back to CPU stepping\n");
@@ -1452,9 +1398,9 @@ private:
         relax_deflate_.clear();
     }
 
-    // Advance the startup atlas build one chunk per paint: synthesize + show
-    // one orbital (montage); after the last, build the factorized channel
-    // table (instant, CPU) and resume the wavepacket.
+    // Advance the atlas build one chunk per paint: synthesize + show one orbital
+    // (montage); after the last, build the channel table and resume the
+    // wavepacket.
     void run_atlas_chunk() {
         if (montage_hold_ > 0) {
             --montage_hold_;
@@ -1467,9 +1413,8 @@ private:
                 atlas_done_ = true;  // no radial solve: give up gracefully
                 return;
             }
-            // Synthesize into a TRANSIENT fp32 buffer: capture the grid norm,
-            // SHOW it (montage), audit, then FREE -- one orbital resident at
-            // a time.
+            // Synthesize into a TRANSIENT fp32 buffer: capture norm, SHOW
+            // (montage), audit, then FREE -- one orbital resident at a time.
             double pk = 0.0;
             const int buf = atom_.synth_transient(engine_, idx, &pk);
             if (buf < 0) {
@@ -1477,9 +1422,9 @@ private:
                 return;
             }
             engine_.copy_into_psi(buf);  // show (fp32)
-            // h-audit: cross-check 1D radial energy vs 3D spectral <H> for
-            // the resolution-critical 1s and box-critical 4s/5s/6s -- the
-            // only states read back to the CPU.
+            // h-audit: cross-check 1D radial energy vs 3D spectral <H> for the
+            // resolution-critical 1s and box-critical 4s/5s/6s -- the only CPU
+            // readbacks.
             if (idx == kS1 || idx == k4S || idx == k5S || idx == k6S) {
                 if (!engine_.readback(readback_buf_)) {
                     std::fprintf(stderr, "atlas: GPU readback FAILED (device-lost "
@@ -1511,9 +1456,9 @@ private:
             volume_dirty_ = false;
             montage_hold_ = kAtlasMontageFrames;
             if (synth_queue_.empty()) {
-                // Channel table: factorized radial x constexpr angular
-                // (build_channel_table) -- instant, so the atlas finale
-                // follows the last montage frame with no dipole pause.
+                // Channel table: factorized radial x constexpr angular --
+                // instant, so the finale follows the last montage frame with no
+                // dipole pause.
                 atom_.build_channel_table();
                 atom_.finalize_channel_table(kDecayGammaDisplay);
                 atlas_done_ = true;
@@ -1524,19 +1469,17 @@ private:
         }
     }
 
-    // Seed psi with a random complex superposition of the WHOLE tracked
-    // n <= 6 manifold ([0, kNumStates), 91 bound states). n <= 5 sits inside
-    // the box; the diffuse low-l n = 6 (6s/6p/6d, <r> ~ 54 a0) reaches the
-    // +-70 absorber, so a few percent slowly ionizes with no laser --
-    // deliberate (maximum orbitals), not a bug. Cross-shell beats evolve the
-    // density (fastest 1s-2p, T ~ 17 au); renormalized to 1 on the GPU.
+    // Seed psi with a random complex superposition of the WHOLE tracked n<=6
+    // manifold (91 bound states). The diffuse n=6 (<r>~54 a0) reaches the +-70
+    // absorber, so a few percent slowly ionizes with no laser -- deliberate,
+    // not a bug. Cross-shell beats evolve the density (fastest 1s-2p, T~17 au).
     void seed_bound_superposition() {
         if (!gpu_ok_ || !atom_.radial_ready()) {
             cpu_is_truth_ = true;  // fallback: resume the CPU packet
             return;
         }
         // Complex-Gaussian coefficients = uniform on the state sphere after
-        // the final renormalization; c[0]'s phase is folded out (global).
+        // renorm; c[0]'s phase is folded out (global).
         std::normal_distribution<double> gauss(0.0, 1.0);
         std::array<std::complex<double>, kNumStates> c{};
         for (auto& z : c) {
@@ -1578,13 +1521,12 @@ private:
         volume_dirty_ = false;
     }
 
-    // Post-collapse eigenstate-error flush: every collapse target is the
-    // SAMPLED radial eigenstate, not a grid eigenstate, so kFlushSteps of
-    // imaginary time flush its high-frequency junk before real time resumes
-    // (GPU-path parity pinned by vkcheck's collapse-flush check). Skipped
-    // while the laser drives (same rationale as the MCWF-damping exclusion).
-    // Tables stay resident while decay is armed -- rebuilding them per photon
-    // costs more than the burst itself; a one-off flush drops them again.
+    // Post-collapse eigenstate-error flush: collapse targets are SAMPLED radial
+    // eigenstates, not grid eigenstates, so kFlushSteps of imaginary time flush
+    // high-frequency junk before real time resumes (parity pinned by vkcheck's
+    // collapse-flush check). Skipped while the laser drives. Tables stay
+    // resident while decay is armed (rebuilding per photon costs more than the
+    // burst); a one-off flush drops them again.
     void flush_collapse_error(int target) {
         if (laser_pol_ != LaserPol::Off || !ensure_relax_tables()) {
             return;
@@ -1600,9 +1542,8 @@ private:
         }
     }
 
-    // Transient relax tables: built + uploaded on demand (per relax entry),
-    // freed on completion -- kept transient to avoid a large resident
-    // allocation.
+    // Transient relax tables: built/uploaded on demand, freed on completion --
+    // avoids a large resident allocation.
     bool ensure_relax_tables() {
         if (engine_.relax_tables_ready()) {
             return true;
@@ -1619,13 +1560,8 @@ private:
     }
     void drop_relax_tables() { engine_.release_relax_tables(); }
 
-    // ensure_cpu_current(), stage_active_view(), remesh(), stage_volume(),
-    // write_display_texture(): inherited from BaseDirector (identical).
-
-    // remake_simulation()/scene_name() are BaseDirector pure-virtual hooks
-    // (used only by base's reset_simulation()/title_text(), both of which
-    // HydrogenDirector overrides -- so these are never actually called; they
-    // exist solely to make the class concrete).
+    // BaseDirector pure-virtual hooks: never actually called (HydrogenDirector
+    // overrides both callers) -- present only to make the class concrete.
     ses::WavepacketSimulation remake_simulation() const override {
         return make_simulation();
     }
@@ -1638,18 +1574,18 @@ private:
     int mcwf_scratch_ = -1;     // reused synthesis buffer (see synth_over)
     bool pending_energy_measure_ = false;  // Key E: serviced in run_frame
 
-    // Tracked atom: radial solve, synthesis bookkeeping, E1 channel table;
-    // engine-backed calls pass engine_ explicitly.
+    // Tracked atom: radial solve, synthesis, E1 channel table; engine-backed
+    // calls pass engine_ explicitly.
     ses_shell::AtomModel atom_;
     bool proj_ready_ = false;  // static projection index uploaded
 
-    // Absorbed-flux (ionization) bookkeeping: 1 - bound_survival_ is the
-    // cumulative escaped fraction; any collapse/preparation resolves it.
+    // Absorbed-flux bookkeeping: 1 - bound_survival_ is the cumulative escaped
+    // fraction; any collapse/prep resolves it.
     double bound_survival_ = 1.0;
     double norm_baseline_ = 1.0;  // norm at the last tally/renorm point
 
-    // Last field values whose tables reached the GPU (upload memo). The
-    // engine starts with the bare potential + gradient (init), i.e. 0/0.
+    // Last field values whose tables reached the GPU (upload memo); engine
+    // starts at 0/0.
     double uploaded_e0_ = 0.0;
     double uploaded_b_ = 0.0;
     int uploaded_axis_ = 2;
@@ -1665,7 +1601,6 @@ private:
     std::string relax_label_ = "2p";
     std::vector<int> relax_deflate_;        // live RelaxingExcited deflation set
     std::vector<int> relax_deflate_owned_;  // owned transient states to release
-    // relax_prev_energy_/relax_plateau_: inherited from BaseDirector.
 
     // Startup atlas build (radial solve + synthesis, chunked in paint).
     std::vector<int> synth_queue_;
@@ -1673,8 +1608,8 @@ private:
     bool atlas_done_ = false;
     double decay_accum_dt_ = 0.0;  // sim time since the last decay trial
     int excite_cycle_ = 0;         // key-5 n=3 cycle position
-    // Decay defaults ON (as in nature); D is the off-switch. Armed once the
-    // startup atlas build finishes.
+    // Decay defaults ON (as in nature); D toggles off. Armed once the atlas
+    // build finishes.
     bool decay_on_ = true;
     int flash_ticks_ = 0;
     long long photon_count_ = 0;
@@ -1693,9 +1628,6 @@ private:
     double pop_excited_ = 0.0;
     double rabi_peak_ = 0.0;  // max P(2pz) since the laser came on
 
-    // CPU staging (mesh_/colors_/psi_staging_/peak_/mesh_dirty_/volume_dirty_/
-    // volume_written_/ticks_), absorber_on_, and rng_: inherited from
-    // BaseDirector.
 };
 
 }  // namespace ses_shell

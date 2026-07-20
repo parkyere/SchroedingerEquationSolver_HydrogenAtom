@@ -10,9 +10,8 @@ export import ses.scenario.line1d_director;
 import ses.spectrum1d;
 
 
-// Morse well: E_n = w0 (n + 1/2) - (alpha^2/2)(n + 1/2)^2, w0 = alpha sqrt(2 d);
-// finite bound set below d. [U]/[D] jump eigenstates (closed form locked in
-// tests/solvable_wells_test.cpp), [S] (n, n+1) pair beat T = 2pi/gap, [2] ground.
+// E_n = w0 (n + 1/2) - (alpha^2/2)(n + 1/2)^2, w0 = alpha sqrt(2 d);
+// closed form locked in tests/solvable_wells_test.cpp.
 
 
 export namespace ses_shell {
@@ -35,8 +34,7 @@ public:
                              ses::Grid1D{-kMo1dBox, kMo1dBox, kMo1dPoints},
                              kMo1dD, kMo1dAlpha, kMo1dX0),
                          kMo1dDt, kMo1dRScale, kMo1dEScale, kMo1dYClamp) {
-        // Solve past the bound set; keep only genuinely bound levels (the
-        // rest are box-discretized continuum).
+        // drop box-discretized continuum above D
         std::vector<ses::Bound1D> s =
             ses::bound_states_1d(grid1d_, potential_, 8);
         for (ses::Bound1D& b : s) {
@@ -49,14 +47,13 @@ public:
 
     MorseApi* morse() override { return this; }
 
-    // ---- MorseApi ----
     int level() const override { return level_; }
     double level_energy() const override {
         return ses::mean_energy(psi_, potential_);
     }
     int bound_count() const override { return static_cast<int>(bound_.size()); }
     bool jump(bool up) override {
-        // From the pair superposition, jump re-prepares from its base level.
+        // pair state (level_ < 0) jumps from base_
         const int from = level_ >= 0 ? level_ : base_;
         const int target = from + (up ? 1 : -1);
         if (target < 0 || target >= bound_count()) {

@@ -13,18 +13,15 @@ import ses.bloch;
 import ses.wavepacket;
 
 
-// 1D optical lattice (Mathieu problem): V(x) = V0 sin^2(kL x) -- SMOOTH
-// so the FFT split-operator keeps spectral accuracy (Kronig-Penney kinks
-// would Gibbs-ring). Amber inset: exact E_n(q) from the tridiagonal
-// central equation; cyan marker: live q on band 0. Tilt F implemented as
-// the comoving gauge A(t) = -F t; Bloch oscillation T_B = G/F (F = 0:
-// plain band-limited dispersion).
+// V0 sin^2 lattice, SMOOTH so the FFT split-operator stays spectral
+// (Kronig-Penney kinks Gibbs-ring). Tilt via comoving gauge A(t) = -F t.
+// Bloch period T_B = G/F, G = 2 kL (reciprocal lattice vector).
 
 
 export namespace ses_shell {
 
-constexpr double kBl1dKl = 1.0;               // lattice constant a = pi
-constexpr int kBl1dPeriods = 26;              // integer periods in the box
+constexpr double kBl1dKl = 1.0;               // kL; lattice period a = pi/kL
+constexpr int kBl1dPeriods = 26;              // integer -> FFT-commensurate box
 constexpr int kBl1dPoints = 4096;
 constexpr double kBl1dDt = 0.01;
 constexpr double kBl1dV0 = 1.5;
@@ -69,7 +66,7 @@ public:
     double bloch_period() const override {
         return force_ > 0.0 ? 2.0 * kBl1dKl / force_ : 0.0;
     }
-    // Mechanical quasimomentum q(t) = q0 + F t, folded to [-kL, kL).
+    // q folded to first BZ [-kL, kL).
     double quasimomentum() const override {
         const double g2 = 2.0 * kBl1dKl;
         double q = tilted_ ? tilted_->drift() : 0.0;
@@ -91,15 +88,15 @@ public:
     double default_camera_elevation() const override { return 0.22; }
     double default_camera_distance() const override { return 55.0; }
 
-    // Base curves 0..3 + the band inset + the quasimomentum marker.
+    // 4 base + band inset + q marker.
     int overlay_curve_count() const override { return 6; }
     OverlayCurve overlay_curve(int i) const override {
-        if (i == 4) {  // band structure inset, amber
+        if (i == 4) {  // band inset
             return {band_curve_.data(),
                     static_cast<int>(band_curve_.size() / 3),
                     1.0f, 0.70f, 0.20f, 0.9f};
         }
-        if (i == 5) {  // live q marker on band 0, cyan
+        if (i == 5) {  // q marker on band 0
             return {q_marker_.data(),
                     static_cast<int>(q_marker_.size() / 3),
                     0.35f, 0.85f, 1.0f, 1.0f};
@@ -125,7 +122,7 @@ protected:
         return s;
     }
 
-    // The tilted propagator replaces the base split-operator wholesale.
+    // tilted propagator replaces the base split-operator.
     void step_batch(int n) override {
         tilted_->step(psi_, n);
         measure();
@@ -161,7 +158,7 @@ private:
         sim_time_ = 0.0;
         pending_steps_ = 0;
         excursion_ = 0.0;
-        // Broad packet at rest on a well minimum: ground band, q ~ 0.
+        // broad packet at a well minimum -> ground band, q~0.
         set_state(ses::gaussian_wavepacket(grid1d_, 0.0, kBl1dSigma, 0.0));
         measure();
         x0_ = mean_x_;
@@ -181,9 +178,7 @@ private:
         excursion_ = std::max(excursion_, std::abs(mean_x_ - x0_));
     }
 
-    // Band inset: E_n(q) over the zone, drawn in the top-left corner in
-    // world coordinates (bands chained left-right-left: the connectors at
-    // the zone edges trace the gaps).
+    // Band inset E_n(q); serpentine chaining so zone-edge connectors trace gaps.
     void rebuild_band_inset() {
         band_curve_.clear();
         const double x_lo = grid1d_.xmin + 3.0;

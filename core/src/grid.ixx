@@ -1,11 +1,8 @@
 export module ses.grid;
 
 
-// 1D uniform PERIODIC grid.
-//
-// Convention (required by the split-operator Fourier propagator):
-//     h = (xmax - xmin) / n,    x_i = xmin + i*h,    i = 0 .. n-1.
-// xmax is NOT a grid point; it aliases to xmin under periodicity.
+// Periodic grid (required by the split-operator Fourier propagator): xmax aliases
+// to xmin -- not a grid point -- so spacing divides by n, not n-1.
 
 
 export namespace ses {
@@ -20,9 +17,7 @@ struct Grid1D {
     constexpr double coord(int i) const noexcept { return xmin + i * spacing(); }
 };
 
-// 3D periodic grid: three independent Grid1D axes.
-// Flat layout is X FASTEST -- flat(i,j,k) = i + nx*(j + ny*k) -- so x-lines
-// are contiguous (3D FFT) and the layout matches the tightly packed
+// Flat layout x-fastest: x-lines contiguous for the 3D FFT, and matches the
 // row-major order GPU 3D-texture uploads expect.
 struct Grid3D {
     Grid1D x{};

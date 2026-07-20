@@ -16,27 +16,11 @@ import ses.spheroidal;
 import ses.h2plus_atlas_data;
 
 
-// One-electron molecules with FIXED nuclei (Born-Oppenheimer): the engine
-// propagates the single electron in a multi-center Coulomb landscape; the
-// nuclei are geometry, not dynamics. Two scenes share the machinery:
-//
-//  - H2+ (two bare protons, regularized cells): sigma_g bonding + deflated
-//    sigma_u (nodal plane); the R knob scans E_total(R) = E_elec + 1/R --
-//    the chemical bond is its minimum.
-//  - Stripped benzene: the FIRST electron of C6H6^41+ over the BARE nuclei
-//    (Z_C = 6, Z_H = 1, regularized cells, centers lattice-snapped). No
-//    soft cores, no free parameters, REAL (uniform, X-ray) geometry only
-//    -- project rules: bare regularized Coulomb everywhere, no
-//    counterfactual knobs. Low spectrum: deep quasi-degenerate carbon-core
-//    band (1s(Z=6) inter-carbon hopping ~e^{-16}: core orbitals, not a
-//    delocalized pi system). CPK-convention markers: carbon-black and
-//    hydrogen-white atom discs over a gray bond skeleton.
-//
-// State preparation is a CHAIN: ITP ground, then deflated excited states
-// against the captured lower ones (fp32 state buffers, engine-resident),
-// mirroring the hydrogen director's deflation flow. prepare(k) is async;
-// completion is the ITP energy plateau. License physics (32^3 CPU):
-// tests/molecule_test.cpp.
+// One-electron molecules, fixed Born-Oppenheimer nuclei in a multi-center
+// Coulomb landscape. Project rule: bare regularized Coulomb, no soft cores.
+// State prep = deflation chain: ITP ground, then excited states deflated
+// against captured lower buffers (async; completion = ITP energy plateau).
+// Physics: tests/molecule_test.cpp.
 
 
 export namespace ses_shell {
@@ -57,13 +41,13 @@ public:
     }
     void prepare(int k) override {
         if (!gpu_ok_ || k < 0 || k >= kStates) {
-            return;  // the deflation chain runs on the GPU path only
+            return;
         }
         showing_random_ = false;
         want_ = k;
         advance_chain();
     }
-    // P(|r| < radius) on the CPU truth (bridges the GPU state first).
+    // P(|r| < radius) on the CPU truth.
     double containment(double radius) override {
         ensure_cpu_current();
         const ses::Grid3D& g = sim_.grid();
@@ -88,10 +72,9 @@ public:
     }
     int state_count() const override { return exposed_states(); }
     const char* orbital_label(int k) const override { return orbital_name(k); }
-    // Cancel any relax chain, drop an arbitrary normalized state, evolve it.
     void seed_random() override {
         if (!gpu_ok_) {
-            return;  // the scene lives on the GPU real-time path
+            return;
         }
         fine_polish_ = false;
         fine_left_ = 0;
@@ -127,9 +110,8 @@ public:
         apply_geometry();
     }
     void set_parameter(double p) override {
-        // Drag memo (the hydrogen uploaded_* rule): ImGui fires every drag
-        // frame; an unchanged SNAPPED geometry must not rebuild the 256^3
-        // sim and throw the relax chain away.
+        // ImGui fires every drag frame; an unchanged snapped geometry must not
+        // rebuild the 256^3 sim and drop the relax chain.
         const double snapped = clamp_parameter(p);
         if (geom_ == -1 && snapped == param_) {
             return;
@@ -144,7 +126,6 @@ public:
             seed_random();
             return true;
         }
-        // Keys 2 .. 2+state_count()-1 prepare the known orbitals in order.
         if (key >= '2' && key < static_cast<char>('2' + state_count())) {
             prepare(key - '2');
             return true;
@@ -152,9 +133,6 @@ public:
         return false;
     }
 
-    // CPK nucleus balls, filled by the scenes' rebuild_markers(): real
-    // shaded spheres in both views (the hydrogen scene's proton machinery,
-    // generalized to a list).
     int marker_count() const override {
         return static_cast<int>(balls_.size());
     }
@@ -164,29 +142,25 @@ public:
 
 protected:
     static constexpr int kStates = 6;  // buffer capacity; scenes expose <= this
-    // Fine-polish burst after the coarse plateau (see run_relax_batch).
     static constexpr double kMolFineDtau = 0.002;
     static constexpr int kMolFinePolishSteps = 600;  // tau ~ 1.2
 
     // ---- scene hooks ----
-    // How many known orbitals the scene exposes, and each one's label.
     virtual int exposed_states() const = 0;
     virtual const char* orbital_name(int /*k*/) const { return ""; }
     virtual std::vector<ses::Vec3d> centers() const = 0;
-    // Per-center effective charges (parallel to centers()); default all 1.
+    // parallel to centers()
     virtual std::vector<double> charges() const {
         return std::vector<double>(centers().size(), 1.0);
     }
-    // Deflation-chain seed for state k (benzene). H2+ overrides prepare()
-    // to synthesize from its analytic atlas instead, so it needs none.
+    // Deflation-chain seed for state k (H2+ overrides prepare() instead).
     virtual ses::Field3D excited_seed(int /*k*/) const { return ground_seed(); }
     virtual double geometry_parameter(int variant) const = 0;
     virtual double clamp_parameter(double p) const = 0;
-    virtual void geometry_changed() {}  // rebuild markers etc.
+    virtual void geometry_changed() {}
 
-    // Swap the nuclear geometry under a fresh electron: new potential on
-    // both the CPU truth and the engine, stale state caches dropped, and
-    // the ground relax restarted automatically (an E(R)-scan step).
+    // New geometry, fresh electron: rebuild potential, drop state caches,
+    // restart the ground relax.
     void apply_geometry() {
         if (gpu_ok_) {
             engine_.wait_async();
@@ -211,10 +185,7 @@ protected:
         }
     }
 
-    // Boot straight into the ground state: an un-relaxed (non-eigenstate)
-    // Gaussian seed wraps the periodic (absorber-free) box as ripples and
-    // its core phase-rotates at |E| dt ~ rad/step; auto-relax opens the
-    // scene on the stationary physics.
+    // Gaussian seed is not an eigenstate; relax into the ground state on boot.
     void on_gpu_ready() override { prepare(0); }
 
     void advance_chain() {
@@ -258,12 +229,9 @@ protected:
         stepping_ = BaseStepping::Relaxing;
     }
 
-    // Deflated ITP batch + plateau auto-complete + fine polish + capture.
-    // The coarse tables (kBaseRelaxDtau) settle fast but their fixed point
-    // is Trotter-biased in a deep well (benzene: V*dtau ~ 7.6 left ~60%
-    // continuum junk that real time honestly dispersed over the box); a
-    // FIXED fine-dtau burst then purges the junk before capture -- the
-    // hydrogen post-collapse flush pattern at molecule scale.
+    // Coarse tables settle fast but the fixed point is Trotter-biased in a deep
+    // well (benzene V*dtau ~ 7.6): a fixed fine-dtau burst purges continuum junk
+    // before capture (post-collapse flush).
     void run_relax_batch() override {
         const ses_vk::Engine::RelaxStats stats =
             deflate_.empty()
@@ -317,8 +285,7 @@ protected:
         fine_left_ = 0;
         engine_.release_relax_tables();  // next chain state rebuilds coarse
         stepping_ = BaseStepping::RealTime;
-        // Capture the converged state as an engine-resident deflation
-        // buffer + record its energy for the HUD/arcs.
+        // Capture the converged state as a deflation buffer + its energy.
         if (engine_.readback(readback_buf_)) {
             ses::Field3D f{sim_.grid()};
             for (std::size_t i = 0; i < f.data().size(); ++i) {
@@ -365,7 +332,6 @@ protected:
                                         ses::Vec3d{});
     }
 
-    // The scenes' CPK ball helper.
     static SceneMarker ball(const ses::Vec3d& c, double radius, float r,
                             float g, float b) {
         return {static_cast<float>(c.x),
@@ -385,21 +351,18 @@ protected:
     bool prepared_[kStates] = {false, false, false, false, false, false};
     int want_ = 0;
     int target_ = 0;
-    bool fine_polish_ = false;  // relax anneal stage (coarse -> fine)
-    int fine_left_ = 0;         // remaining fine-burst steps (0 = coarse)
-    bool showing_random_ = false;  // last drop was a random seed, not an MO
-    std::uint64_t rand_seed_ = 0;  // random-seed counter (deterministic)
+    bool fine_polish_ = false;
+    int fine_left_ = 0;         // 0 = coarse phase
+    bool showing_random_ = false;
+    std::uint64_t rand_seed_ = 0;  // deterministic seed counter
     std::vector<int> deflate_;
 };
 
 // ---- H2+ ------------------------------------------------------------------
 
-// Half-extent 40 bohr (256^3, h ~ 0.31): the atlas count is BOX-limited (the
-// diffuse high orbitals must fit), not resolution-limited, and orbitals are
-// synthesized one at a time (not resident), so a wide box buys much more of
-// the representable spectrum cheaply -- as rich as 256^3 allows without the
-// two nuclei (2 bohr apart, ~6 cells) merging. Energies are the EXACT atlas
-// values (grid-independent); only the tight 1sigma_g display is a bit blocky.
+// Half-extent 40 bohr (256^3, h ~ 0.31): atlas count is box-limited (diffuse
+// high orbitals must fit), not resolution-limited; a wide box buys more of the
+// representable spectrum cheaply (orbitals synthesized one at a time).
 constexpr double kH2pBox = 40.0;
 constexpr int kH2pPoints = 256;
 constexpr double kH2pDt = 0.04;
@@ -418,10 +381,8 @@ public:
     double default_camera_elevation() const override { return 0.28; }
     double default_camera_distance() const override { return 95.0; }
 
-    // The internuclear distance is a fixed physical constant (the H2+
-    // equilibrium bond length ~2.0 bohr): nuclei are rigid in the
-    // Born-Oppenheimer picture, so there is NO knob (user call -- a slider
-    // would imply R is free, which departs from the physical fact).
+    // R is fixed (rigid BO, equilibrium ~2.0 bohr): no knob -- a slider would
+    // imply R is free.
     void set_geometry(int /*variant*/) override {}
     void set_parameter(double /*p*/) override {}
 
@@ -437,12 +398,9 @@ protected:
         return {{-d, 0.0, 0.0}, {d, 0.0, 0.0}};
     }
 
-    // ---- the analytic (prolate-spheroidal) orbital atlas ----------------
-    // H2+ is EXACTLY separable, so the known orbitals are synthesized
-    // directly from ses.spheroidal (no relaxation) -- the same
-    // reduce-to-1D-and-synthesize atlas the hydrogen atom uses. The atlas
-    // climbs to the representability ceiling (bound orbitals whose radial
-    // extent fits the box). prepare(k) = instant synthesis of atlas MO k.
+    // ---- analytic (prolate-spheroidal) orbital atlas ----
+    // Orbitals synthesized directly from ses.spheroidal (no relaxation), up to
+    // the representability ceiling (radial extent must fit the box).
 
     int exposed_states() const override {
         ensure_atlas();
@@ -474,9 +432,8 @@ protected:
         const Mo& mo = atlas_[static_cast<std::size_t>(k)];
         set_state_field(ses::synthesize_h2plus(sim_.grid(), mo.orb, mo.partner));
     }
-    // Random = random NORMALIZED superposition of the atlas orbitals (a
-    // legitimate bound state of arbitrary shape -- it stays on the molecule
-    // and beats between MOs, unlike a raw random blob field).
+    // Random = normalized superposition of atlas orbitals: a legitimate bound
+    // state, not a raw random blob.
     void seed_random() override {
         ensure_atlas();
         if (atlas_.empty()) {
@@ -511,7 +468,7 @@ protected:
         return snap_r(std::clamp(p, kH2pRMin, kH2pRMax));
     }
     void geometry_changed() override {
-        atlas_.clear();  // a new R needs a fresh atlas
+        atlas_.clear();
         atlas_R_ = -1.0;
         rebuild_markers();
     }
@@ -551,8 +508,8 @@ private:
         }};
     }
 
-    // Snap the HALF-distance to a grid point so both regularized nucleus
-    // cells stay honest (R in multiples of 2h).
+    // Snap the half-distance to a grid point so both regularized nucleus cells
+    // sit on-grid (R in multiples of 2h).
     static double snap_r(double r) {
         const double h = 2.0 * kH2pBox / kH2pPoints;
         const double m =
@@ -562,21 +519,19 @@ private:
     }
 
     void rebuild_markers() {
-        // Two protons as CPK hydrogen-white balls.
         const std::vector<ses::Vec3d> c = centers();
         balls_ = {ball(c[0], 0.4, 0.95f, 0.95f, 0.95f),
                   ball(c[1], 0.4, 0.95f, 0.95f, 0.95f)};
     }
 
-    // One exposed orbital = an analytic MO + which real partner (m>0 has a
-    // cos-phi and a sin-phi lobing) + its term-symbol label.
+    // An exposed orbital: analytic MO + real-partner index (m>0 has cos-phi and
+    // sin-phi lobes) + term-symbol label.
     struct Mo {
         ses::H2plusOrbital orb;
         int partner;
         std::string label;
     };
 
-    // Drop a synthesized/blended field in as the live state and evolve it.
     void set_state_field(const ses::Field3D& psi) {
         sim_.set_psi(psi);
         cpu_is_truth_ = true;  // run_frame uploads it to the engine
@@ -585,8 +540,8 @@ private:
         stage_active_view();
     }
 
-    // Radial extent test: an orbital is representable if its Lambda(xi) has
-    // decayed well inside the box (physical r ~ (R/2) xi).
+    // Representable if Lambda(xi) has decayed well inside the box
+    // (physical r ~ (R/2) xi).
     bool representable(const ses::H2plusOrbital& o, double R) const {
         double peak = 0.0;
         for (double v : o.lambda) {
@@ -606,10 +561,9 @@ private:
     }
 
     static std::string mo_label(const ses::H2plusOrbital& o, int partner) {
-        // United-atom / MO term symbol from (m, n_eta, n_xi, parity).
         const char* g = o.parity > 0 ? "g" : "u";
         const char* sym = o.m == 0 ? "sigma" : (o.m == 1 ? "pi" : "delta");
-        // Principal-ish index within the (m,parity) tower for a readable name.
+        // principal-ish index within the (m,parity) tower
         std::string s = strf("%d%s_%s%s", o.n_xi + o.n_eta + o.m + 1, sym, g,
                              o.parity < 0 && o.m == 0 ? "*" : "");
         if (o.m > 0) {
@@ -625,9 +579,8 @@ private:
         }
         atlas_.clear();
         atlas_R_ = R;
-        // Load the BAKED atlas (ses.h2plus_atlas_data, offline-generated by
-        // sesolver_genatlas): the exact prolate-spheroidal orbitals for the
-        // nearest snapped R -- zero runtime ODE solve.
+        // Baked offline by sesolver_genatlas (ses.h2plus_atlas_data): exact
+        // prolate-spheroidal orbitals for the nearest snapped R, zero runtime solve.
         const std::vector<ses::H2plusOrbital> orbs = ses::h2plus_atlas_baked(R);
         constexpr int kMaxExposed = 24;  // UI list scrolls; the box admits more
         for (const ses::H2plusOrbital& o : orbs) {
@@ -643,7 +596,7 @@ private:
         }
     }
 
-    // Mutable analytic-atlas cache (rebuilt on R change; a const lazy build).
+    // lazy const-built atlas cache (rebuilt on R change)
     mutable std::vector<Mo> atlas_;
     mutable double atlas_R_ = -1.0;
     int cur_ = 0;  // currently-shown atlas index
@@ -653,16 +606,13 @@ private:
 
 constexpr double kBzBox = 12.0;   // Bohr half-extent, 256^3 (h ~ 0.094)
 constexpr int kBzPoints = 256;
-// dt scaled to the Z=6 regularized well: the nucleus cell sits at
-// V = -Z*2.38/h ~ -152 Ha, and the half-potential phase V*dt/2 must stay
-// well under a radian per step or the Trotter product heats the state over
-// the whole box (P(r<6) collapsed to 0.09 within 5 au at dt = 0.04).
-// 0.004 -> 0.30 rad at the deepest cell; the core-band eigenphase
-// |E|*dt ~ 0.23 rad rides along.
+// dt scaled to the Z=6 well: deepest cell V ~ -152 Ha, so the half-step phase
+// V*dt/2 must stay under ~1 rad or the Trotter product heats the state.
+// 0.004 -> 0.30 rad; core-band |E|*dt ~ 0.23 rad rides along.
 constexpr double kBzDt = 0.004;
 constexpr double kBzRingR = 2.63;   // C-C 1.39 A in bohr
-constexpr double kBzCH = 2.06;      // C-H 1.09 A in bohr: H at r + this
-// BARE nuclear charges of the stripped molecule -- nothing to calibrate.
+constexpr double kBzCH = 2.06;      // C-H 1.09 A in bohr
+// bare charges, nothing to calibrate
 constexpr double kBzZC = 6.0;
 constexpr double kBzZH = 1.0;
 
@@ -672,24 +622,20 @@ public:
         rebuild_markers();
     }
 
-    // The REAL benzene geometry only (uniform ring, as X-ray settled) --
-    // no counterfactual knobs in this simulator.
+    // Real X-ray geometry only: no counterfactual knobs.
     void set_geometry(int /*variant*/) override {}
     void set_parameter(double /*p*/) override {}
 
-    // The deep carbon-core band: ground + two deflated members (keys 2/3/4).
+    // ground + two deflated core-band members
     int exposed_states() const override { return 3; }
 
     double default_camera_azimuth() const override { return 0.3; }
     double default_camera_elevation() const override { return 0.7; }
     double default_camera_distance() const override { return 40.0; }
 
-    // Ball-and-stick: the neutral gray bond skeleton as an overlay line,
-    // the atoms themselves as CPK marker balls (carbon black, hydrogen
-    // white).
+    // Ball-and-stick: bonds as an overlay curve, atoms as CPK marker balls.
     int overlay_curve_count() const override { return 1; }
     OverlayCurve overlay_curve(int /*i*/) const override {
-        // bonds (hexagon + C-H spokes)
         return {ring_marker_.data(),
                 static_cast<int>(ring_marker_.size() / 3),
                 0.55f, 0.55f, 0.60f, 0.9f};
@@ -704,8 +650,8 @@ protected:
         return make();
     }
 
-    // Carbons first, then their hydrogens (each riding its carbon's angle);
-    // every center lattice-snapped for the bare-cell regularization.
+    // Carbons first, then hydrogens (charges() depends on this order); every
+    // center lattice-snapped for bare-cell regularization.
     std::vector<ses::Vec3d> centers() const override {
         std::vector<ses::Vec3d> c = snapped_ring(sim_.grid(), kBzRingR);
         const std::vector<ses::Vec3d> h =
@@ -783,8 +729,8 @@ private:
         }};
     }
 
-    // One retraced strip: the C hexagon with a C->H spoke drawn (and
-    // retraced) at every vertex -- the full skeleton in one overlay curve.
+    // Full skeleton in one overlay curve: hexagon with a C->H spoke drawn and
+    // retraced at each vertex.
     void rebuild_markers() {
         const ses::Grid1D axis{-kBzBox, kBzBox, kBzPoints};
         const ses::Grid3D grid{axis, axis, axis};
@@ -803,7 +749,6 @@ private:
             put(c[static_cast<std::size_t>(i)]);
         }
         put(c[0]);  // close the hexagon
-        // CPK atom balls: carbon larger and dark, hydrogen smaller, white.
         balls_.clear();
         for (int i = 0; i < 6; ++i) {
             balls_.push_back(

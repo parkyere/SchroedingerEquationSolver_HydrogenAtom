@@ -12,18 +12,13 @@ export import ses.fft;
 export import ses.field;
 
 
-// Expectation values over a Field1D. All observables are scale-invariant
-// (they divide by the discrete norm), so they are valid on unnormalized
-// fields as well.
+// Scale-invariant (norm cancels) -> valid on unnormalized fields.
 
 
 export namespace ses {
 
-// Degenerate-input guards. An empty or fully-absorbed field has zero total
-// weight, so num/den is 0/0 -> NaN, which would poison the title readout and
-// the Larmor path. Return 0 instead. And a near-single-cell state can dip
-// <x^2> - <x>^2 slightly negative from FP cancellation -> clamp before sqrt.
-// Both are no-ops (bitwise) whenever den > 0 and the variance is positive.
+// Guards: den==0 -> 0 (avoid 0/0 NaN in readouts); clamp negative variance
+// (FP cancellation) before sqrt.
 inline double obs_ratio(double num, double den) noexcept {
     return den > 0.0 ? num / den : 0.0;
 }
@@ -31,7 +26,6 @@ inline double obs_sigma(double second_moment, double mean) noexcept {
     return std::sqrt(std::max(0.0, second_moment - mean * mean));
 }
 
-// <x> = sum x_i |psi_i|^2 / sum |psi_i|^2   (grid weight h cancels)
 inline double mean_position(const Field1D& f) noexcept {
     double num = 0.0;
     double den = 0.0;
@@ -43,7 +37,6 @@ inline double mean_position(const Field1D& f) noexcept {
     return obs_ratio(num, den);
 }
 
-// sigma_x = sqrt(<x^2> - <x>^2)
 inline double sigma_x(const Field1D& f) noexcept {
     double num = 0.0;
     double den = 0.0;
@@ -56,7 +49,6 @@ inline double sigma_x(const Field1D& f) noexcept {
     return obs_sigma(obs_ratio(num, den), mean_position(f));
 }
 
-// <p> = sum k_j |phi_j|^2 / sum |phi_j|^2 with phi = fft(psi)  (weights cancel)
 inline double mean_momentum(const Field1D& f) {
     std::vector<std::complex<double>> phi = f.data();
     fft(phi);
@@ -71,9 +63,7 @@ inline double mean_momentum(const Field1D& f) {
     return obs_ratio(num, den);
 }
 
-// <H> = <T> + <V>: kinetic average in k-space (T = k^2/2), potential average
-// in real space. Both averages are scale-invariant, so the Parseval factor
-// between the two representations cancels within each term.
+// Each term normalized separately -> Parseval factor cancels within the term.
 inline double mean_energy(const Field1D& f, const std::vector<double>& potential) {
     double num_v = 0.0;
     double den_x = 0.0;
@@ -97,12 +87,8 @@ inline double mean_energy(const Field1D& f, const std::vector<double>& potential
     return obs_ratio(num_v, den_x) + obs_ratio(num_t, den_k);
 }
 
-// Var(H) = ||(H - <H>) psi||^2 / ||psi||^2, scale-invariant. H psi is
-// built spectrally (T = k^2/2 in k-space) + V in real space. The honest
-// eigenstate discriminator: zero (to round-off) iff psi is an H eigenstate
-// -- no measurement, no basis bookkeeping (drives the 1D scene's
-// eigenstate-vs-superposition HUD); the residual form keeps the round-off
-// floor E-independent (LOCK: observables_test HighEnergyEigenstate).
+// Var(H) = ||(H-<H>)psi||^2/||psi||^2 residual form
+// (LOCK: observables_test HighEnergyEigenstate).
 inline double energy_variance(const Field1D& f, const std::vector<double>& potential) {
     std::vector<std::complex<double>> hpsi = f.data();
     fft(hpsi);
@@ -120,10 +106,8 @@ inline double energy_variance(const Field1D& f, const std::vector<double>& poten
         num_h += (std::conj(f[i]) * hpsi[s]).real();
     }
     const double mean = obs_ratio(num_h, den);
-    // Robust residual form ||(H - <H>) psi||^2 / ||psi||^2: the naive
-    // <H^2> - <H>^2 difference carries an E^2-scaled cancellation floor
-    // (platform/compiler dependent) that can defeat the ABSOLUTE 1e-8
-    // eigenstate gates at high rungs; the residual has no cancellation.
+    // Residual, not naive <H^2>-<H>^2: the latter's E^2-scaled cancellation
+    // floor defeats the absolute 1e-8 eigenstate gate at high rungs.
     double num_var = 0.0;
     for (int i = 0; i < f.size(); ++i) {
         const std::size_t s = static_cast<std::size_t>(i);
@@ -132,12 +116,8 @@ inline double energy_variance(const Field1D& f, const std::vector<double>& poten
     return obs_ratio(num_var, den);
 }
 
-// Absolute probability content of the half-open interval [a, b):
-//     P = sum_{a <= x_i < b} |psi_i|^2 h
-// Deliberately NOT scale-invariant (unlike the observables above): the
-// tunneling readout T = P(right of barrier) is measured against the initial
-// unit norm, so flux removed by the absorbing mask must reduce -- never
-// inflate -- the report. Whole-box total equals norm_sq.
+// Deliberately NOT scale-invariant (unlike the others): tunneling readout is
+// measured against the initial unit norm, so absorbed flux must reduce it.
 inline double probability_in_range(const Field1D& f, double a, double b) noexcept {
     double acc = 0.0;
     for (int i = 0; i < f.size(); ++i) {
@@ -149,7 +129,7 @@ inline double probability_in_range(const Field1D& f, double a, double b) noexcep
     return acc * f.grid().spacing();
 }
 
-// ---- 3D observables (per-axis, scale-invariant) ----
+// ---- 3D observables ----
 
 inline Vec3d mean_position(const Field3D& f) noexcept {
     const Grid3D& g = f.grid();
@@ -218,8 +198,7 @@ inline Vec3d mean_momentum(const Field3D& f) {
                  obs_ratio(num.z, den)};
 }
 
-// mass: kinetic term <k^2>/(2 mass); default 1.0 is the legacy readout
-// (division by 1.0 is exact, so existing oracles are untouched).
+// mass default 1.0: exact division by 1.0 is a no-op -> oracles untouched.
 inline double mean_energy(const Field3D& f, const std::vector<double>& potential,
                           double mass = 1.0) {
     double num_v = 0.0;

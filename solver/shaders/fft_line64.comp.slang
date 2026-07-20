@@ -1,11 +1,7 @@
-// Shared-memory radix-2 line FFT at N=64 (NHALF=32, LOG2N=6): bit-reversed
-// load, log2(N) barrier-separated butterfly stages, forward transform (no
-// normalization). The SPIR-V is baked offline at a fixed size, so N is a
-// concrete constant here (fft_line8/fft_line256 are the sibling sizes).
-// One workgroup of NHALF threads handles one line; the std140 UBO's
-// mod_a/mul_b/mul_c/stride/n_lines enumerate the lines (axis selection).
-// A standalone 1-D FFT check drives it with n_lines=1, stride=1, base=0
-// (one contiguous line).
+// Radix-2 forward line FFT, unnormalized. One 32-thread group per 64-point line
+// (LOG2N=6 sets the bit_reverse shift); base index (params) selects the axis.
+// SPIR-V baked offline at fixed size, so N is a concrete constant (siblings:
+// fft_line8/fft_line256).
 import complex;
 
 [[vk::binding(0, 0)]] RWStructuredBuffer<Complex, Std430DataLayout> data;

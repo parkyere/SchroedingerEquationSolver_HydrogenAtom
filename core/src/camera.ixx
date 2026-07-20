@@ -4,18 +4,15 @@ export module ses.camera;
 import ses.vec;
 
 
-// Hand-rolled renderer math (purist reinvention boundary: no GLM).
-// Conventions (pinned by tests/camera_test.cpp):
-//  - Mat4 is COLUMN-MAJOR: element(row r, col c) = m[c*4 + r].
-//  - Right-handed view space, camera looks down -Z.
-//  - NDC depth [-1, +1] (standard OpenGL clip conventions). The Vulkan
-//    renderer applies its own y-flip/depth-remap clip correction.
+// Column-major Mat4: element(row r, col c) = m[c*4 + r]. Right-handed view,
+// camera looks down -Z. NDC depth [-1,+1] (OpenGL); the Vulkan renderer
+// applies its own y-flip/depth-remap. Contract: tests/camera_test.cpp.
 
 
 export namespace ses {
 
 struct Mat4 {
-    double m[16]{};  // column-major
+    double m[16]{};
 
     static constexpr Mat4 identity() noexcept {
         Mat4 r;
@@ -52,7 +49,6 @@ inline constexpr Mat4 operator*(const Mat4& a, const Mat4& b) noexcept {
     return r;
 }
 
-// Apply to a point (w = 1) with perspective divide.
 inline constexpr Vec3d transform_point(const Mat4& a, Vec3d p) noexcept {
     const double x = a.m[0] * p.x + a.m[4] * p.y + a.m[8] * p.z + a.m[12];
     const double y = a.m[1] * p.x + a.m[5] * p.y + a.m[9] * p.z + a.m[13];
@@ -61,11 +57,11 @@ inline constexpr Vec3d transform_point(const Mat4& a, Vec3d p) noexcept {
     return {x / w, y / w, z / w};
 }
 
-// gluLookAt: right-handed view matrix, forward = -Z.
+// gluLookAt.
 inline Mat4 look_at(Vec3d eye, Vec3d center, Vec3d up) noexcept {
-    const Vec3d f = normalized(center - eye);   // forward
-    const Vec3d s = normalized(cross(f, up));   // right
-    const Vec3d u = cross(s, f);                // true up
+    const Vec3d f = normalized(center - eye);
+    const Vec3d s = normalized(cross(f, up));
+    const Vec3d u = cross(s, f);
 
     Mat4 r = Mat4::identity();
     r.m[0] = s.x;
@@ -83,7 +79,7 @@ inline Mat4 look_at(Vec3d eye, Vec3d center, Vec3d up) noexcept {
     return r;
 }
 
-// gluPerspective: fovy in radians, NDC depth [-1, +1].
+// gluPerspective; fovy radians.
 inline Mat4 perspective(double fovy, double aspect, double znear, double zfar) noexcept {
     const double f = 1.0 / std::tan(fovy / 2.0);
     Mat4 r;
@@ -95,19 +91,15 @@ inline Mat4 perspective(double fovy, double aspect, double znear, double zfar) n
     return r;
 }
 
-// Orbit-camera eye position on a sphere around the target.
-// azimuth 0, elevation 0 -> on the target's +Z axis; azimuth swings toward
-// +X; elevation rises toward +Y.
+// azimuth=elevation=0 -> +Z axis; +azimuth -> +X, +elevation -> +Y.
 inline Vec3d orbit_eye(double azimuth, double elevation, double distance, Vec3d target) noexcept {
     const double ce = std::cos(elevation);
     return target + distance * Vec3d{ce * std::sin(azimuth), std::sin(elevation),
                                      ce * std::cos(azimuth)};
 }
 
-// Inverse of the orbit camera through the z = 0 stage plane (the 2D
-// scenes' floor): NDC point -> world (x, y). False when the ray misses
-// (parallel or behind the eye). CONTRACT: tests/pick_test.cpp round-trips
-// through perspective * look_at.
+// Unproject an NDC point onto the z=0 stage plane. Contract:
+// tests/pick_test.cpp round-trips perspective * look_at.
 inline bool unproject_to_z0(double azimuth, double elevation,
                             double distance, double fovy, double aspect,
                             double ndc_x, double ndc_y, double* out_x,
@@ -122,11 +114,11 @@ inline bool unproject_to_z0(double azimuth, double elevation,
     const Vec3d dir{f.x + s.x * cx + u.x * cy, f.y + s.y * cx + u.y * cy,
                     f.z + s.z * cx + u.z * cy};
     if (std::abs(dir.z) < 1e-12) {
-        return false;  // ray runs inside the plane
+        return false;  // ray parallel to plane
     }
     const double t = -eye.z / dir.z;
     if (t <= 0.0) {
-        return false;  // plane behind the eye
+        return false;  // behind the eye
     }
     *out_x = eye.x + t * dir.x;
     *out_y = eye.y + t * dir.y;

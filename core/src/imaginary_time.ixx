@@ -13,10 +13,7 @@ export import ses.field;
 import ses.parallel;
 
 
-// Imaginary-time relaxation to the ground state: e^{-H dtau} decays each
-// eigencomponent as e^{-E_n tau}. Same Strang splitting as the real-time
-// propagator but with REAL decay weights e^{-V dtau/2}, e^{-k^2 dtau/2};
-// the flow is not unitary -- per-step renormalization is mandatory.
+// Imaginary-time relaxation e^{-H dtau}; Strang split, non-unitary -> renormalize each step.
 
 
 export namespace ses {
@@ -60,15 +57,13 @@ private:
         }
     }
 
-    std::vector<double> half_v_;   // e^{-V dtau/2} per grid point
-    std::vector<double> kinetic_;  // e^{-k^2 dtau/2} per FFT bin
+    std::vector<double> half_v_;
+    std::vector<double> kinetic_;
 };
 
-// 3D imaginary-time relaxation: identical structure over the 3D k-grid.
 class ImaginaryTimePropagator3D {
 public:
-    // mass: kinetic weight exp(-k^2/(2 mass) dtau); default 1.0 is bitwise
-    // the legacy tables (pinned by MassParameter tests).
+    // mass default 1.0: bitwise-identical to legacy tables (MassParameter tests).
     ImaginaryTimePropagator3D(const Grid3D& g, const std::vector<double>& potential,
                               double dtau, double mass = 1.0) {
         assert(static_cast<int>(potential.size()) == g.size());
@@ -96,8 +91,7 @@ public:
         }
     }
 
-    // Read access to the weight tables so the GPU relax path consumes the
-    // TESTED tables instead of re-deriving them.
+    // GPU relax path consumes these TESTED tables instead of re-deriving.
     const std::vector<double>& half_potential_weight() const noexcept { return half_v_; }
     const std::vector<double>& kinetic_weight() const noexcept { return kinetic_; }
 

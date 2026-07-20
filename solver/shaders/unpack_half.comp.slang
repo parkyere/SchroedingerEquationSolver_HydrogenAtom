@@ -1,7 +1,5 @@
-// Unpack fp16 storage (src uint per cell, binding 6) back to a complex fp32
-// field (dst, binding 0) via unpackHalf2x16 -- the inverse of pack_half. The
-// GLSL builtin maps to GLSL.std.450 UnpackHalf2x16 (no shaderFloat16 needed).
-// std140 UBO n (1).
+// Unpack fp16-packed uint (src) -> complex fp32 field float2 (dst); inverse of
+// pack_half. unpackHalf2x16 needs no shaderFloat16 capability.
 import glsl;
 
 [[vk::binding(6, 0)]] StructuredBuffer<uint, Std430DataLayout> src;

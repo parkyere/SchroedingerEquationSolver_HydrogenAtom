@@ -1,7 +1,5 @@
-// One dipole half-kick psi <- exp(-i theta axis.r) psi, per grid cell.
-// The grid geometry (box_min/cell_h/axis) is passed as vec4 in the std140
-// UBO -- padding to 16 bytes sidesteps std140's vec3 alignment subtleties;
-// only .xyz is used.
+// Dipole half-kick: psi <- exp(-i theta axis.r) psi.
+// float4 not float3: std140 16-byte alignment.
 import complex;
 import grid;
 
@@ -12,9 +10,9 @@ struct Params {
     int nx;
     int ny;
     float theta;
-    float4 box_min;  // .xyz
-    float4 cell_h;   // .xyz
-    float4 axis;     // .xyz
+    float4 box_min;
+    float4 cell_h;
+    float4 axis;
 };
 [[vk::binding(1, 0)]] ConstantBuffer<Params, Std140DataLayout> params;
 

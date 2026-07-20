@@ -26,27 +26,22 @@ export import ses.colormap;
 import ses.emission;
 
 
-// Shared machinery for potential-swap scenarios (harmonic trap, tunneling):
-// the CPU truth session, the ses_vk engine, and the generic frame/tick/
-// relax/measure flow with virtual hooks for the scenario-specific parts.
-// HydrogenDirector derives from this for the shared members/controls but
-// overrides the whole frame flow with its bespoke one.
-// volk.h textually first: VK_* macros never cross module boundaries, and the
-// early textual claim inoculates against GMF/textual redefinitions.
+// Shared machinery for potential-swap scenarios (trap, tunneling).
+// HydrogenDirector reuses the members but overrides the whole frame flow.
+// volk.h textually first: VK_* macros never cross module boundaries.
 
 
 export namespace ses_shell {
 
 enum class BaseViewMode { Cloud, Surface };
-// RelaxingExcited is used only by HydrogenDirector (deflated relax); base's
-// own stepping code produces only RealTime/Relaxing.
+// RelaxingExcited: only HydrogenDirector (deflated relax) sets it.
 enum class BaseStepping { RealTime, Relaxing, RelaxingExcited };
 
 constexpr int kBaseStepsPerTick = 1;
 constexpr int kBaseRelaxStepsPerTick = 1;
 constexpr double kBaseRelaxDtau = 0.05;
 constexpr double kBaseIsoFraction = 0.25;
-constexpr double kBaseMeasureSigma = 1.25;  // Bohr; see hydrogen's back-action note
+constexpr double kBaseMeasureSigma = 1.25;  // Bohr
 constexpr double kBaseHaToEv = 27.211386;
 constexpr double kBaseAuToFs = 2.4188843e-2;
 
@@ -59,9 +54,7 @@ public:
 
     const ses::Grid3D& grid() const override { return sim_.grid(); }
 
-    // Engine init + gradient (+ absorber when the scenario wants one).
-    // Engine/gradient failure demotes to CPU stepping; absorber failure
-    // only drops the mask. Relax tables are transient (relax entry).
+    // Engine/gradient failure demotes to CPU; absorber failure only drops the mask.
     void init_compute(ses_vk::DeviceContext& ctx, bool device_ok,
                       std::int64_t /*free_vram_bytes*/) override {
         compute_attempted_ = true;
@@ -73,8 +66,7 @@ public:
         if (!gpu_ok_) {
             return;
         }
-        // Relax tables are TRANSIENT (uploaded on relax entry, freed on
-        // completion); only the gradient upload stays fallible-fatal.
+        // Relax tables are transient (uploaded on relax entry); only gradient is fatal here.
         if (!engine_.set_potential_gradient(sim_.potential())) {
             std::fprintf(stderr, "engine: gradient setup failed -- "
                                  "falling back to CPU stepping\n");
@@ -93,8 +85,6 @@ public:
         gpu_ok_ = false;
     }
 
-    // GPU stepping covers BOTH views; only the display half is mode-aware
-    // (Cloud bridges psi -> volume, Surface extracts the GPU isosurface).
     bool use_gpu_path() const { return gpu_ok_; }
 
     void run_frame() override {
@@ -119,12 +109,11 @@ public:
         service_requests();
         if (pending_gpu_steps_ > 0) {
             if (stepping_ == BaseStepping::RealTime) {
-                // Mask + bridge ride the step submission (batch tail).
                 run_real_time_batch();
                 if (mode_ == BaseViewMode::Cloud) {
                     volume_written_ = true;
                 } else {
-                    mc_dirty_ = true;  // psi advanced: re-extract below
+                    mc_dirty_ = true;
                 }
             } else {
                 run_relax_batch();
@@ -137,8 +126,7 @@ public:
                 title_dirty_ = true;
             }
         }
-        // Surface display: re-extract after any psi change (kBaseIsoFraction
-        // of the tracked peak mirrors marching_cubes_at_fraction).
+        // kBaseIsoFraction * peak mirrors marching_cubes_at_fraction (CPU/GPU iso parity).
         if (mode_ == BaseViewMode::Surface && engine_.mc_ready() &&
             mc_dirty_) {
             engine_.mc_extract(kBaseIsoFraction * peak_);
@@ -149,9 +137,7 @@ public:
 
     void tick() override {
         if (use_gpu_path()) {
-            // ONE tick's supply per rendered frame (1 step : 1 render at
-            // default; time_scale_ scales the batch as dialed) -- a slow
-            // frame never bundles catch-up ticks, they drop cleanly.
+            // Clamp drops catch-up ticks: at most one tick's steps per rendered frame.
             const int per_tick = steps_per_tick() * time_scale_;
             pending_gpu_steps_ =
                 std::min(pending_gpu_steps_ + per_tick, per_tick);
@@ -161,7 +147,7 @@ public:
             return;
         }
         ensure_cpu_current();
-        // CPU fallback: not time-scaled (synchronous steps would stall the UI).
+        // CPU fallback: not time-scaled (sync steps would stall the UI).
         if (stepping_ == BaseStepping::RealTime) {
             sim_.advance(kBaseStepsPerTick);
         } else {
@@ -174,13 +160,12 @@ public:
         }
     }
 
-    // Visualized time scale (see ses.scenario): steps per tick, not dt.
+    // steps per tick, not dt.
     void set_time_scale(int scale) override {
         time_scale_ = std::clamp(scale, 1, 16);
     }
     int time_scale() const override { return time_scale_; }
 
-    // Simulated clock for the shell's au/s readout.
     double sim_time() const override { return sim_.time() + gpu_time_; }
     double sim_dt() const override { return sim_.dt(); }
 
@@ -214,14 +199,14 @@ public:
                                                : BaseViewMode::Cloud;
         if (mode_ == BaseViewMode::Surface) {
             if (gpu_ok_ && engine_.mc_prepare(kMcMaxTris)) {
-                mc_dirty_ = true;  // GPU meshing: stepping stays live
+                mc_dirty_ = true;
             } else {
-                ensure_cpu_current();  // CPU meshing (no-GPU fallback)
+                ensure_cpu_current();
             }
         } else {
             engine_.release_mc();
             if (gpu_ok_ && !cpu_is_truth_) {
-                write_display_texture();  // refresh the volume for Cloud
+                write_display_texture();
             }
         }
         stage_active_view();
@@ -363,20 +348,16 @@ protected:
                 absorber_width() == 0.0) {
                 engine_.scale(static_cast<float>(1.0 / std::sqrt(np.sum)));
             }
-            // Semiclassical Larmor readout, valid for ANY potential; ~0 for a stationary state.
             radiated_power_ = ses::larmor_power(engine_.mean_force());
         }
-        // ASYNC: overlaps this frame's render (previous display volume);
-        // next frame's run_frame waits and flips. after_step_batch hooks
-        // that read psi submit on the same queue and serialize behind it.
+        // ASYNC: overlaps this frame's render; next run_frame waits and flips.
+        // after_step_batch hooks reading psi serialize on the same queue.
         engine_.step_async(pending_gpu_steps_, absorber_on_, true);
         gpu_time_ += pending_gpu_steps_ * sim_.dt();
         after_step_batch();
     }
 
-    // Virtual so scenes with richer relaxation flows (the molecules'
-    // deflated excited chain) can substitute their own batch while reusing
-    // the rest of the frame plumbing.
+    // Virtual: molecule scenes substitute a deflated-excited batch, reusing the rest.
     virtual void run_relax_batch() {
         const ses_vk::Engine::RelaxStats stats =
             engine_.relax_step(pending_gpu_steps_);
@@ -385,7 +366,7 @@ protected:
             peak_ = stats.peak;
         }
         norm_display_ = 1.0;  // pinned by per-step renormalization
-        // Auto-complete on the ITP energy plateau, as in hydrogen.
+        // Auto-complete on the ITP energy plateau.
         if (gpu_title_due_) {
             if (std::abs(stats.energy - relax_prev_energy_) < 5e-5) {
                 ++relax_plateau_;
@@ -413,9 +394,8 @@ protected:
                                         sim_.grid().cell_volume());
     }
 
-    // ITP step used for the relax tables. Deep wells override: V*dtau must
-    // stay moderate or the ITP fixed point is a Trotter artifact, not the
-    // grid-H eigenstate (the molecule scenes' fine-polish phase).
+    // Deep wells override: V*dtau must stay moderate or the ITP fixed point is a
+    // Trotter artifact, not the grid-H eigenstate.
     virtual double relax_dtau() const { return kBaseRelaxDtau; }
 
     void ensure_cpu_current() {
@@ -424,7 +404,7 @@ protected:
             return;
         }
         if (!engine_.readback(readback_buf_)) {
-            return;  // GPU readback failed: keep the current CPU state (no OOB)
+            return;  // readback failed: keep the CPU state
         }
         ses::Field3D f{sim_.grid()};
         for (std::size_t i = 0; i < f.data().size(); ++i) {
@@ -444,7 +424,7 @@ protected:
             volume_dirty_ = true;
         } else {
             if (gpu_ok_) {
-                mc_dirty_ = true;  // run_frame re-extracts from the GPU psi
+                mc_dirty_ = true;
                 return;
             }
             remesh();
@@ -470,8 +450,6 @@ protected:
         peak_ = peak;
     }
 
-    // Bridge psi to the active display: Cloud -> the volume texture,
-    // Surface -> mark the GPU isosurface for re-extraction (run_frame).
     void write_display_texture() {
         if (mode_ == BaseViewMode::Surface && engine_.mc_ready()) {
             mc_dirty_ = true;
@@ -487,20 +465,20 @@ protected:
     BaseStepping stepping_ = BaseStepping::RealTime;
     bool compute_attempted_ = false;
     bool gpu_ok_ = false;
-    bool cpu_is_truth_ = true;  // the same single sync invariant as hydrogen
+    bool cpu_is_truth_ = true;
     int pending_gpu_steps_ = 0;
-    int time_scale_ = 1;  // steps-per-tick multiplier (dt untouched)
+    int time_scale_ = 1;
     bool gpu_title_due_ = false;
     bool title_dirty_ = false;
     double gpu_time_ = 0.0;
     double norm_display_ = 1.0;
     double relax_energy_display_ = 0.0;
-    double radiated_power_ = 0.0;  // semiclassical Larmor power (au)
+    double radiated_power_ = 0.0;  // au
     double relax_prev_energy_ = 0.0;
     int relax_plateau_ = 0;
     std::vector<float> readback_buf_;
 
-    bool mc_dirty_ = false;  // Surface: psi changed, re-extract the mesh
+    bool mc_dirty_ = false;  // Surface: re-extract mesh
     ses::Mesh mesh_;
     std::vector<ses::Rgb> colors_;
     std::vector<float> psi_staging_;

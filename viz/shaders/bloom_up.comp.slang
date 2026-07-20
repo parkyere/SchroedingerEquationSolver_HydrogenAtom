@@ -1,5 +1,4 @@
-// Dual-filter upsample: a 3x3 tent over the smaller mip, ADDED into the
-// larger mip (progressive upsampling accumulates every scale's glow).
+// Dual-filter 3x3 tent upsample, additively accumulated into dst (progressive per-mip bloom).
 [[vk::binding(0, 0)]] Sampler2D<float4> src;  // smaller mip (combined sampler)
 [[vk::binding(1, 0)]] [[vk::image_format("rgba16f")]] RWTexture2D<float4> dst;
 

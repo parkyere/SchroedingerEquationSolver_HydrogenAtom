@@ -12,22 +12,16 @@ import ses.ladder;
 import ses.observables;
 
 
-// 1D grid MCWF unraveling of CAVITY PHOTON LOSS (rate kappa, jump op a):
-// p_jump = kappa <n> dt with <n> = <H>/omega - 1/2; a JUMP applies the
-// lowering operator (renormalized) -- on a cat |a> + |-a> this flips the
-// PARITY to |a> - |-a| (a is diagonal on each branch with opposite
-// eigenvalue signs): the interference fringes invert per lost photon.
-// NO-JUMP applies the conditional damping e^{-kappa n_hat dt/2}/norm,
-// realized EXACTLY (harmonic V) as ONE renormalized imaginary-time step
-// at dtau = kappa dt / (2 omega): e^{-H tau} = const x e^{-n_hat omega tau}.
+// 1D MCWF unraveling of cavity photon loss (rate kappa, jump op a).
+// No-jump exactness (harmonic V): e^{-H tau} = const x e^{-n omega tau},
+// so relax at dtau = kappa dt/(2 omega) reproduces e^{-kappa n dt/2}.
 // CONTRACT: tests/mcwf1d_test.cpp.
 
 
 export namespace ses {
 
-// One unraveling step; u in [0, 1) is the caller's uniform draw; `damp`
-// must be built at dtau = kappa dt / (2 omega) on the SAME grid/potential.
-// Returns true when the jump fired.
+// u = caller's uniform draw in [0, 1). `damp` must be built at
+// dtau = kappa dt / (2 omega) on the SAME grid/potential.
 inline bool photon_loss_step(Field1D& psi, double omega,
                              const std::vector<double>& v, double kappa,
                              double dt, double u,
@@ -35,10 +29,10 @@ inline bool photon_loss_step(Field1D& psi, double omega,
     const double n_bar =
         std::max(0.0, mean_energy(psi, v) / omega - 0.5);
     if (u < kappa * n_bar * dt) {
-        ladder_lower(psi, omega);  // a psi / ||.||: the photon left
+        ladder_lower(psi, omega);  // a psi / ||.||
         return true;
     }
-    damp.relax(psi, 1);  // conditional e^{-kappa n dt/2} / norm
+    damp.relax(psi, 1);  // no-jump e^{-kappa n dt/2}/norm, EXACT (harmonic V)
     return false;
 }
 

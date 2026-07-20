@@ -1,15 +1,9 @@
-# sesolver_core: the pure numerical/physics core.
-# HARD RULE: this target must NEVER depend on Qt, OpenGL/Vulkan, or any
-# windowing / rendering library. Everything here is reachable by unit tests
-# with analytic oracles (TDD loop: docs/TDD_RULES.md).
-# Sources are the CXX_MODULES file set below -- each module interface unit
-# compiles to a real object, so the archive needs no placeholder TU.
+# HARD RULE: no Qt/OpenGL/Vulkan/windowing/rendering deps -- keeps the core
+# unit-testable with analytic oracles (docs/TDD_RULES.md).
+# STATIC: no placeholder TU needed; each module interface unit is a real object.
 add_library(sesolver_core STATIC)
 
-# C++20 modules the core provides (consumers `import` these) -- the whole
-# core is modules now; the old core/include header tree is gone. PUBLIC so
-# the app/test targets that link the core can import across the target
-# boundary.
+# PUBLIC: app/test targets must `import` these modules across the target boundary.
 target_sources(sesolver_core
     PUBLIC FILE_SET CXX_MODULES FILES
         src/marching_cubes_tables.ixx
@@ -59,15 +53,13 @@ target_compile_features(sesolver_core PUBLIC cxx_std_20)
 target_link_libraries(sesolver_core PRIVATE ses_warnings)
 target_link_libraries(sesolver_core PUBLIC ses_arch)
 
-# CPU hot loops thread through ses.parallel (core/src/parallel.ixx), the
-# project's own std::jthread pool: OpenMP is gone because MSVC miscompiles
-# omp pragmas inside C++20 module interfaces (silent zero-output) and the
-# pool's fixed-chunk reductions are bitwise-reproducible across machines.
+# ses.parallel (std::jthread pool) not OpenMP: MSVC miscompiles omp in C++20
+# module interfaces (silent zero-output), and fixed-chunk reductions are
+# bitwise-reproducible.
 find_package(Threads REQUIRED)
 target_link_libraries(sesolver_core PUBLIC Threads::Threads)
 
-# _CRT_SECURE_NO_WARNINGS keeps MSVC quiet about std::getenv (the
-# SES_PARALLEL_WORKERS debug override in parallel.ixx); same idiom as the app.
+# _CRT_SECURE_NO_WARNINGS: MSVC std::getenv (SES_PARALLEL_WORKERS override).
 if(MSVC)
     target_compile_definitions(sesolver_core PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()

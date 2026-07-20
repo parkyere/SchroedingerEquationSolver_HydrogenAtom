@@ -15,36 +15,22 @@ export module ses.vk.compute;
 export import ses.vk.device;
 
 
-// ses_vk compute infrastructure: the thin, owned layer between raw Vulkan
-// and the kernels -- descriptor/pipeline-layout construction, one-shot frame
-// lifecycle, barrier placement.
+// ses_vk compute layer: kernel/descriptor/one-shot construction + barriers.
 //
-//   Kernel          shader module + set layout + pipeline layout + pipeline,
-//                   built from an embedded SPIR-V blob and a binding spec.
-//   DescriptorArena a per-run descriptor pool; allocates sets against a
-//                   Kernel's layout and points bindings at buffers.
-//   OneShot         command pool + primary command buffer + fence: record,
-//                   submit, fence-wait.
-//   barrier_*       the explicit hazard edges between recorded commands;
-//                   every one is spelled out and the validation layer
-//                   polices them.
-// ses.vk.device's GMF set, textually pre-claimed: volk.h both supplies the
-// VK_* macros (macros never cross module boundaries) and inoculates the TU
-// against GMF/textual std redefinitions. No VMA here: this module's purview
-// never names vma*; every vma-calling module (engine/render) carries its own
-// identically configured vk_mem_alloc.h in its own GMF.
+// volk.h in the GMF supplies the VK_* macros (macros don't cross module
+// boundaries) and inoculates the TU against GMF/textual std redefinitions.
+// No VMA: this module never names vma*; each vma-calling module carries its
+// own identically configured vk_mem_alloc.h in its own GMF.
 
 
 export namespace ses_vk {
 
-// One descriptor binding of a compute kernel: index + type. Order in the
-// kernel's spec list is irrelevant; indices match the shader's layout().
+// Binding index matches the shader's layout(); spec-list order is irrelevant.
 struct BindingDesc {
     std::uint32_t binding;
     VkDescriptorType type;
 };
 
-// Shader module + descriptor set layout + pipeline layout + compute pipeline.
 class Kernel {
 public:
     Kernel() = default;
@@ -102,9 +88,8 @@ public:
             std::fprintf(stderr, "vk: compute pipeline create failed\n");
             return false;
         }
-        // The module is consumed by pipeline creation and never referenced
-        // again: drop it now. destroy() still guards it for the
-        // partial-construction (early-return) path.
+        // Module consumed by pipeline creation; drop now (destroy() still
+        // guards it for the early-return path).
         vkDestroyShaderModule(ctx.device, module_, nullptr);
         module_ = VK_NULL_HANDLE;
         return true;
@@ -134,8 +119,7 @@ public:
                                 1, &set, 0, nullptr);
     }
 
-    // For kernels whose UBO binding is UNIFORM_BUFFER_DYNAMIC: bind with one
-    // dynamic offset (a slot in a multi-slot parameter buffer).
+    // UNIFORM_BUFFER_DYNAMIC binding: dynamic offset = a slot in a multi-slot UBO.
     void bind(VkCommandBuffer cb, VkDescriptorSet set,
               std::uint32_t dynamic_offset) const {
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_);
@@ -150,9 +134,7 @@ private:
     VkPipeline pipe_ = VK_NULL_HANDLE;
 };
 
-// A GROWABLE descriptor arena: allocation from the newest pool, and when it
-// runs dry another pool of the same shape is chained. Sets are freed
-// wholesale with the pools.
+// Growable descriptor arena: chains a same-shape pool when the current runs dry.
 class DescriptorArena {
 public:
     DescriptorArena() = default;
@@ -287,25 +269,22 @@ private:
     std::uint32_t samplers_ = 0;
 };
 
-// One-shot record/submit/wait over the context's PERSISTENT pool/cb/fence
-// (created lazily, reset per use, destroyed with the context). Legal because
-// every OneShot fence-waits before the next begin resets the pool -- the
-// same single-threaded, one-in-flight invariant the descriptor re-point
-// paths already rely on. NEVER begin one OneShot while another records.
+// Record/submit/wait over the context's persistent pool/cb/fence (lazy, reset
+// per use). One-in-flight invariant: each OneShot fence-waits before the next
+// begin resets the pool. WARNING: never begin one OneShot while another records.
 class OneShot {
 public:
     OneShot() = default;
     OneShot(const OneShot&) = delete;
     OneShot& operator=(const OneShot&) = delete;
 
-    // Renderer/presenter side: the main (graphics) queue's scratch set.
+    // Main (graphics) queue's scratch set.
     bool begin(DeviceContext& ctx) {
         return begin_on(ctx, ctx.oneshot_pool, ctx.oneshot_cb,
                         ctx.oneshot_fence, ctx.queue_family, ctx.queue);
     }
 
-    // Engine side: the compute queue's scratch set (a compute-only family
-    // when the hardware has one; falls back to the main queue).
+    // Compute queue's scratch set (compute-only family if present, else main).
     bool begin_compute(DeviceContext& ctx) {
         return begin_on(ctx, ctx.compute_oneshot_pool, ctx.compute_oneshot_cb,
                         ctx.compute_oneshot_fence, ctx.compute_family,
@@ -314,13 +293,12 @@ public:
 
     VkCommandBuffer cb() const { return cb_; }
 
-    // The default source_location captures the CALLING engine method, so a
-    // failure names exactly which op (and file:line) hung -- no per-call labels.
+    // Default source_location captures the caller, so a failure names which op hung.
     bool submit_and_wait(
         DeviceContext& ctx,
         std::source_location loc = std::source_location::current()) {
         if (ctx.device_lost) {
-            return false;  // device already lost: don't submit to it again
+            return false;
         }
         vkEndCommandBuffer(cb_);
         vkResetFences(ctx.device, 1, &fence_);
@@ -400,11 +378,8 @@ private:
     VkQueue queue_ = VK_NULL_HANDLE;
 };
 
-// The hazard edges. Global memory barriers (not per-buffer) via
-// synchronization2 (core Vulkan 1.3, enabled in create_device): one
-// VkMemoryBarrier2 in a VkDependencyInfo, 64-bit stage/access masks in a
-// single struct. Callers passing 1.x stage/access bit constants still compile
-// -- those bits are value-equal to their _2 aliases for the masks used here.
+// Global memory barrier (not per-buffer), synchronization2 (Vulkan 1.3).
+// Callers may pass 1.x stage/access bits: value-equal to their _2 aliases here.
 inline void memory_barrier(VkCommandBuffer cb, VkPipelineStageFlags2 src_stage,
                            VkAccessFlags2 src_access,
                            VkPipelineStageFlags2 dst_stage,
@@ -429,8 +404,7 @@ inline void barrier_transfer_to_compute(VkCommandBuffer cb) {
                    VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT);
 }
 
-// Read-after-write between dispatches sharing a buffer -- required between
-// every aliasing dispatch of the step body.
+// RAW between dispatches sharing a buffer; required between aliasing step dispatches.
 inline void barrier_compute_to_compute(VkCommandBuffer cb) {
     memory_barrier(cb, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                    VK_ACCESS_2_SHADER_WRITE_BIT,

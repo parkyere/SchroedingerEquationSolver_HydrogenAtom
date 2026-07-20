@@ -11,14 +11,9 @@ export import ses.spinlattice;
 import ses.parallel;
 
 
-// EXACT 4x4 Heisenberg lattice: the FULL 2^16 = 65536-amplitude
-// wavefunction (basis bit i = 1 means site i spin-DOWN), evolved by a
-// Strang split of H = (1/2) sum_i B.sigma_i - J sum_bonds sigma_i.sigma_j:
-// half single-site field rotations, then the 24 open-boundary bond gates
-// exp(+i J dt sigma.sigma) EXACTLY via sigma.sigma = 2 SWAP - 1, then the
-// other half. Entanglement is REAL here: the per-site Bloch arrows
-// SHRINK (|<sigma_i>| < 1) as the reduced states mix -- the visible
-// difference against the mean-field product ansatz.
+// EXACT 4x4 Heisenberg: full 2^16 amplitude wavefunction; basis bit i set
+// = site i spin-DOWN. H = (1/2) sum_i B.sigma_i - J sum_bonds sigma_i.sigma_j,
+// Strang-split, bond gates via sigma.sigma = 2 SWAP - 1.
 // CONTRACT: tests/spinexact_test.cpp.
 
 
@@ -32,7 +27,6 @@ struct SpinState16 {
     std::vector<std::complex<double>> c;
 };
 
-// The 24 open-boundary bonds of the 4x4 lattice.
 inline int exact_bonds(int (*out)[2]) {
     int n = 0;
     for (int y = 0; y < kExactSide; ++y) {
@@ -53,8 +47,6 @@ inline int exact_bonds(int (*out)[2]) {
     return n;
 }
 
-// Tensor product of the lattice's per-site spinors (bit 0 of the index
-// is site 0; bit set = down).
 inline SpinState16 exact_from_product(const SpinLattice& l) {
     SpinState16 s;
     s.c.resize(kExactDim);
@@ -70,8 +62,7 @@ inline SpinState16 exact_from_product(const SpinLattice& l) {
     return s;
 }
 
-// Reduced per-site Bloch vector <sigma_i> (same up/down convention as
-// the single spinor's bloch_vector).
+// Reduced per-site Bloch vector <sigma_i>.
 inline void exact_site_bloch(const SpinState16& s, int site, double* x,
                              double* y, double* z) {
     const std::size_t b = std::size_t{1} << site;
@@ -89,9 +80,8 @@ inline void exact_site_bloch(const SpinState16& s, int site, double* x,
     *z = zz;
 }
 
-// The 2x2 single-site rotation matrix U = exp(-i angle/2 n.sigma), the
-// ONE source shared by the CPU evolution, the GPU kernel UBO, and the
-// vkcheck oracle.
+// 2x2 site rotation U = exp(-i angle/2 n.sigma). Shared source: CPU, GPU
+// kernel UBO, vkcheck oracle must match.
 struct SiteGate {
     std::complex<double> a00, a01, a10, a11;
 };
@@ -104,8 +94,8 @@ inline SiteGate site_gate_matrix(double nx, double ny, double nz,
                     -i * sn * (nx + i * ny), c + i * sn * nz};
 }
 
-// The bond-gate coefficients of exp(+i theta sigma_i.sigma_j): parallel
-// phase, and the antiparallel 2x2 (diag, off). Shared source.
+// Coefficients of exp(+i theta sigma_i.sigma_j): parallel phase, antiparallel
+// 2x2 (diag, off). Shared source.
 struct BondGate {
     std::complex<double> phase, diag, off;
 };
@@ -116,7 +106,6 @@ inline BondGate bond_gate_params(double theta) {
                     em * std::complex<double>{0.0, std::sin(2.0 * theta)}};
 }
 
-// Single-site basis rotation U_i = exp(-i angle/2 n.sigma).
 inline void exact_site_rotate(SpinState16& s, int site, double nx,
                               double ny, double nz, double angle) {
     const std::size_t b = std::size_t{1} << site;
@@ -138,9 +127,7 @@ inline void exact_site_rotate(SpinState16& s, int site, double nx,
     });
 }
 
-// One bond gate exp(+i theta sigma_i.sigma_j), exact via
-// sigma.sigma = 2 SWAP - 1: parallel pairs pick up e^{+i theta}; the
-// antiparallel block mixes with e^{-i theta}(cos 2theta + i sin 2theta P).
+// One bond gate exp(+i theta sigma_i.sigma_j) via sigma.sigma = 2 SWAP - 1.
 inline void exact_bond_gate(SpinState16& s, int si, int sj,
                             double theta) {
     const std::size_t bi = std::size_t{1} << si;
@@ -149,8 +136,7 @@ inline void exact_bond_gate(SpinState16& s, int si, int sj,
     const std::complex<double> ph_par = g.phase;
     const std::complex<double> diag = g.diag;
     const std::complex<double> off = g.off;
-    // Each m is touched by exactly one branch and the touched index
-    // pairs are disjoint: parallel over m.
+    // Each m touched by one branch, pairs disjoint -> parallel over m.
     parallel_for(static_cast<int>(kExactDim), [&](int mi) {
         const std::size_t m = static_cast<std::size_t>(mi);
         const bool i_dn = (m & bi) != 0;
@@ -165,8 +151,8 @@ inline void exact_bond_gate(SpinState16& s, int si, int sj,
         if (i_dn) {
             return;  // handle the antiparallel pair from (up_i, dn_j)
         }
-        const std::size_t m_ud = m;              // i up, j down
-        const std::size_t m_du = (m ^ bi) ^ bj;  // i down, j up
+        const std::size_t m_ud = m;
+        const std::size_t m_du = (m ^ bi) ^ bj;
         const std::complex<double> a = s.c[m_ud];
         const std::complex<double> bamp = s.c[m_du];
         s.c[m_ud] = diag * a + off * bamp;
@@ -174,9 +160,8 @@ inline void exact_bond_gate(SpinState16& s, int si, int sj,
     });
 }
 
-// One Strang step: half field, bonds forward at dt/2, bonds REVERSED at
-// dt/2 (the bonds share sites, so the palindrome keeps second order),
-// half field.
+// Strang step; bond sweep reversed on the return (shared sites -> palindrome
+// keeps 2nd order).
 inline void exact_step(SpinState16& s, double bx, double by, double bz,
                        double j, double dt) {
     const double bmag = std::sqrt(bx * bx + by * by + bz * bz);
@@ -202,8 +187,8 @@ inline void exact_step(SpinState16& s, double bx, double by, double bz,
     }
 }
 
-// <H> = sum_i (1/2) B.<sigma_i> - J sum_bonds <sigma_i.sigma_j>, the
-// bond expectation via <sigma.sigma> = 2 <SWAP> - 1.
+// <H> = (1/2) sum_i B.<sigma_i> - J sum_bonds <sigma_i.sigma_j>;
+// <sigma.sigma> = 2 <SWAP> - 1.
 inline double exact_energy(const SpinState16& s, double bx, double by,
                            double bz, double j) {
     double e = 0.0;
@@ -234,7 +219,7 @@ inline double exact_energy(const SpinState16& s, double bx, double by,
     return e;
 }
 
-// Born-measure site i along +-z: collapse + renormalize, return +-1.
+// Born-measure site i along z; u = uniform draw. Returns +-1.
 inline int exact_measure_z(SpinState16& s, int site, double u) {
     const std::size_t b = std::size_t{1} << site;
     double p_up = 0.0;

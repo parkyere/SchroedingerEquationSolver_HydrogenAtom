@@ -1,7 +1,5 @@
-// Synthesize psi = (u(|r|)/|r|) * Y_lm(theta,phi) per cell, from a radial
-// u_nl(r) table, using the real spherical harmonics (l = 0..5). std140 UBO
-// (binding 1) carries the grid + orbital params; vec3 geometry is vec4-padded.
-// psi out (binding 0), radial table u (binding 5).
+// psi = (u(r)/r) * Y_lm, real harmonics l=0..5
+// std140 UBO: box_min/cell_h are vec3 in .xyz (vec4-padded)
 import complex;
 import ylm;
 import grid;
@@ -14,11 +12,11 @@ struct Params {
     int nx;
     int ny;
     int l;
-    float4 box_min;  // .xyz
-    float4 cell_h;   // .xyz
+    float4 box_min;
+    float4 cell_h;
     int m;
     int n_radial;
-    float h_radial;  // radial spacing rmax/(n_radial+1)
+    float h_radial;  // = rmax/(n_radial+1)
     float rmax;
 };
 [[vk::binding(1, 0)]] ConstantBuffer<Params, Std140DataLayout> params;

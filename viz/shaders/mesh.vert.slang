@@ -1,8 +1,6 @@
-// Mesh (proton marker + axes gizmo) vertex stage. The std140 UBO (binding 0)
-// is shared with the fragment stage; eye is vec4-padded. The MVP already
-// carries the GL->Vulkan clip correction (y flip, depth [-1,1] -> [0,1])
-// applied host-side, so the clip position is authored in the camera's GL clip
-// conventions with no correction here (column-major mul matches GLSL mvp*p).
+// Ubo must byte-match the fragment stage's UBO; eye is vec4-padded (.xyz payload).
+// MVP bakes the GL->Vulkan clip correction (y-flip, depth [-1,1]->[0,1]) host-side;
+// plain mul(mvp,p) -- column-major matches GLSL mvp*p, no clip fix here.
 struct VSIn {
     [[vk::location(0)]] float3 pos : POSITION;
     [[vk::location(1)]] float3 normal : NORMAL;
@@ -17,7 +15,7 @@ struct VSOut {
 
 struct Ubo {
     float4x4 mvp;
-    float4 eye;  // .xyz
+    float4 eye;
 };
 [[vk::binding(0, 0)]] ConstantBuffer<Ubo, Std140DataLayout> ubo;
 

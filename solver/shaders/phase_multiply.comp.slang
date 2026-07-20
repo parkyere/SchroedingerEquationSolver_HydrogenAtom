@@ -1,6 +1,4 @@
-// psi <- phase * psi: element-wise complex multiply against a precomputed
-// phase table (split-step phase factor). One thread per element.
-// Bindings: psi(0) read-write, phase(1) readonly, std140 UBO n(2).
+// split-step phase factor
 import complex;
 
 [[vk::binding(0, 0)]] RWStructuredBuffer<Complex, Std430DataLayout> psi;

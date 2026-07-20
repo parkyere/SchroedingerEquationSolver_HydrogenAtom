@@ -15,20 +15,13 @@ import ses.field;
 import ses.parallel;
 
 
-// Quantum point contact: one narrow constriction in a hard wall. A wide
-// wave front at k0 transmits through QUANTIZED transverse modes -- a
-// channel opens each time the gap grows by lambda/2 = pi/k0, so the
-// transmitted flux climbs a STAIRCASE in the gap width (conductance
-// quantization, the mesoscopic classic). Spectral split-operator on the
-// 512^2 plane; edge CAPs (right-cap tally = transmission, the Anderson
-// wire's metric). CONTRACT: tests/qpc2d_test.cpp + --selftest-qpc2d.
+// Quantum point contact: transmission staircase vs gap width.
+// CONTRACT: tests/qpc2d_test.cpp + --selftest-qpc2d.
 
 
 export namespace ses_shell {
 
-// Pierced-wall potential: V0 inside the slab [wall_lo, wall_hi] except
-// the gap |y| < w/2, with a smooth half-cosine lip of width `lip` on
-// both gap edges (raw corners diffract Gibbs fringes).
+// half-cosine lip on gap edges (raw corners -> Gibbs fringes).
 inline std::vector<double> qpc_potential(const ses::Grid3D& g, double w,
                                          double wall_lo, double wall_hi,
                                          double v0, double lip) {
@@ -36,8 +29,6 @@ inline std::vector<double> qpc_potential(const ses::Grid3D& g, double w,
     const double pi = 3.14159265358979323846;
     for (int j = 0; j < g.y.n; ++j) {
         const double ay = std::abs(g.y.coord(j));
-        // Gap profile: 0 inside |y| < w/2, half-cosine lip up to full V0
-        // by w/2 + lip.
         double f = 1.0;
         if (ay < 0.5 * w) {
             f = 0.0;
@@ -119,7 +110,6 @@ public:
         mark_fired();
     }
     double transmitted() const override { return transmitted_; }
-    // Channels the gap SHOULD hold open: floor(w k0 / pi).
     int open_channels() const override {
         return static_cast<int>(gap_ * kQp2dK0 / 3.14159265358979323846);
     }
@@ -137,7 +127,7 @@ public:
     double sim_dt() const override { return kQp2dDt; }
     int steps_per_tick() const override { return kQp2dStepsPerTick; }
 
-    // ---- STM-style surface display (the corral rule) ----
+    // ---- STM-style surface display ----
     bool cloud() const override { return false; }
     const ses::Mesh& mesh() const override { return hf_.mesh; }
     const std::vector<ses::Rgb>& colors() const override {
@@ -150,7 +140,6 @@ public:
     double default_camera_elevation() const override { return 0.95; }
     double default_camera_distance() const override { return 110.0; }
 
-    // The pierced wall as two translucent red slabs.
     int overlay_curve_count() const override { return 1; }
     OverlayCurve overlay_curve(int /*i*/) const override {
         return {wall_curve_.data(),
@@ -184,7 +173,7 @@ protected:
         }
     }
 
-    // Step + CAP frame + right-cap transmission tally (the QPC readout).
+    // right-of-wall CAP absorption tallied as transmitted fraction.
     void do_steps(int n) override {
         const double cell = phys_grid_.x.spacing() *
                             phys_grid_.y.spacing() *

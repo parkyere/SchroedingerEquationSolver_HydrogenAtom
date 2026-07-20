@@ -1,20 +1,9 @@
-// Humble Object shell -- the SDL3 boundary. SDL provides the window, input,
-// and the Vulkan surface; the shell OWNS the device (DeviceContext::create),
-// the swapchain (ses.vk.present), and the main loop; Dear ImGui draws the
-// control panel + status readout inside the presenter's pass. Everything the
-// demo IS lives behind ses_shell::ScenarioDirector (--scene= picks the
-// implementation). NO domain logic lives here (docs/ARCHITECTURE.md).
-//
-// Controls: drag = orbit, wheel = zoom, space = pause, Tab = cloud/surface,
-// 1 = real time, 2 = relax (imaginary time), 3 = relax to 2p, 4 = relax to
-// 2s, 5 = excite an n=3 state (cascade demo), R = reset, M = measure
-// position, E = measure energy, D = decay off/on, L = laser (off -> Z -> X
-// -> off), F = flow particles, Z = face the z axis, [ ] = thinner/denser
-// cloud.
+// Humble Object shell: owns window+input (SDL3), device+swapchain+main loop
+// (ses.vk), and the ImGui panel. No domain logic -- scenes live behind
+// ses_shell::ScenarioDirector, --scene= picks one (docs/ARCHITECTURE.md).
 
-// Std first, in full: the imported ses.* modules' GMFs reach these std
-// headers -- a later FIRST textual include would C2572, so this TU textually
-// claims the whole set up front (later ones are guard no-ops).
+// Std headers first, in full: a FIRST textual include after the ses.* module
+// imports' GMFs would C2572 (MSVC C++20-modules ordering).
 #include <algorithm>
 #include <atomic>
 #include <cassert>
@@ -40,9 +29,8 @@
 
 #include <boost/program_options.hpp>
 
-// volk before SDL/ImGui: it defines VK_NO_PROTOTYPES and must own the
-// vulkan.h inclusion before SDL/ImGui pull their own Vulkan declarations.
-// The single VMA implementation TU is solver/src/vma_impl.cpp (ses_solver).
+// volk before SDL/ImGui: it owns the vulkan.h include (VK_NO_PROTOTYPES).
+// Single VMA_IMPLEMENTATION TU lives in solver/src/vma_impl.cpp (not here).
 #include <volk.h>  // VK_* macros: modules cannot export them
 
 #include <blit_frag_spv.h>
@@ -96,8 +84,7 @@ namespace {
 
 constexpr std::uint64_t kTickMs = 16;
 
-// The demo scenes, panel-selectable at runtime (and picked at boot by
-// --scene=). Index order is the panel combo's order.
+// Panel-combo order; make_scene_director switches on this index.
 constexpr const char* kSceneNames[] = {
     "hydrogen", "harmonic", "tunnel",  "harmonic1d",   "tunnel1d",
     "doublewell1d", "ptwell1d", "morse1d", "h2plus",   "benzene",
@@ -133,7 +120,7 @@ std::unique_ptr<ses_shell::ScenarioDirector> make_scene_director(int idx) {
     }
 }
 
-// --scene name -> combo index; -1 = unknown (caller warns, boots hydrogen).
+// --scene name -> combo index, or -1 if unknown.
 int scene_index_of(const std::string& name) {
     for (int i = 0; i < kSceneCount; ++i) {
         if (name == kSceneNames[i]) {
@@ -143,9 +130,8 @@ int scene_index_of(const std::string& name) {
     return -1;
 }
 
-// Selftest arcs that drive a NON-hydrogen scene: the arc flag forces its
-// scene so a mismatched --scene can never leave an arc dereferencing a
-// null capability. Every arc absent from this table drives hydrogen.
+// Arcs that force a NON-hydrogen scene (else a mismatched --scene could leave
+// the arc dereferencing a null capability). Arcs absent here drive hydrogen.
 struct ArcScene {
     const char* arc;
     const char* scene;
@@ -177,9 +163,6 @@ constexpr ArcScene kArcScenes[] = {
     {"selftest-rutherford", "rutherford3d"},
 };
 
-// The shell: window + input + device + presentation + the main loop. The one
-// wrapper surface shared by the keyboard, the ImGui panel (app.imgui_ui),
-// and the selftest arcs (ses.scenario.selftest_arcs).
 class Shell {
 public:
     Shell(int scene_index, std::vector<std::string> args)
@@ -189,13 +172,10 @@ public:
         distance_ = director_->default_camera_distance();
         azimuth_ = director_->default_camera_azimuth();
         elevation_ = director_->default_camera_elevation();
-        // Verification arcs run HEADLESS: pure GPGPU on the same windowless
-        // device path sesolver_vkcheck uses -- no window, no surface, no
-        // swapchain, no ImGui. Presenting would tie the loop to vsync AND to
-        // Windows' occlusion throttle (a covered window strangles the sim
-        // rate and false-fails every wall-clock verdict). The physics arcs
-        // never render at all; --dump-frame renders OFFSCREEN only (the
-        // render path is exactly what it verifies).
+        // Verification arcs run HEADLESS (no window/surface/swapchain/ImGui):
+        // presenting would tie the loop to vsync + Windows' occlusion throttle,
+        // which strangles the sim rate and false-fails wall-clock verdicts.
+        // --dump-frame still renders, but OFFSCREEN.
         for (const std::string& a : args_) {
             if (a.rfind("--selftest-", 0) == 0 ||
                 a.rfind("--dump-frame", 0) == 0) {
@@ -205,24 +185,19 @@ public:
                 needs_render_ = true;
             }
         }
-        flow_on_ = has_arg("--flow");  // start with streaklines on (Key F)
+        flow_on_ = has_arg("--flow");
         if (has_arg("--face-z")) {
-            snap_camera_z();  // boot straight into the z-facing view (dumps)
+            snap_camera_z();
         }
     }
 
-    // ---- boot -------------------------------------------------------------
     void init() {
-        // SES_VK_VALIDATION=1 turns on VK_LAYER_KHRONOS_validation for the
-        // WINDOWED render path too -- sesolver_vkcheck is compute-only, so this
-        // is the only way to validate dynamic rendering / present / sync2
-        // barriers (the marching-cubes-class of bug lives here, not in compute).
+        // SES_VK_VALIDATION=1: validation layer for the WINDOWED render path,
+        // the only way to check dynamic-rendering/present/sync2 barriers that
+        // sesolver_vkcheck (compute-only) can't reach.
         const char* venv = std::getenv("SES_VK_VALIDATION");
         const bool want_validation = (venv != nullptr && venv[0] == '1');
         if (headless_) {
-            // Pure GPGPU: the exact device path sesolver_vkcheck exercises.
-            // No SDL video, no window, no surface. The renderer initializes
-            // only when an arc verifies it (--dump-frame, offscreen).
             if (!SDL_Init(SDL_INIT_EVENTS)) {  // SDL_GetTicks + event drain
                 fatal_shell_error("SDL init", SDL_GetError());
             }
@@ -246,8 +221,7 @@ public:
         if (!SDL_Init(SDL_INIT_VIDEO)) {
             fatal_shell_error("SDL init", SDL_GetError());
         }
-        // 2048 wide by default: the ImGui panel no longer sits on top of
-        // the centered cloud (user call); height and zoom untouched.
+        // 2048 wide: keeps the ImGui panel clear of the centered cloud.
         window_ = SDL_CreateWindow(
             "Electron wavepacket near a hydrogen nucleus", 2048, 768,
             SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE |
@@ -256,8 +230,6 @@ public:
             fatal_shell_error("SDL window", SDL_GetError());
         }
 
-        // The owning device path (create_instance/create_device) -- what
-        // sesolver_vkcheck exercises headless, plus surface + swapchain.
         Uint32 n_ext = 0;
         const char* const* sdl_exts = SDL_Vulkan_GetInstanceExtensions(&n_ext);
         if (sdl_exts == nullptr) {
@@ -292,9 +264,9 @@ public:
         }
         init_imgui();
         refresh_status();
-        // COMPUTE init is deferred into the loop: engine init (VkFFT plan
-        // compile) + the radial atom solve block for seconds, and the window
-        // must show a presented frame FIRST -- not sit black behind them.
+        // Compute init is DEFERRED into the loop: VkFFT plan compile + radial
+        // solve block for seconds, and the window must present a frame first,
+        // not sit black behind them.
     }
 
     void shutdown() {
@@ -319,21 +291,18 @@ public:
         SDL_Quit();
     }
 
-    // ---- main loop ----------------------------------------------------------
     int run() {
         last_tick_ = SDL_GetTicks();
         while (!exit_requested_) {
             pump_events();
             apply_pending_scene();
             if (!headless_) {
-                // Acquire EARLY: the FIFO/vsync wait lands here, so the sim
-                // batch and the scene render below run during time that used
-                // to be dead inside present().
+                // Acquire EARLY so the vsync wait overlaps the sim batch +
+                // render below instead of stalling in present().
                 presenter_.acquire();
             }
             const std::uint64_t now = SDL_GetTicks();
-            // Fixed-cadence 16 ms ticks, coalescing after stalls instead of
-            // spiraling.
+            // Fixed 16 ms ticks; coalesce after a stall instead of spiraling.
             if (now - last_tick_ > 8 * kTickMs) {
                 last_tick_ = now - kTickMs;
             }
@@ -348,10 +317,9 @@ public:
                 break;
             }
 
-            // Deferred compute init: headless arcs go immediately; the
-            // windowed app first PRESENTS one frame (clear + panel) so the
-            // seconds of engine init + radial solve show a live window, then
-            // initializes on the next iteration.
+            // Deferred compute init: headless goes immediately; windowed waits
+            // for one presented frame so the seconds-long init isn't behind a
+            // black window.
             if (!compute_init_done_ && (headless_ || presented_once_)) {
                 director_->init_compute(
                     vk_ctx_, true,
@@ -361,11 +329,9 @@ public:
             }
 
             if (compute_init_done_) {
-                // The compute half runs before any rendering (the engine's
-                // offscreen frames must not interleave with a render). Once
-                // per frame, even while paused (Key E works paused). The
-                // physics arcs skip rendering entirely (pure GPGPU); only
-                // the windowed app and --dump-frame draw the scene.
+                // Compute half runs before any render (offscreen engine frames
+                // must not interleave a render), once per frame even while
+                // paused (Key E works paused). Physics arcs skip rendering.
                 director_->run_frame();
                 if (director_->take_title_dirty()) {
                     refresh_status();
@@ -389,8 +355,8 @@ public:
                 perf_last_ms_ = now;
             }
 
-            // UI + present. The scene view samples in the presenter's pass;
-            // ImGui rides the same pass after the blit.
+            // UI + present: the scene blits in the presenter's pass, ImGui
+            // rides the same pass after it.
             ImGui_ImplVulkan_NewFrame();
             ImGui_ImplSDL3_NewFrame();
             ImGui::NewFrame();
@@ -454,9 +420,8 @@ public:
                      {"Decay (D)", 'D'},
                      {"Measure E (E)", 'E'}});
             }
-            // Panel controls mutate the director directly, so keep the status
-            // block current here -- otherwise a control changed while PAUSED
-            // (no tick, no title-dirty) would read stale forever.
+            // Refresh here too: a panel control changed while PAUSED (no tick,
+            // no title-dirty) would otherwise read stale forever.
             refresh_status();
             ImGui::Render();
             ImDrawData* dd = ImGui::GetDrawData();
@@ -473,10 +438,8 @@ public:
         return exit_code_;
     }
 
-    // ---- control entry points every scene shares --------------------------
-    // Scenario-specific controls/probes live behind director_->hydrogen() /
-    // director_->tunnel() (ses.scenario); the panel and the selftest arcs
-    // reach them there.
+    // Generic control entry points; scenario-specific ones live behind
+    // director_->hydrogen()/tunnel(), reached by the panel and arcs.
     void toggle_pause() { paused_ = !paused_; }
     void set_real_time() {
         director_->set_real_time();
@@ -494,19 +457,17 @@ public:
         director_->toggle_view_mode();
         refresh_status();
     }
-    // Face the z axis (Key Z, every scene): eye onto +z -- azimuth 0,
-    // elevation 0 by the orbit convention -- the textbook straight-on view
-    // (x right, y up); the 1D scenes' xy sheet then spans the screen plane.
+    // Key Z: face +z (azimuth 0, elevation 0) so the 1D scenes' xy sheet
+    // spans the screen plane.
     void snap_camera_z() {
         azimuth_ = 0.0;
         elevation_ = 0.0;
     }
-    // Cross-section controls are only meaningful over the volume cloud.
     bool cloud_view() const { return director_ && director_->cloud(); }
-    // Selftest hook: turn on the cross-section slice sheet (z-normal, through
-    // the nucleus) so lobe signs read clearly. Owns shell UI state.
+    // Selftest hook: z-normal slice sheet through the nucleus so lobe signs
+    // read clearly.
     void enable_cross_section_demo() {
-        ui_.slice_on = true;   // slice sheet ONLY (isolates the slice pass)
+        ui_.slice_on = true;
         ui_.slice_axis = 2;
         ui_.slice_map = 0;     // density
     }
@@ -514,11 +475,10 @@ public:
         director_->set_time_scale(scale);
         refresh_status();
     }
-    // Director truth for the panel slider: any programmatic change
-    // (set_real_time's x1 reset, clamping) must show, not the last drag.
+    // Director truth for the panel slider: programmatic changes (set_real_time
+    // reset, clamping) must show, not the last drag.
     int time_scale() const { return director_->time_scale(); }
-    // Panel readout: achieved au/s and the 1x baseline (62.5 ticks/s x dt)
-    // it is measured against.
+    // Panel readout: achieved au/s and the x1 baseline it's measured against.
     double sim_rate() const { return perf_sim_rate_; }
     double baseline_sim_rate() const {
         return (1000.0 / kTickMs) * director_->sim_dt() *
@@ -532,7 +492,6 @@ public:
         }
     }
 
-    // ---- runtime scene switch (panel combo / selftest arc) ------------------
     int scene_index() const { return scene_index_; }
     void request_scene(int idx) {
         if (idx >= 0 && idx < kSceneCount) {
@@ -540,9 +499,8 @@ public:
         }
     }
 
-    // ---- selftest / verification hooks --------------------------------------
-    // The scenario itself + its capability seams (single accessors): the arcs
-    // call e.g. hy()->channel_a().
+    // Scenario + capability seams (single accessors); the arcs call e.g.
+    // hy()->channel_a().
     ses_shell::ScenarioDirector& director() { return *director_; }
     ses_shell::HydrogenApi* hy() { return director_->hydrogen(); }
     ses_shell::TunnelApi* tn() { return director_->tunnel(); }
@@ -592,11 +550,9 @@ public:
     const std::string& status_text() const { return status_text_; }
 
 private:
-    // Deferred scene switch: the director owns live GPU work, so the swap
-    // waits for boot's compute init, idles the device, tears the old scene
-    // down, rebuilds the grid-shaped renderer, and re-runs the SAME deferred
-    // compute-init path boot uses (the window stays live through the new
-    // scene's engine init / radial solve).
+    // Deferred scene switch: director owns live GPU work, so wait for compute
+    // init, idle the device before teardown, then re-run the SAME deferred
+    // compute-init path (window stays live through the new scene's solve).
     void apply_pending_scene() {
         if (pending_scene_ < 0 || !compute_init_done_) {
             return;
@@ -612,9 +568,9 @@ private:
         director_ = make_scene_director(idx);
         scene_index_ = idx;
         if (!headless_ || needs_render_) {
-            // Grid-shaped resources (volume extent, box) must match the new
-            // scene: full renderer rebuild (destroy() resets its memos --
-            // the reinit-safety the --dump-frame-switch arc pins).
+            // Grid-shaped resources must match the new scene: full renderer
+            // rebuild (destroy() resets its memos -- reinit-safety pinned by
+            // the --dump-frame-switch arc).
             vk_renderer_.destroy();
             if (!vk_renderer_.initialize(vk_ctx_, director_->grid(),
                                          ses_vk::render_blobs())) {
@@ -646,14 +602,13 @@ private:
         info.Device = vk_ctx_.device;
         info.QueueFamily = vk_ctx_.queue_family;
         info.Queue = vk_ctx_.queue;
-        // ImGui 1.92's Vulkan backend allocates SAMPLED_IMAGE + SAMPLER
-        // descriptors (not COMBINED_IMAGE_SAMPLER); DescriptorPoolSize > 0 with
-        // DescriptorPool left null lets the backend own a correctly typed pool
-        // (and destroy it in ImGui_ImplVulkan_Shutdown).
+        // ImGui 1.92 backend allocates SAMPLED_IMAGE + SAMPLER (not COMBINED):
+        // DescriptorPoolSize > 0 with DescriptorPool null lets it own a
+        // correctly typed pool (freed in ImGui_ImplVulkan_Shutdown).
         info.DescriptorPoolSize = 16;
-        // Dynamic rendering (the present pass uses no VkRenderPass): the UI
-        // pipeline declares the swapchain colour FORMAT. ImGui 1.92 deep-copies
-        // the format array during Init, so a local is safe.
+        // Dynamic rendering (no VkRenderPass): the UI pipeline declares the
+        // swapchain color format. ImGui 1.92 deep-copies the format array in
+        // Init, so a local is safe.
         info.UseDynamicRendering = true;
         info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
         const VkFormat ui_color_fmt = presenter_.color_format();
@@ -698,7 +653,7 @@ private:
                     break;
                 case SDL_EVENT_MOUSE_BUTTON_DOWN:
                     // RIGHT-drag on a 2D-HO surface point: grab the cloud
-                    // there (time freezes; pulling UP gathers the packet).
+                    // (pulling UP gathers the packet).
                     if (!io.WantCaptureMouse &&
                         e.button.button == SDL_BUTTON_RIGHT) {
                         if (auto* qd = director_->qdot()) {
@@ -737,8 +692,8 @@ private:
                     break;
                 case SDL_EVENT_MOUSE_WHEEL:
                     if (!io.WantCaptureMouse) {
-                        // Per-notch zoom: SDL delivers ~1 unit/notch; the
-                        // 120 factor sets a brisk step (~11% per notch).
+                        // Per-notch zoom: SDL gives ~1 unit/notch; 120 sets
+                        // ~11% per notch.
                         distance_ *=
                             std::pow(0.999, 120.0 * e.wheel.y);
                         distance_ = std::clamp(distance_, 4.0, 300.0);
@@ -750,8 +705,8 @@ private:
         }
     }
 
-    // Window point -> the z = 0 stage plane, through the renderer's exact
-    // orbit camera (ses.camera unproject_to_z0; CONTRACT: pick_test).
+    // Window point -> z=0 stage plane via the orbit camera (ses.camera
+    // unproject_to_z0; CONTRACT: pick_test).
     bool pick_stage(float mx, float my, double* out_x, double* out_y) {
         int w = 0;
         int h = 0;
@@ -768,8 +723,8 @@ private:
                                     ndc_y, out_x, out_y);
     }
 
-    // Generic keys live here; everything else is offered to the scenario as
-    // a plain ASCII key (hydrogen: 2/3/4/5/D/E/L).
+    // Generic keys handled here; anything else is offered to the scenario as
+    // a plain ASCII key.
     void handle_key(SDL_Keycode key) {
         switch (key) {
             case SDLK_SPACE:
@@ -785,8 +740,8 @@ private:
                 measure_now();
                 return;
             case SDLK_F:
-                // Scene hotkey first (corral Packet, qdot Displace); an
-                // unhandled F toggles the flow tracers (Bohmian current).
+                // Scene hotkey first; an unhandled F toggles the flow tracers
+                // (Bohmian current).
                 if (director_->handle_key('F')) {
                     return;
                 }
@@ -820,9 +775,8 @@ private:
 
     void refresh_status() { status_text_ = director_->title_text(); }
 
-    // The DRAW half, in ses_vk: assemble FrameInput from the director,
-    // resize the offscreen target to the window's pixel size, record the
-    // passes (render() is synchronous -- the presenter samples afterwards).
+    // The DRAW half (ses_vk): render() is synchronous -- the presenter
+    // samples afterwards.
     void render_scene_offscreen() {
         int pw = 1024;  // headless --dump-frame: no window, fixed extent
         int ph = 768;
@@ -843,11 +797,10 @@ private:
         in.peak = director_->peak();
         in.absorbance = absorbance_;
         in.flash = director_->next_flash_intensity();
-        // Probability-flow particles (Key F): drawn over the cloud, frozen
-        // while paused so a still frame can still accumulate.
+        // Flow particles (Key F): over the cloud, frozen while paused so a
+        // still frame can still accumulate.
         in.flow = flow_on_ && in.cloud;
         in.flow_animate = !paused_;
-        // Cross-section planes (Cloud view display state, owned by ui_).
         in.clip_on = ui_.clip_on;
         in.clip_axis = ui_.clip_axis;
         in.clip_sign = ui_.clip_sign;
@@ -856,15 +809,15 @@ private:
         in.slice_axis = ui_.slice_axis;
         in.slice_offset = ui_.slice_offset;
         in.slice_map = ui_.slice_map;
-        // A single scalar that changes whenever any plane control moves, so
-        // the accumulation early-out treats a plane edit as "not static".
+        // Packed scalar: changes whenever any plane control moves, so the
+        // accumulation early-out treats a plane edit as "not static".
         const double plane_tag =
             (ui_.clip_on ? 1.0 : 0.0) + 2.0 * ui_.clip_axis +
             8.0 * ui_.clip_sign + 100.0 * ui_.clip_offset +
             (ui_.slice_on ? 1000.0 : 0.0) + 4000.0 * ui_.slice_axis +
             200000.0 * ui_.slice_offset + 30000000.0 * ui_.slice_map;
-        // Temporal accumulation: keep averaging only while NOTHING changed
-        // (camera, display params, flash, psi volume, animating particles).
+        // Temporal accumulation: average only while NOTHING changed (camera,
+        // display params, flash, psi volume, animating particles).
         in.frame_index = static_cast<float>(frame_index_++ % 4096);
         const bool volume_written = director_->take_volume_written();
         const bool scene_static =
@@ -881,8 +834,8 @@ private:
             volume_written || absorbance_ != acc_prev_.absorbance;
         acc_prev_ = {azimuth_, elevation_, distance_, in.peak, absorbance_,
                      in.flash, in.cloud, plane_tag};
-        // 1D-scene overlay polylines (phasor curve + potential profile);
-        // the 3D scenes report 0 and skip this entirely.
+        // 1D-scene overlay polylines (phasor curve + potential); 3D scenes
+        // report 0 and skip.
         const int nov = std::min(director_->overlay_curve_count(),
                                  ses_vk::SceneRenderer::kMaxOverlayCurves);
         for (int c = 0; c < nov; ++c) {
@@ -891,7 +844,6 @@ private:
                              oc.b,   oc.a,     oc.fill, oc.rgba};
         }
         in.overlay_count = nov;
-        // Scene props: nucleus marker balls + visualized barrier slab.
         const int nmk = std::min(director_->marker_count(),
                                  ses_vk::SceneRenderer::kMaxMarkers);
         for (int m = 0; m < nmk; ++m) {
@@ -904,15 +856,15 @@ private:
         in.barrier_on = director_->barrier_slab(barrier_lo, barrier_hi);
         in.barrier_lo = static_cast<float>(barrier_lo);
         in.barrier_hi = static_cast<float>(barrier_hi);
-        // The psi display volume: the engine's bridge image on the GPU path;
-        // null lets the renderer fall back to its CPU-staged texture.
+        // Psi display volume: the engine's GPU bridge image; null falls back
+        // to the renderer's CPU-staged texture.
         in.psi_volume = director_->psi_volume_view();
         in.flow_velocity = director_->flow_velocity_view();
         if (in.cloud) {
             if (director_->take_volume_dirty()) {
-                // CPU staging only: until compute init has been ATTEMPTED the
-                // 268 MB fallback texture must not be allocated (it would be
-                // orphaned and would deflate the VRAM-budget probe).
+                // Until compute init has been ATTEMPTED, don't allocate the
+                // 268 MB fallback texture -- it would be orphaned and deflate
+                // the VRAM-budget probe.
                 if (director_->compute_attempted() && !director_->gpu_ok()) {
                     in.volume_staging = &director_->psi_staging();
                 }
@@ -928,15 +880,14 @@ private:
         vk_renderer_.render(in);
     }
 
-    // The context is declared FIRST: members destroy in reverse order, and
-    // everything below allocates from its VMA allocator, so the context must
-    // outlive them all.
+    // Context declared FIRST: members destroy in reverse order and all
+    // allocate from its VMA allocator, so it must outlive them.
     ses_vk::DeviceContext vk_ctx_;
     ses_vk::SceneRenderer vk_renderer_;
     ses_shell::SwapchainPresenter presenter_;
 
     std::unique_ptr<ses_shell::ScenarioDirector> director_;
-    int scene_index_ = 0;    // index into kSceneNames
+    int scene_index_ = 0;
     int pending_scene_ = -1; // panel-requested switch, applied at frame top
 
     SDL_Window* window_ = nullptr;
@@ -950,16 +901,14 @@ private:
     double perf_sim_rate_ = 0.0;     // achieved au/s, ~1 s rolling window
     double perf_last_sim_t_ = 0.0;
     std::uint64_t perf_last_ms_ = 0;
-    bool headless_ = false;      // --selftest-*/--dump-frame: pure GPGPU,
-                                 // no window/surface/swapchain/ImGui
+    bool headless_ = false;      // --selftest-*/--dump-frame: no window/ImGui
     bool needs_render_ = false;  // --dump-frame: offscreen renders required
-    bool compute_init_done_ = false;  // director init deferred into the loop
-    bool presented_once_ = false;     // a live frame exists (gates the init)
+    bool compute_init_done_ = false;
+    bool presented_once_ = false;     // gates the deferred compute init
     bool exit_requested_ = false;
     int exit_code_ = 0;
     std::uint64_t last_tick_ = 0;
 
-    // Temporal-accumulation bookkeeping.
     struct AccumPrev {
         double azimuth = 1e9, elevation = 0, distance = 0, peak = 0,
                absorbance = 0;
@@ -974,21 +923,19 @@ private:
 
     double azimuth_ = 0.6;
     double elevation_ = 0.4;
-    double distance_ = 150.0;  // frames ~+-62 Bohr at 45 deg fovy: the n<=6
-                               // manifold body
+    double distance_ = 150.0;  // frames ~+-62 Bohr at 45 deg fovy (n<=6 body)
 };
 
 }  // namespace
 
 int main(int argc, char* argv[]) {
-    // GUI-subsystem stderr through a redirect is a fully buffered pipe; a
-    // crash then eats every diagnostic. Unbuffered keeps them honest.
+    // GUI-subsystem stderr through a redirect is fully buffered; a crash then
+    // eats every diagnostic. Unbuffered keeps them honest.
     std::setvbuf(stderr, nullptr, _IONBF, 0);
 
-    // Command-line parsing via Boost.Program_options -- infrastructure is
-    // NOT physics, so no hand-rolled wheel here (standing project rule).
-    // Every arc flag is registered: --help lists them all and a typo is a
-    // hard error instead of a silently ignored dead flag.
+    // CLI parsing via Boost.Program_options (infrastructure is not physics --
+    // standing rule). Every arc flag is registered: --help lists them and a
+    // typo is a hard error, not a silently ignored dead flag.
     namespace po = boost::program_options;
     po::options_description desc("sesolver options");
     auto add = desc.add_options();
@@ -1025,8 +972,8 @@ int main(int argc, char* argv[]) {
     po::variables_map vm;
     try {
         // No abbreviation guessing: a shortened --selftest-cor would parse
-        // here yet never match the arcs' exact has_arg() lookups -- the run
-        // would boot a normal window instead of the requested arc.
+        // here but never match the arcs' exact has_arg() lookups, booting a
+        // normal window instead of the arc.
         po::store(po::command_line_parser(argc, argv)
                       .options(desc)
                       .style(po::command_line_style::default_style &
@@ -1039,8 +986,8 @@ int main(int argc, char* argv[]) {
         std::ostringstream help;
         help << desc;
         std::fprintf(stderr, "%s", help.str().c_str());
-        // Release builds run in the GUI subsystem: stderr is detached, so a
-        // flag typo must not exit SILENTLY.
+        // Release builds run in the GUI subsystem (stderr detached), so a flag
+        // typo must not exit SILENTLY.
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "arguments", e.what(),
                                  nullptr);
         return 2;
@@ -1055,10 +1002,9 @@ int main(int argc, char* argv[]) {
     // The shell and the arcs keep their flag-string seam (has_arg).
     std::vector<std::string> args{argv, argv + argc};
 
-    // Scene selection: --scene, overridden by any arc that drives its own
-    // scene (kArcScenes); every OTHER selftest arc drives hydrogen (it
-    // reaches the director through hydrogen()). Plain --dump-frame keeps
-    // the requested scene.
+    // Scene selection: --scene, overridden by any arc with its own scene
+    // (kArcScenes); every OTHER selftest arc drives hydrogen. Plain
+    // --dump-frame keeps the requested scene.
     std::string scene = vm["scene"].as<std::string>();
     bool arc_forced = false;
     for (const ArcScene& as : kArcScenes) {
@@ -1086,8 +1032,8 @@ int main(int argc, char* argv[]) {
     Shell shell{scene_index, std::move(args)};
     shell.init();
 
-    // Verification + selftest arcs (--dump-frame*, --selftest-*): registered
-    // from ses.scenario.selftest_arcs so main() stays a shell.
+    // Verification arcs registered from ses.scenario.selftest_arcs so main()
+    // stays a shell.
     ses_shell::register_verification_arcs(&shell);
 
     const int code = shell.run();

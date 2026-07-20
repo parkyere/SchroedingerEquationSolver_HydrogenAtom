@@ -16,18 +16,10 @@ export import ses.scenario;
 export import ses.spin;
 
 
-// One electron spin, pinned at the origin: H = (1/2) B . sigma stepped
-// by EXACT SU(2) rotations (ses.spin -- no grid, no Trotter). The
-// translucent Bloch sphere holds the <sigma> arrow; B is free to point
-// ANYWHERE (X/Y/Z sliders), the RF drive is a co-rotating circular field
-// in the plane normal to z (Rabi / NMR), and the spin-echo runs a
-// pi/2 -- tau -- pi -- tau sequence on a 64-spin DETUNED ensemble (a
-// single spin has nothing to refocus; the fan re-converging IS the
-// echo). [M] projects every spin onto +-B_hat by Born (the measurement).
-// A static E field exerts NO torque on a pinned spin (no electric
-// dipole): it rides along as the RED flux only, honestly labeled.
-// Field flux: Lagrangian tracer streaks -- E red, B green.
-// CONTRACT: tests/spin_test.cpp (core) + --selftest-spin (scene).
+// One electron spin at origin: H = (1/2) B.sigma via exact SU(2) rotations
+// (ses.spin -- no grid, no Trotter). E gives no torque on a pinned spin ->
+// RED flux only.
+// CONTRACT: tests/spin_test.cpp + --selftest-spin.
 // volk.h textually first: VK_* macros never cross module boundaries.
 
 
@@ -35,9 +27,9 @@ export namespace ses_shell {
 
 constexpr double kSpDt = 0.002;
 constexpr int kSpStepsPerTick = 8;
-constexpr double kSpR = 10.0;         // Bloch sphere display radius
+constexpr double kSpR = 10.0;         // Bloch sphere radius
 constexpr double kSpB0 = 0.5;         // boot |B| along z
-constexpr double kSpRfB1 = 0.05;      // RF amplitude (Omega_R)
+constexpr double kSpRfB1 = 0.05;      // Omega_R
 constexpr int kSpEcho = 64;           // echo ensemble size
 constexpr double kSpEchoDet = 0.25;   // fractional detuning spread
 constexpr double kSpEchoTau = 30.0;   // pulse spacing (au)
@@ -67,8 +59,8 @@ public:
     double e(int axis) const override { return e_[axis]; }
     void toggle_rf() override {
         rf_on_ = !rf_on_;
-        rf_w_ = bmag();      // lock to resonance at toggle time...
-        rf_t0_ = sim_time_;  // ...with the drive axis starting on +x
+        rf_w_ = bmag();      // resonance omega = |B|
+        rf_t0_ = sim_time_;  // drive phase origin -> starts on +x
         title_dirty_ = true;
     }
     bool rf_on() const override { return rf_on_; }
@@ -80,8 +72,6 @@ public:
         note_ = half ? "pi/2 pulse" : "pi pulse";
         title_dirty_ = true;
     }
-    // Echo: 64 detuned spins, +z -> pi/2 -> tau -> pi -> tau (the mean
-    // transverse spin collapses, flips, and REFOCUSES).
     void spin_echo() override {
         ens_.assign(kSpEcho, ses::Spinor{});
         det_.resize(kSpEcho);
@@ -131,7 +121,6 @@ public:
 
     void do_set_real_time() override {}
     void reset_simulation() override { reset_state(); }
-    // [M]: Born-project EVERY spin onto +-B_hat (or +-z at B = 0).
     void measure_now() override {
         double nx = b_[0];
         double ny = b_[1];
@@ -234,11 +223,8 @@ public:
         return s;
     }
 
-    // SEPARATE curves (a line strip DRAWS its bridges, so chained rings
-    // would smear chords across the sphere): 0-2 the three thin great
-    // circles about X/Y/Z, 3-5 the XYZ axis lines (muted RGB), 6 the
-    // ensemble fan, 7 the mean arrow, then one 2-point curve per field
-    // tracer streak (E red, B green).
+    // SEPARATE curves: a line strip draws bridges between points, so chaining
+    // rings would smear chords across the sphere.
     int overlay_curve_count() const override {
         return 8 + static_cast<int>(e_flux_.size() / 6) +
                static_cast<int>(b_flux_.size() / 6);
@@ -358,8 +344,7 @@ private:
     }
 
     void rebuild_sphere() {
-        // The three great circles, each ABOUT one axis (the circle about
-        // X spans the y-z plane, etc.) -- one curve apiece, no bridges.
+        // great circle about each axis (circle about X spans y-z)
         for (int axis = 0; axis < 3; ++axis) {
             std::vector<float>& c = circle_[static_cast<std::size_t>(axis)];
             c.clear();
@@ -375,7 +360,7 @@ private:
                 c.push_back(p[2]);
             }
         }
-        // The XYZ axis lines, poking a little past the sphere.
+        // axis lines poking past the sphere
         for (int a = 0; a < 3; ++a) {
             std::vector<float>& ax = axis_[static_cast<std::size_t>(a)];
             ax.assign(6, 0.0f);
@@ -387,7 +372,6 @@ private:
     }
 
     void rebuild_arrows() {
-        // The fan: one faint origin->tip segment per ensemble spin.
         fan_.clear();
         if (ens_.size() > 1) {
             for (const ses::Spinor& s : ens_) {
@@ -412,7 +396,6 @@ private:
                 fan_.push_back(static_cast<float>(kSpR * z));
             }
         }
-        // The mean arrow with a two-line head.
         arrow_.clear();
         const double ax = kSpR * mean_[0];
         const double ay = kSpR * mean_[1];
@@ -452,8 +435,7 @@ private:
         }
     }
 
-    // Lagrangian field tracers: short streaks advected along the field
-    // (E red, B green), respawned inside the shell when they leave.
+    // Lagrangian field tracers
     void advect_flux() {
         advect_one(e_flux_, e_pos_, e_[0], e_[1], e_[2]);
         advect_one(b_flux_, b_pos_, b_[0], b_[1], b_[2]);
@@ -490,8 +472,7 @@ private:
                 y = uni(rng_) * 0.8 - dy * kSpFluxR;
                 z = uni(rng_) * 0.8 - dz * kSpFluxR;
             }
-            // One 2-point streak per tracer (separate overlay curve: line
-            // strips draw their bridges, so chaining would smear).
+            // separate 2-point streak per tracer (chaining would smear)
             const double tl = 1.6 * std::min(1.0, f);
             out.push_back(static_cast<float>(x));
             out.push_back(static_cast<float>(y));

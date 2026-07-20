@@ -13,17 +13,15 @@ export import ses.field;
 export import ses.colormap;
 
 
-// Trilinear sampling of the complex field, and per-vertex isosurface phase
-// colors. Interpolating the COMPLEX value and then taking atan2 keeps
-// constant-phase regions exactly constant (amplitude cancels in the ratio).
+// atan2 the interpolated COMPLEX value, not the phase directly: constant-phase
+// regions stay constant, amplitude cancels in the ratio.
 
 
 export namespace ses {
 
 namespace sampling_detail {
 
-// Cell index and fractional offset along one axis; the cell is clamped to
-// [0, n-2] so the last grid point (t = 1 in the last cell) stays valid.
+// clamp i to n-2 so i+1 stays in range; t=1 covers the last cell.
 inline std::pair<int, double> cell_and_t(double u, const Grid1D& axis) noexcept {
     const double s = (u - axis.xmin) / axis.spacing();
     int i = static_cast<int>(std::floor(s));
@@ -40,7 +38,7 @@ inline std::complex<double> sample_trilinear(const Field3D& f, Vec3d p) noexcept
     const auto [k, tz] = sampling_detail::cell_and_t(p.z, g.z);
 
     auto lerp = [](std::complex<double> a, std::complex<double> b, double t) {
-        return a + t * (b - a);  // component-wise on re and im
+        return a + t * (b - a);
     };
 
     const std::complex<double> c00 = lerp(f(i, j, k), f(i + 1, j, k), tx);
@@ -50,7 +48,6 @@ inline std::complex<double> sample_trilinear(const Field3D& f, Vec3d p) noexcept
     return lerp(lerp(c00, c10, ty), lerp(c01, c11, ty), tz);
 }
 
-// One cyclic phase color per mesh vertex: arg(psi) sampled at the vertex.
 inline std::vector<Rgb> phase_colors(const Mesh& mesh, const Field3D& psi) {
     std::vector<Rgb> colors;
     colors.reserve(mesh.vertices.size());

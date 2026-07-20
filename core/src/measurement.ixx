@@ -11,21 +11,18 @@ export import ses.field;
 import ses.parallel;
 
 
-// Soft position measurement (Gaussian POVM): collapse to a Gaussian packet,
-// not a delta. Randomness stays OUT of core: callers supply u in [0,1) and
-// the samplers invert a discrete CDF in flat-index order (the uniform
-// cell-volume factor cancels). POVM consistency: the outcome density for the
-// Kraus mask e^{-(r-c)^2/(4 s^2)} is |psi|^2 BLURRED by a Gaussian of std
-// sigma_m (E_c = M_c^dag M_c), not raw |psi|^2 -- see sample_povm_index.
+// Soft position measurement (Gaussian POVM). Randomness stays OUT of core:
+// callers supply u in [0,1); samplers invert a discrete CDF in flat-index
+// order (cell-volume cancels). POVM consistency: Kraus mask e^{-(r-c)^2/(4
+// s^2)} gives E_c = M_c^dag M_c, so the outcome density is |psi|^2 blurred by
+// std sigma_m, not raw |psi|^2 -- see sample_povm_index.
 
 
 export namespace ses {
 
-// Projective energy measurement over populations P_n = |<phi_n|psi>|^2.
-// The tracked manifold is incomplete, so sum(P) <= 1: returns the collapsed
-// index n (project psi onto phi_n), or -1 for the 1 - sum(P) deficit
-// (continuum / untracked outcome: the caller projects the manifold OUT,
-// psi <- (1 - P)|psi>, so bound populations do not survive the verdict).
+// Incomplete manifold (sum(P) <= 1): returns eigenstate index, or -1 for the
+// 1 - sum(P) untracked/continuum deficit (caller then projects the manifold
+// OUT, psi <- (1 - P)|psi>).
 inline int sample_energy_eigenstate(const std::vector<double>& populations, double u) noexcept {
     double cum = 0.0;
     for (std::size_t n = 0; n < populations.size(); ++n) {
@@ -34,10 +31,9 @@ inline int sample_energy_eigenstate(const std::vector<double>& populations, doub
             return static_cast<int>(n);
         }
     }
-    return -1;  // fell into the 1 - sum(P) deficit: continuum / untracked
+    return -1;
 }
 
-// First flat index whose cumulative probability exceeds u * total.
 inline int sample_collapse_index(const Field3D& psi, double u) noexcept {
     double total = 0.0;
     for (const std::complex<double>& z : psi.data()) {
@@ -52,12 +48,11 @@ inline int sample_collapse_index(const Field3D& psi, double u) noexcept {
             return static_cast<int>(i);
         }
     }
-    return static_cast<int>(n - 1);  // u ~ 1 with rounding: last occupied cell
+    return static_cast<int>(n - 1);  // u ~ 1 rounding fallback
 }
 
-// |psi|^2 convolved per axis with a normalized Gaussian of std sigma_m
-// (truncated at 4 sigma, periodic wrap -- the grid's FFT topology): the
-// Born-rule outcome density of the Gaussian POVM below.
+// Per-axis Gaussian (std sigma_m) convolution of |psi|^2; periodic wrap
+// matches the grid FFT topology.
 inline std::vector<double> povm_outcome_density(const Field3D& psi,
                                                 double sigma_m) {
     const Grid3D& g = psi.grid();
@@ -87,8 +82,7 @@ inline std::vector<double> povm_outcome_density(const Field3D& psi,
         const int stride = strides[a];
         const int lines = nx * ny * nz / n;
         parallel_for(lines, [&](int line) {
-            // Base index of this axis-a line: reinsert the axis dimension
-            // into the flattened remaining-dims counter.
+            // reinsert axis-a into the flattened remaining-dims counter
             const int base = line % stride + (line / stride) * stride * n;
             for (int p = 0; p < n; ++p) {
                 double acc = 0.0;
@@ -105,10 +99,8 @@ inline std::vector<double> povm_outcome_density(const Field3D& psi,
     return d;
 }
 
-// L_z bookkeeping for one real-harmonic pair. Convention (ses.harmonics,
-// pinned by tests): Y_{l,+|m|} ~ cos(m phi), Y_{l,-|m|} ~ sin(m phi), so
-// |l, +-m> = (|cos> +- i |sin>)/sqrt(2) and the signed-m amplitudes of
-// psi = c_cos|cos> + c_sin|sin> are a_+- = (c_cos -+ i c_sin)/sqrt(2).
+// Signed-m amplitudes from the real cos/sin pair. Convention (ses.harmonics,
+// test-pinned): Y_{l,+|m|} ~ cos(m phi), Y_{l,-|m|} ~ sin(m phi).
 struct SignedM {
     std::complex<double> plus;
     std::complex<double> minus;
@@ -120,9 +112,8 @@ inline SignedM signed_m_amplitudes(std::complex<double> c_cos,
     return SignedM{inv * (c_cos - i * c_sin), inv * (c_cos + i * c_sin)};
 }
 
-// Real-pair coefficients of a kept signed-m component a|l, sign*|m|>:
-// cos = a/sqrt(2), sin = sign * i a/sqrt(2). Keeping both outcomes and
-// summing reconstructs the original pair (projector completeness).
+// Inverse of signed_m_amplitudes: real cos/sin pair from one kept signed-m
+// component (both outcomes sum back to the original pair).
 struct RealPair {
     std::complex<double> c_cos;
     std::complex<double> c_sin;
@@ -133,9 +124,8 @@ inline RealPair pair_from_signed_m(std::complex<double> a, int sign) noexcept {
     return RealPair{inv * a, static_cast<double>(sign) * inv * (i * a)};
 }
 
-// First flat index whose cumulative POVM outcome probability exceeds
-// u * total: detector-consistent sampling (outcomes CAN land on a node of
-// raw |psi|^2 that a sigma_m-resolution detector cannot resolve).
+// Sample from the POVM density, not raw |psi|^2: outcomes can land on a node
+// of |psi|^2 that a sigma_m detector cannot resolve.
 inline int sample_povm_index(const Field3D& psi, double sigma_m, double u) {
     const std::vector<double> d = povm_outcome_density(psi, sigma_m);
     double total = 0.0;
@@ -153,9 +143,8 @@ inline int sample_povm_index(const Field3D& psi, double sigma_m, double u) {
     return static_cast<int>(d.size() - 1);  // u ~ 1 with rounding
 }
 
-// psi <- psi * exp(-|r - center|^2 / (4 sigma_m^2)), renormalized. Same
-// amplitude convention as gaussian_wavepacket, so Gaussian x Gaussian
-// posteriors are analytic.
+// Same amplitude convention as gaussian_wavepacket (4 sigma^2, not 2), so
+// Gaussian x Gaussian posteriors stay analytic.
 inline void collapse_wavepacket(Field3D& psi, Vec3d center, double sigma_m) noexcept {
     const Grid3D& g = psi.grid();
     const double inv4s2 = 1.0 / (4.0 * sigma_m * sigma_m);

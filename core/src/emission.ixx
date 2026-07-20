@@ -10,21 +10,15 @@ import ses.vec;
 import ses.grid;
 
 
-// Semiclassical (Larmor) emission from the oscillating dipole:
-//     P = (2/3) alpha^3 |d_ddot|^2,  d_ddot = <grad V> (Ehrenfest, a.u.).
-// Coherent-superposition emission only: exactly 0 for a pure eigenstate,
-// whose spontaneous decay is the Einstein-A quantum jumps (ses.decay).
+// Semiclassical (Larmor) dipole emission, atomic units. Coherent-superposition
+// only: P == 0 for a pure eigenstate (its decay = Einstein-A jumps, ses.decay).
+// P = (2/3) alpha^3 |d_ddot|^2, d_ddot = <grad V> (Ehrenfest).
 
 
 export namespace ses {
 
-// <grad V> = integral |psi|^2 grad V dr, grad V by central differences on the
-// periodic grid (exact for a harmonic well's linear force).
-// PRECONDITION: psi is normalized (integral |psi|^2 dr = 1). Unlike the
-// ses.observables expectations (which divide by the discrete norm and so are
-// scale-invariant), this returns the raw integral, so an unnormalized psi
-// yields <grad V> scaled by the norm. The live sim always feeds a normalized
-// psi, and the GPU mean_force oracle shares this assumption.
+// PRECONDITION: psi normalized; result is the raw integral (NOT norm-invariant),
+// so unnormalized psi scales it by the norm. GPU mean_force oracle shares this.
 inline Vec3d mean_potential_gradient(const Field3D& psi, const std::vector<double>& v,
                                      const Grid3D& g) noexcept {
     const int nx = g.x.n;
@@ -63,7 +57,6 @@ inline Vec3d mean_potential_gradient(const Field3D& psi, const std::vector<doubl
     return Vec3d{acc.x * dv, acc.y * dv, acc.z * dv};
 }
 
-// Larmor radiated power P = (2/3) alpha^3 |d_ddot|^2 (atomic units).
 inline constexpr double larmor_power(const Vec3d& dipole_accel) noexcept {
     const double a3 = kFineStructureConstant * kFineStructureConstant *
                       kFineStructureConstant;

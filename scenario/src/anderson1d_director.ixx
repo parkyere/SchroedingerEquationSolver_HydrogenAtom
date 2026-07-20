@@ -15,30 +15,21 @@ import ses.observables;
 import ses.field;
 
 
-// Anderson localization in 1D: a packet with energy ABOVE every barrier
-// (a classical particle sails through) is STOPPED by coherent multiple
-// scattering off a random landscape -- in 1D every eigenstate is
-// exponentially localized for any disorder. Sharp scatterers on purpose
-// (sigma < lambda): smooth bumps are transparent at k (the corral fence
-// lesson), sharp ones backscatter. Clean (W = 0) contrast: ballistic
-// flight. CONTRACT: tests/anderson1d_test.cpp.
+// Anderson localization in 1D; sharp scatterers (sigma < lambda) backscatter.
+// CONTRACT: tests/anderson1d_test.cpp.
 
 
 export namespace ses_shell {
 
-// SPECKLE disorder (the cold-atom realization, Billy et al. 2008): dense
-// overlapping bumps -> a smooth random field with correlation length ~
-// sigma, every correlation cell a scatterer. Strength W ~ E (the standard
-// Anderson regime): sub-E-everywhere fields proved far too transparent
-// (measured <= 36% blocking over 100 Bohr at every sub-E tuning) -- the
-// localization length simply exceeds any reasonable stage.
-constexpr double kAn1dSpacing = 0.6;    // speckle grain spacing (Bohr)
-constexpr double kAn1dBumpSigma = 0.3;  // correlation length
-constexpr double kAn1dK0 = 1.2;         // E = 0.72 Ha
-constexpr double kAn1dW = 1.2;          // grain amplitude range [-W, W]
+// SPECKLE disorder (cold-atom realization, Billy et al. 2008): overlapping
+// bumps -> smooth random field; W ~ E is the standard Anderson regime
+// (sub-E fields measured <= 36% blocking over 100 Bohr -- too transparent).
+constexpr double kAn1dSpacing = 0.6;
+constexpr double kAn1dBumpSigma = 0.3;
+constexpr double kAn1dK0 = 1.2;
+constexpr double kAn1dW = 1.2;
 
-// Random landscape: Gaussian bumps at every lattice site, amplitudes
-// uniform in [-w, w] from the SEEDED mt19937 (deterministic per seed).
+// Seeded mt19937 -> deterministic per seed.
 inline std::vector<double> anderson_potential(const ses::Grid1D& g, double w,
                                               unsigned seed) {
     std::vector<double> v(static_cast<std::size_t>(g.n), 0.0);
@@ -134,9 +125,8 @@ protected:
             100.0 * survived_);
     }
 
-    // Step + right-cap transmission tally (the conductance readout: the
-    // test's exact metric) + the CAP frame; no renormalization -- the
-    // norm IS the on-stage electron.
+    // Right-cap transmission tally = the test's exact metric; no renorm
+    // (norm IS the on-stage electron).
     void step_batch(int n) override {
         const double h = grid1d_.spacing();
         for (int s = 0; s < n; ++s) {

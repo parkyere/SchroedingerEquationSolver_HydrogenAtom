@@ -1,9 +1,5 @@
-// Fused MCWF no-jump update: psi[i] += sum_s (cre + i cim)_s * R_s(i) where
-// R_s = (u_s(|r|)/|r|) * Y_{l_s m_s} * inv_norm_s -- the normalized
-// eigenstate evaluated in-register in one pass. inv_norm comes from the
-// caller's cached grid norm (a constant for a fixed radial table). Radial
-// interpolation matches synth.comp exactly.
-// psi (binding 0, rw), UBO (binding 1), slotted radial tables (binding 5).
+// Fused MCWF no-jump update: psi[i] += sum_s coef_s * (u_s(|r|)/|r|) * Y_{l_s m_s} * inv_norm_s.
+// Radial interp must match synth.comp verbatim.
 import complex;
 import ylm;
 import grid;
@@ -37,8 +33,6 @@ void main(uint3 tid : SV_DispatchThreadID) {
     int3 ijk = unflatten_moddiv(idx, params.nx, params.ny);
     float3 p = cell_pos(ijk, params.box_min.xyz, params.cell_h.xyz);
     float r = length(p);
-    // Radial interpolation geometry, shared by every state (synth.comp's
-    // formulas verbatim; per-state only the table values differ).
     bool origin = (r < params.h_radial);
     bool inside = (r < params.rmax);
     int i0 = 0;

@@ -10,11 +10,7 @@ export import ses.field;
 import ses.parallel;
 
 
-// Spontaneous decay via quantum jumps (Monte-Carlo wavefunction).
-// Einstein A = (4/3) alpha^3 omega^3 |<f|r|i>|^2 (atomic units); selection
-// rules enter automatically (forbidden channel -> A = 0, e.g. metastable 2s).
-// Jumps are Poisson, weighted by the CURRENT excited population; randomness
-// is injected by the caller.
+// Spontaneous decay via quantum jumps (MCWF), atomic units; caller injects randomness.
 
 
 export namespace ses {
@@ -27,9 +23,7 @@ struct DipoleMatrixElement {
     std::complex<double> z;
 };
 
-// <f| r |i> component-wise: sum conj(f) * r * i * dV. Parallelized with
-// per-z-slab partial sums combined in a FIXED order, so the result is
-// deterministic run to run (the ses.parallel discipline).
+// Per-z-slab partials recombined in FIXED order -> deterministic run-to-run (ses.parallel).
 inline DipoleMatrixElement dipole_matrix_element(const Field3D& f, const Field3D& i) {
     const Grid3D& g = f.grid();
     const int nz = g.z.n;
@@ -68,7 +62,6 @@ inline constexpr double dipole_strength_sq(const DipoleMatrixElement& d) noexcep
     return std::norm(d.x) + std::norm(d.y) + std::norm(d.z);
 }
 
-// Einstein A coefficient (atomic units): the spontaneous decay rate.
 inline constexpr double einstein_a(double omega, double dipole_sq) noexcept {
     const double a3 = kFineStructureConstant * kFineStructureConstant *
                       kFineStructureConstant;
@@ -80,10 +73,7 @@ struct JumpResult {
     double p_jump{};
 };
 
-// One Poisson decay trial over dt: p = 1 - exp(-gamma * P_e * dt),
-// P_e = |<excited|psi>|^2; jump -> psi = ground. On survival psi is untouched
-// HERE -- callers add the MCWF no-jump H_eff damping separately (the app's
-// GPU path does). u in [0,1) is the caller's uniform draw.
+// On survival psi is untouched here; caller applies the MCWF no-jump H_eff damping separately.
 inline JumpResult quantum_jump(Field3D& psi, const Field3D& excited, const Field3D& ground,
                                double gamma, double dt, double u) {
     const double p_e = std::norm(inner_product(excited, psi));
@@ -95,10 +85,7 @@ inline JumpResult quantum_jump(Field3D& psi, const Field3D& excited, const Field
     return JumpResult{false, p};
 }
 
-// MCWF NO-JUMP over dt: c_n *= exp(-gamma_n * dt / 2), then renormalize
-// (non-Hermitian H_eff + renorm) -- the visible "breathe-out" between jumps.
-// Single source of truth the app's GPU apply_mcwf_damping mirrors in the
-// {|n>} basis.
+// GPU apply_mcwf_damping mirrors this in the {|n>} basis (single source of truth).
 inline std::vector<std::complex<double>> nojump_damped_amplitudes(
     const std::vector<std::complex<double>>& c, const std::vector<double>& gamma,
     double dt) {
@@ -118,33 +105,24 @@ inline std::vector<std::complex<double>> nojump_damped_amplitudes(
     return out;
 }
 
-// Running bound-survival multiplier for one real-time interval. The state
-// norm fell from `baseline` to `post_norm` because of (a) absorbed flux at
-// the walls (= ionization) AND (b) any KNOWN non-absorber loss such as the
-// MCWF H_eff damping above. Only (a) is ionization, so add the known loss
-// back before ratioing. bound_survival *= this; 1 - bound_survival is the
-// cumulative ionized fraction. Returns 1 (nothing escaped) if baseline<=0.
+// Only wall absorption (= ionization) is real loss; add MCWF-damping known_loss
+// back before ratioing. Caller: bound_survival *= this.
 inline double bound_survival_ratio(double post_norm, double known_loss,
                                    double baseline) {
     return baseline > 0.0 ? (post_norm + known_loss) / baseline : 1.0;
 }
 
-// ---- multi-channel jumps ----------------------------------------------------
-//
-// Channels compete as independent Poisson processes: channel m fires at rate
-// gamma_m * P_m, P_m = |<from_m|psi>|^2; total escape p = 1 - exp(-sum dt);
-// which channel fires is proportional to its rate. A jump collapses psi onto
-// the channel's |to>. Caller injects u1 (jump?) and u2 (which channel?).
+// ---- multi-channel jumps ----
 
 struct DecayChannel {
-    const Field3D* from;  // excited eigenstate
-    const Field3D* to;    // destination eigenstate
-    double gamma;         // Einstein A rate (0 = forbidden channel)
+    const Field3D* from;
+    const Field3D* to;
+    double gamma;
 };
 
 struct MultiJumpResult {
-    int channel{-1};   // fired channel index, or -1 for no jump
-    double p_total{};  // total jump probability over this interval
+    int channel{-1};
+    double p_total{};
 };
 
 struct ChannelPick {
@@ -152,10 +130,8 @@ struct ChannelPick {
     double p_total{};
 };
 
-// Pure selection arithmetic over precomputed rates r_m = gamma_m * P_m
-// (reused by the GPU shell on GPU-reduced populations). Zero-rate channels
-// occupy zero measure and can never be picked; the final fallthrough guards
-// u2 rounding at the top of the last stratum.
+// Pure selection over precomputed rates -- reused by the GPU shell on GPU-reduced
+// populations. Final fallthrough guards u2 rounding at the top of the last stratum.
 inline ChannelPick pick_decay_channel(const std::vector<double>& rates, double dt,
                                       double u1, double u2) noexcept {
     double total = 0.0;

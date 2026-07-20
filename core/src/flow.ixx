@@ -5,11 +5,8 @@ export module ses.flow;
 import ses.vec;
 
 
-// Probability current and the Bohmian velocity field it induces -- the physics
-// behind the streakline flow visualization (and the raw material for an <L_z>
-// diagnostic). Atomic units (hbar = m_e = 1). Vec3d arrives via import
-// ses.vec; std::complex rides in the GMF, so consumers naming it still
-// #include <complex> themselves.
+// Atomic units (hbar = m_e = 1). std::complex rides in the GMF (not exported):
+// consumers naming it must #include <complex> themselves.
 
 
 export namespace ses {
@@ -24,7 +21,7 @@ inline Vec3d probability_current(std::complex<double> psi, std::complex<double> 
     return Vec3d{jc(dpsi_dx), jc(dpsi_dy), jc(dpsi_dz)};
 }
 
-// Bohmian velocity v = j / rho (rho = |psi|^2), guarded at nodes where rho->0.
+// Bohmian velocity v = j / rho, rho = |psi|^2; guarded where rho->0 (nodes).
 inline Vec3d bohmian_velocity(std::complex<double> psi, std::complex<double> dpsi_dx,
                               std::complex<double> dpsi_dy,
                               std::complex<double> dpsi_dz) noexcept {
@@ -34,8 +31,7 @@ inline Vec3d bohmian_velocity(std::complex<double> psi, std::complex<double> dps
     return Vec3d{j.x * inv, j.y * inv, j.z * inv};
 }
 
-// Streakline trail fade: tail (v = 0, oldest) transparent -> head
-// (v = trail_len-1, newest) opaque. Linear ramp in [0, 1].
+// Trail fade: oldest tail transparent -> newest head opaque.
 inline double trail_fade(int v, int trail_len) noexcept {
     if (trail_len <= 1) {
         return 1.0;

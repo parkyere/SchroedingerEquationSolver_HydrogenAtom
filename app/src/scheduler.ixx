@@ -6,10 +6,7 @@ module;
 export module app.scheduler;
 
 
-// Wall-clock callback scheduler for the SDL main loop. after() fires once;
-// every() repeats until cancel(). poll(now_ms) runs due callbacks on the loop
-// thread; callbacks may schedule further work (the selftest arcs chain this
-// way).
+// Single-threaded: all methods run on the SDL loop thread (no locking).
 
 
 export namespace app {
@@ -36,8 +33,7 @@ public:
 
     void poll(std::uint64_t now_ms) {
         now_ = now_ms;
-        // Index loop: callbacks may push_back new entries (they run NEXT poll
-        // at the earliest, so newly due work never runs inside this pass).
+        // Cached n: callbacks may push_back; those entries run next poll, not now.
         const std::size_t n = entries_.size();
         for (std::size_t i = 0; i < n; ++i) {
             Entry& e = entries_[i];
@@ -46,11 +42,11 @@ public:
             }
             if (e.period_ms > 0) {
                 e.due = now_ms + e.period_ms;
-                e.fn();  // repeating: fires and re-arms
+                e.fn();
             } else {
                 auto fn = std::move(e.fn);
                 e.fn = nullptr;
-                fn();  // one-shot: consumed
+                fn();
             }
         }
         std::erase_if(entries_, [](const Entry& e) { return !e.fn; });

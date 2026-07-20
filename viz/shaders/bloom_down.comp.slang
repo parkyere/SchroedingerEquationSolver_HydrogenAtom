@@ -1,8 +1,5 @@
-// Dual-filter (Kawase) downsample for the bloom chain: 4 diagonal taps + a
-// weighted center, sampled with LINEAR filtering half a texel out so each
-// tap integrates 4 texels. The first pass in the chain also applies a soft
-// bright-pass threshold so only the luminous cloud core blooms.
-[[vk::binding(0, 0)]] Sampler2D<float4> src;  // combined image sampler
+// Kawase dual-filter downsample: half-texel corner offsets make each bilinear tap average 4 texels; center weighted x4 + 4 unit corner taps, /8 normalizes.
+[[vk::binding(0, 0)]] Sampler2D<float4> src;
 [[vk::binding(1, 0)]] [[vk::image_format("rgba16f")]] RWTexture2D<float4> dst;
 
 struct Params {
@@ -34,7 +31,6 @@ void main(uint3 gid : SV_DispatchThreadID) {
     float3 c = sum / 8.0;
 
     if (params.bright_pass != 0) {
-        // Soft knee: keep everything above the threshold, feather below.
         float lum = max(c.r, max(c.g, c.b));
         float wgt = max(lum - params.threshold, 0.0);
         wgt = wgt / max(lum, 1e-4);

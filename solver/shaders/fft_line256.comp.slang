@@ -1,9 +1,6 @@
-// Shared-memory radix-2 line FFT at N=256 (NHALF=128, LOG2N=8), the size for
-// a 256^3 app grid. The SPIR-V is baked offline at a fixed size, so N is a
-// concrete constant here. One workgroup of NHALF threads handles one line;
-// the std140 UBO's line-enumeration uniforms select the lines (axis).
-// See fft_line64.comp for the stage layout. A standalone 1-D FFT check drives
-// it with n_lines=1, stride=1, base=0.
+// Radix-2 line FFT, N=256 (NHALF=128, LOG2N=8; bit_reverse uses 32-8). SPIR-V baked offline at fixed size => N is a concrete constant (256^3 grid). See fft_line64.comp for stage layout.
+// numthreads=128 (=N/2): one workgroup per line, each thread does a 2-elem butterfly.
+// Params enumerate lines along an axis; n_lines=1,stride=1,base=0 = plain 1-D FFT.
 import complex;
 
 [[vk::binding(0, 0)]] RWStructuredBuffer<Complex, Std430DataLayout> data;

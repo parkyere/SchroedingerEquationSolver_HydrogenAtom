@@ -1,7 +1,5 @@
-// Ehrenfest force <grad V> = sum |psi|^2 grad V: psi (binding 0) folded
-// against CENTRAL DIFFERENCES of the scalar potential (binding 4, R32),
-// computed in-shader on the periodic grid. One vec4 partial per workgroup
-// (binding 2); the host sums.
+// Ehrenfest force <grad V> = sum |psi|^2 grad V: central differences of the
+// R32 potential on the periodic grid; host sums per-workgroup partials.
 import complex;
 
 [[vk::binding(0, 0)]] StructuredBuffer<Complex, Std430DataLayout> psi;

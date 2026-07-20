@@ -12,9 +12,8 @@ import ses.colormap;
 import ses.vec;
 
 
-// Volume-rendering math. The shader ray marcher mirrors these formulas
-// line-by-line; correctness is pinned HERE (tests/volume_test.cpp) because
-// shaders cannot be unit-tested.
+// Shader ray marcher mirrors these formulas; correctness pinned here
+// (tests/volume_test.cpp) since shaders can't be unit-tested.
 
 
 export namespace ses {
@@ -25,8 +24,7 @@ struct RayHit {
     double t_far{};
 };
 
-// Slab-method ray/AABB intersection. Returns the RAW parameter interval:
-// t_near < 0 means the ray starts inside; callers clamp with max(t_near, 0).
+// Slab method. Raw interval: t_near < 0 means origin inside; caller clamps max(t_near, 0).
 inline constexpr RayHit ray_box(Vec3d origin, Vec3d dir, Vec3d box_min, Vec3d box_max) noexcept {
     double t_near = -std::numeric_limits<double>::infinity();
     double t_far = std::numeric_limits<double>::infinity();
@@ -39,9 +37,9 @@ inline constexpr RayHit ray_box(Vec3d origin, Vec3d dir, Vec3d box_min, Vec3d bo
     for (int axis = 0; axis < 3; ++axis) {
         if (d[axis] == 0.0) {
             if (o[axis] < lo[axis] || o[axis] > hi[axis]) {
-                return RayHit{false, 0.0, 0.0};  // parallel outside the slab
+                return RayHit{false, 0.0, 0.0};
             }
-            continue;  // parallel inside: no constraint from this slab
+            continue;
         }
         double t1 = (lo[axis] - o[axis]) / d[axis];
         double t2 = (hi[axis] - o[axis]) / d[axis];
@@ -57,8 +55,7 @@ inline constexpr RayHit ray_box(Vec3d origin, Vec3d dir, Vec3d box_min, Vec3d bo
     return RayHit{true, t_near, t_far};
 }
 
-// Ray/sphere intersection (dir must be unit length). Raw [t_near, t_far]:
-// t_near < 0 when the ray starts inside; tangent rays report t_near == t_far.
+// dir must be unit length. Raw interval: t_near < 0 when origin inside; tangent -> t_near == t_far.
 inline RayHit ray_sphere(Vec3d origin, Vec3d dir, Vec3d center, double radius) noexcept {
     const Vec3d oc = origin - center;
     const double b = dot(oc, dir);
@@ -71,7 +68,7 @@ inline RayHit ray_sphere(Vec3d origin, Vec3d dir, Vec3d center, double radius) n
     return RayHit{true, -b - s, -b + s};
 }
 
-// Beer-Lambert emission-absorption opacity of one ray-march step.
+// Beer-Lambert opacity of one step.
 inline double sample_alpha(double density01, double absorbance, double step) noexcept {
     return 1.0 - std::exp(-absorbance * density01 * step);
 }
@@ -88,9 +85,7 @@ struct VolumeSample {
     double alpha{};
 };
 
-// Premultiplied front-to-back accumulation:
-//     C += (1 - A) a c,   A += (1 - A) a.
-// Early exit once A saturates is a pure optimization (weights vanish).
+// Premultiplied front-to-back compositing; the saturation early-out is a pure optimization.
 inline Rgba composite_front_to_back(const std::vector<VolumeSample>& samples) noexcept {
     Rgba out{};
     for (const VolumeSample& s : samples) {
@@ -106,8 +101,7 @@ inline Rgba composite_front_to_back(const std::vector<VolumeSample>& samples) no
     return out;
 }
 
-// The tested cyclic phase colormap baked into a lookup table (bin centers),
-// so the GPU samples verified colors instead of a re-derived formula.
+// phase_color baked to a LUT at bin centers so the GPU samples verified colors, not a re-derived formula.
 inline std::vector<Rgb> phase_lut(int n) {
     std::vector<Rgb> lut(static_cast<std::size_t>(n));
     for (int i = 0; i < n; ++i) {

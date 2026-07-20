@@ -1,9 +1,7 @@
-// Shared-memory radix-2 line FFT at N=512 (NHALF=256, LOG2N=9), the size for
-// a 512 x 512 x 1 planar grid (the 2D scenes' shape). The SPIR-V is baked
-// offline at a fixed size, so N is a concrete constant here. One workgroup of
-// NHALF threads handles one line; the std140 UBO's line-enumeration uniforms
-// select the lines (axis). See fft_line64.comp for the stage layout.
-// 4 KB of groupshared (512 x float2) -- well under every device's LDS floor.
+// Shared-memory radix-2 FFT, N=512; one workgroup = one line, 256 threads x 2 pts.
+// params map a flat line index -> strided base, selecting the grid axis.
+// N is a compile-time constant: SPIR-V baked offline at fixed size. See fft_line64 for stage layout.
+// 4 KB groupshared (512 x float2) -- under every device's LDS floor.
 import complex;
 
 [[vk::binding(0, 0)]] RWStructuredBuffer<Complex, Std430DataLayout> data;

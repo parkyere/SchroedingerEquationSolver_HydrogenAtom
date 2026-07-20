@@ -12,21 +12,16 @@ export import ses.fft;
 export import ses.field;
 
 
-// Time-dependent dipole drive: V_drive = amplitude * (axis . r) * cos(omega t).
-// Enters the Strang step as half-kicks AROUND the untouched static tables,
-//     psi <- kick(t0+dt) . halfV . IFFT . kinetic . FFT . halfV . kick(t0),
-// which keeps global O(dt^2) accuracy.
-
-
+// V_drive = amplitude*(axis.r)*cos(omega t); dipole half-kicks wrap prop's
+// static Strang split-step, preserving O(dt^2).
 export namespace ses {
 
 struct DipoleDrive {
-    Vec3d axis;          // polarization direction (need not be unit; scales E0)
-    double amplitude{};  // field strength E0 (atomic units)
-    double omega{};      // angular frequency; 0 = static field
+    Vec3d axis;          // polarization; need not be unit (scales E0)
+    double amplitude{};  // E0, atomic units
+    double omega{};
 };
 
-// psi *= exp(-i * theta * (axis . r)) with theta = amplitude cos(omega t) dt/2.
 inline void apply_dipole_halfkick(Field3D& psi, const DipoleDrive& d, double t, double dt) noexcept {
     const double theta = d.amplitude * std::cos(d.omega * t) * 0.5 * dt;
     const Grid3D& g = psi.grid();
@@ -54,8 +49,6 @@ inline void multiply_table(Field3D& psi, const std::vector<std::complex<double>>
 
 }  // namespace drive_detail
 
-// Driven Strang steps built from the TESTED static tables of `prop` plus the
-// dipole half-kicks. t0 is the physical time at the start of the first step.
 inline void driven_step(Field3D& psi, const SplitOperator3D& prop, const DipoleDrive& d,
                         double t0, int nsteps) {
     const double dt = prop.dt();

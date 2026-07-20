@@ -11,26 +11,20 @@ module;
 export module ses.parallel;
 
 
-// The project's own worker-pool parallelism, replacing OpenMP: MSVC silently
-// miscompiles `#pragma omp` inside an exported module function (zero output)
-// and crashes on heavy omp in module interfaces, so CPU parallel loops use
-// this plain-C++20 pool instead. Chunk boundaries depend only on n and
-// reduction partials combine in chunk order, so results are bitwise-identical
-// for any worker count or machine (the CPU is the oracle: determinism first).
+// Worker pool, not OpenMP: MSVC miscompiles `#pragma omp` in an exported module
+// interface. Chunk boundaries depend only on n; partials combine in chunk order
+// -> bitwise-identical across worker count and machine (determinism contract).
 
 
 namespace ses::par_detail {
 
-// One region at a time; the caller participates as worker 0 and pool threads
-// are workers 1..W-1. Chunks are dealt by an atomic counter; the region ends
-// only after every participant has LEFT the job (no dangling stack reads).
+// One region at a time (region_mutex_); caller is worker 0, pool threads 1..W-1.
+// Region ends only after every participant leaves the Job -> no dangling stack reads.
 class Pool {
 public:
     Pool() {
         const unsigned hc = std::thread::hardware_concurrency();
         workers_ = static_cast<int>(hc == 0 ? 1 : hc);
-        // Debug/repro override; results are worker-count-invariant by design,
-        // so this only trades speed, never values.
         if (const char* env = std::getenv("SES_PARALLEL_WORKERS")) {
             const int v = std::atoi(env);
             if (v >= 1) {
@@ -38,7 +32,7 @@ public:
             }
         }
         ids_.resize(static_cast<std::size_t>(workers_));
-        ids_[0] = std::thread::id{};  // slot 0 = whichever thread coordinates
+        ids_[0] = std::thread::id{};  // slot 0 = coordinator
         for (int w = 1; w < workers_; ++w) {
             threads_.emplace_back([this, w](std::stop_token st) { worker_loop(st, w); });
             ids_[static_cast<std::size_t>(w)] = threads_.back().get_id();
@@ -47,8 +41,7 @@ public:
 
     int workers() const noexcept { return workers_; }
 
-    // Index of the calling thread inside the pool (coordinator -> 0), or -1
-    // if the caller is an outside thread with no active region.
+    // Calling thread's pool index (coordinator -> 0), or -1 if outside any region.
     int current_worker() const noexcept {
         const std::thread::id me = std::this_thread::get_id();
         if (me == coordinator_.load(std::memory_order_acquire)) {
@@ -62,9 +55,8 @@ public:
         return -1;
     }
 
-    // fn(chunk, worker). Nested calls (from inside a running region) execute
-    // serially on the caller's own worker slot -- no deadlock, scratch stays
-    // exclusive.
+    // fn(chunk, worker). Nested call (inside a running region) runs serially on
+    // the caller's slot -- no deadlock, scratch stays exclusive.
     void run(int chunks, const std::function<void(int, int)>& fn) {
         if (chunks <= 0) {
             return;
@@ -86,8 +78,8 @@ public:
         }
         cv_.notify_all();
         work(job, 0);
-        // Symmetric spin: with back-to-back micro-regions the last worker
-        // exits within microseconds, so sleeping here would pay a wakeup.
+        // Spin first: back-to-back micro-regions finish in microseconds; sleeping
+        // here would pay a needless wakeup.
         for (int s = 0; s < kSpin; ++s) {
             if (job.exited.load(std::memory_order_acquire) == workers_) {
                 break;
@@ -111,10 +103,8 @@ private:
         std::atomic<int> exited{0};
     };
 
-    // Spin budget before a kernel sleep: idle cores in deep C-states take
-    // tens of microseconds to wake, which dominates the micro-regions the
-    // relaxation loops issue back-to-back (the OpenMP runtime spins for the
-    // same reason). Idle pools still park: the spin is bounded, then cv-sleep.
+    // Spin budget before kernel sleep: waking a deep-C-state core costs tens of us,
+    // dominating back-to-back micro-regions. Bounded, then cv-sleep so idle pools park.
     static constexpr int kSpin = 1 << 15;
 
     void work(Job& job, int worker) {
@@ -134,7 +124,7 @@ private:
     void worker_loop(std::stop_token st, int worker) {
         std::uint64_t seen = 0;
         for (;;) {
-            // Fast path: spin on the generation counter, no lock, no herd.
+            // Fast path: spin gen_, no lock, no thundering herd.
             bool woke = false;
             for (int s = 0; s < kSpin; ++s) {
                 if (gen_.load(std::memory_order_acquire) != seen) {
@@ -170,27 +160,22 @@ private:
     std::atomic<std::uint64_t> gen_{0};
     std::atomic<Job*> job_{nullptr};
     std::atomic<std::thread::id> coordinator_{};
-    // LAST member, deliberately: members destroy in reverse order, so the
-    // jthreads stop and join (their stop_callback notifies cv_) while every
-    // mutex/cv above is still alive. Declared earlier, ~cv_ would run with
-    // workers parked on it -- UB that HANGS at process exit on glibc.
+    // LAST member on purpose: reverse destruction order joins the jthreads (their
+    // stop_callback notifies cv_) while the mutexes/cvs above are still alive.
+    // Declared earlier, ~cv_ would run with workers parked -> UB that HANGS at exit.
     std::vector<std::jthread> threads_;
 };
 
-// NON-inline on purpose: an `inline` function in a module interface is
-// instantiated per importing TU, and MSVC can DUPLICATE its function-local
-// static across those instantiations -- two Pool objects, one of them
-// never constructed, and a worker dereferences a null mutex at runtime
-// (bit us via the 2D lattice scenes; kin of the OpenMP-in-module-interface
-// miscompile this pool replaced). A module-linkage function is compiled
-// exactly once, so there is exactly ONE pool.
+// NON-inline on purpose: an `inline` function in a module interface is instantiated
+// per importing TU, and MSVC can DUPLICATE its function-local static -> two Pools,
+// one unconstructed, worker derefs a null mutex. Module-linkage = compiled once = one pool.
 Pool& pool() {
-    static Pool p;  // jthread: stops and joins at static destruction
+    static Pool p;
     return p;
 }
 
-// <= 64 chunks whose boundaries depend only on n (never on worker count).
-// 64-bit intermediate: (n + 63) must not wrap for n near INT_MAX.
+// <= 64 chunks; boundaries depend only on n, never on worker count (determinism).
+// int64 intermediate: (n + 63) must not wrap for n near INT_MAX.
 inline int chunk_size(int n) noexcept {
     return static_cast<int>((static_cast<std::int64_t>(n) + 63) / 64);
 }
@@ -218,8 +203,8 @@ void parallel_for(int n, Body&& body) {
     });
 }
 
-// init + sum of body(i) over [0, n): serial within each fixed chunk, chunk
-// partials combined in chunk order -> bitwise-deterministic reduction.
+// init + sum of body(i) over [0, n); chunk partials combined in chunk order
+// -> bitwise-deterministic reduction.
 template <class T, class Body>
 T parallel_sum(int n, T init, Body&& body) {
     const int cs = par_detail::chunk_size(n);
@@ -240,9 +225,9 @@ T parallel_sum(int n, T init, Body&& body) {
     return result;
 }
 
-// body(worker, begin, end) over disjoint chunks covering [0, n). The worker
-// index keys per-worker scratch reused across chunks (thread_local, made
-// explicit); outputs must depend on [begin, end) only, never on `worker`.
+// body(worker, begin, end) over disjoint chunks covering [0, n). worker keys
+// per-worker scratch (thread_local made explicit); outputs depend on [begin, end)
+// only, never on worker.
 template <class Body>
 void parallel_ranges(int n, Body&& body) {
     const int cs = par_detail::chunk_size(n);

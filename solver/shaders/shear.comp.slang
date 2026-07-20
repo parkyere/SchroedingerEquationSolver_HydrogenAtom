@@ -1,9 +1,6 @@
-// One shear of the three-shear exact rotation (magnetic paramagnetic term).
-// In the mixed representation -- FFT'd along freq_axis, real along coord_axis
-// -- each element gets a phase exp(-i k_f * coeff * coord), shifting every
-// line by coeff times its perpendicular coordinate. std140 UBO carries the
-// grid + shear geometry (binding 1); scalars pack tightly, so the block
-// matches the host struct field order.
+// One shear of the three-shear exact rotation (paramagnetic): in mixed rep
+// (FFT freq_axis, real coord_axis) a coordinate shift becomes a phase multiply.
+// std140 Params must match host struct field order (packing contract).
 import complex;
 import grid;
 
@@ -14,13 +11,13 @@ struct Params {
     int nx;
     int ny;
     int nz;
-    int freq_axis;   // 0=x,1=y,2=z: the FFT (freq) axis
-    int coord_axis;  // the shift-coordinate axis (perpendicular)
-    int nf;          // length of the freq axis
+    int freq_axis;   // 0=x,1=y,2=z
+    int coord_axis;
+    int nf;
     float kscale;    // 2*pi / L_freq
-    float cmin;      // shift-coordinate axis min
-    float ch;        // shift-coordinate axis spacing
-    float coeff;     // shear coefficient
+    float cmin;
+    float ch;
+    float coeff;
 };
 [[vk::binding(1, 0)]] ConstantBuffer<Params, Std140DataLayout> params;
 
@@ -35,9 +32,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
     int e[3] = { v.x, v.y, v.z };
     int f = e[params.freq_axis];
     int p = e[params.coord_axis];
-    // 2f < nf (not f < nf/2): keeps DC at 0 for nf = 1 -- the CPU-side
-    // wavenumbers contract; identical for every even nf.
-    int sf = (2 * f < params.nf) ? f : f - params.nf;  // signed fftfreq
+    // 2f<nf (not f<nf/2): keeps DC=0 at nf=1; matches CPU fftfreq contract.
+    int sf = (2 * f < params.nf) ? f : f - params.nf;
     float kf = params.kscale * float(sf);
     float d = params.coeff * (params.cmin + float(p) * params.ch);
     psi[idx] = psi[idx] * cis(-kf * d);

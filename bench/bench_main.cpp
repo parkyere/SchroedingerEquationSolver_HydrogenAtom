@@ -1,7 +1,4 @@
-// Micro-benchmark for the per-frame hot path. NOT part of ctest (timing is
-// machine-dependent); correctness is owned by the unit tests. Run manually:
-//     sesolver_bench
-// prints per-operation wall times at 32^3 and 64^3.
+// Micro-benchmark for the per-frame hot path; not in ctest (machine-dependent timing). Run: sesolver_bench
 
 
 #include <chrono>

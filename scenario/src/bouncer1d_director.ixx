@@ -14,22 +14,17 @@ import ses.observables;
 import ses.wavepacket;
 
 
-// Quantum bouncer: a particle on a hard floor under gravity, V = g z
-// (z >= 0) with a steep linear wall below -- the GRANIT experiment's
-// geometry (ultracold neutrons bounce on a mirror; the bound states are
-// Airy functions, E_n = a_n (g^2/2)^{1/3} with -a_n the Airy zeros).
-// [2] relaxes the Airy ground in-place (a 1D ITP is instant); [F] drops
-// a packet from height and it bounces, dephases, and revives.
+// Quantum bouncer (GRANIT): gravity + mirror wall, Airy bound states.
 // CONTRACT: tests/bouncer1d_test.cpp + --selftest-bouncer.
 
 
 export namespace ses_shell {
 
-// Airy zeros a_1, a_2 (Ai(-a_n) = 0).
+// Ai(-a_n) = 0.
 inline constexpr double kAiryZero1 = 2.33810741045977;
 inline constexpr double kAiryZero2 = 4.08794944413097;
 
-// E_n = a_n (g^2 / 2)^{1/3} for the ideal hard floor (m = hbar = 1).
+// Ideal hard-floor oracle (m = hbar = 1).
 inline double bouncer_energy(double g, double a_n) {
     return a_n * std::cbrt(g * g / 2.0);
 }
@@ -46,10 +41,8 @@ inline std::vector<double> bouncer_potential(const ses::Grid1D& g,
     return v;
 }
 
-// Sub-floor reach and dt sized for the WALL's real-time Trotter phase:
-// the Airy tail only penetrates ~0.15 Bohr, but V dt at the box lip must
-// stay well under a radian or the ground HEATS visibly (measured +0.8 Ha
-// over ~4 s at dt = 0.01 with a -2 lip; the benzene dt rule).
+// dt sized by the wall's Trotter phase, not resolution: V*dt at the box
+// lip must stay << 1 rad or the ground heats (benzene dt rule).
 constexpr double kBo1dZLo = -1.0;
 constexpr double kBo1dZHi = 79.0;
 constexpr int kBo1dPoints = 2048;
@@ -75,10 +68,8 @@ public:
 
     BouncerApi* bouncer() override { return this; }
 
-    // ---- BouncerApi ----
-    // Instant synchronous ITP anneal (a 2048-pt line costs ~0.2 s):
-    // coarse settle, fine polish (the corral rule -- one big dtau alone
-    // carries a visible Trotter bias).
+    // Two-stage ITP anneal: fine polish clears the coarse dtau's Trotter
+    // bias (corral rule).
     void relax_ground() override {
         const ses::ImaginaryTimePropagator1D coarse{grid1d_, potential_,
                                                     0.005};

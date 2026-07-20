@@ -1,8 +1,5 @@
-// Pack a complex fp32 field (src, binding 0) to fp16 storage (dst uint per
-// cell, binding 6) via packHalf2x16 -- halves the resident-state atlas
-// footprint versus fp32. The GLSL builtin (Slang's glsl module) maps to the
-// GLSL.std.450 PackHalf2x16 op, so it needs NO shaderFloat16 capability
-// (f32tof16 would emit one). std140 UBO n (1).
+// fp16 pack halves the resident-state atlas footprint.
+// packHalf2x16 (glsl module -> GLSL.std.450 op) needs no shaderFloat16 capability; f32tof16 would emit one.
 import glsl;
 
 [[vk::binding(0, 0)]] StructuredBuffer<float2, Std430DataLayout> src;

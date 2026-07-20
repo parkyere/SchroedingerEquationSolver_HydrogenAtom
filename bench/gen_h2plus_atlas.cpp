@@ -1,9 +1,5 @@
-// Offline code generator: solves the exact prolate-spheroidal H2+ atlas
-// (ses.spheroidal) across the whole snapped-R slider range and emits it as a
-// constexpr data module (core/src/h2plus_atlas_data.ixx). The scene then
-// LOADS the baked atlas -- zero runtime ODE solve. Regenerate with:
-//   sesolver_genatlas core/src/h2plus_atlas_data.ixx
-// (This is our own physics codegen, in the spirit of the offline slangc bake.)
+// Offline codegen: bakes the exact prolate-spheroidal H2+ atlas (ses.spheroidal)
+// at fixed R to a constexpr module -- scene loads it instead of ODE-solving at runtime.
 
 #include <algorithm>
 #include <cmath>
@@ -15,14 +11,11 @@ import ses.spheroidal;
 
 namespace {
 
-constexpr int kProf = 48;    // baked profile samples (linear-interp synthesis)
+constexpr int kProf = 48;
 constexpr int kMaxOrb = 60;  // candidate cap; representability filters at load
-// R is a FIXED physical constant (H2+ equilibrium ~2.0 bohr), snapped to the
-// scene's grid: snap_r(2.0) at kH2pBox=40/256^3 = 1.875 bohr. A single baked
-// R (the loader's nearest-match returns it for any query).
+// snap_r(2.0 bohr H2+ equilibrium) at kH2pBox=40/256^3 -> 1.875.
 constexpr double kFixedR = 1.875;
 
-// Linear resample of a uniform-grid profile to n_out points (endpoints kept).
 std::vector<double> resample(const std::vector<double>& y, int n_out) {
     std::vector<double> out(static_cast<std::size_t>(n_out), 0.0);
     const int n = static_cast<int>(y.size());
@@ -67,14 +60,12 @@ int main(int argc, char** argv) {
         "constexpr int kMaxOrb = %d;\n",
         nR, kProf, kMaxOrb);
 
-    // R grid.
     std::fprintf(f, "constexpr double kRgrid[kNR] = {");
     for (int i = 0; i < nR; ++i) {
         std::fprintf(f, "%s%.6f", i ? "," : "", rs[static_cast<std::size_t>(i)]);
     }
     std::fprintf(f, "};\n");
 
-    // Solve every R, capture the tables.
     std::vector<std::vector<ses::H2plusOrbital>> perR(static_cast<std::size_t>(nR));
     std::vector<int> counts(static_cast<std::size_t>(nR), 0);
     for (int i = 0; i < nR; ++i) {
@@ -95,7 +86,6 @@ int main(int argc, char** argv) {
     }
     std::fprintf(f, "};\n");
 
-    // Per-orbital scalars: m, n_eta, n_xi, parity, energy, xi_max.
     std::fprintf(f, "struct BakedOrb { int m, n_eta, n_xi, parity; "
                     "double energy, xi_max; };\n");
     std::fprintf(f, "constexpr BakedOrb kOrb[kNR][kMaxOrb] = {\n");
@@ -115,7 +105,6 @@ int main(int argc, char** argv) {
     }
     std::fprintf(f, "};\n");
 
-    // Profiles M(eta), Lambda(xi) resampled to kProf.
     auto emit_profiles = [&](const char* name, bool radial) {
         std::fprintf(f, "constexpr double %s[kNR][kMaxOrb][kProf] = {\n", name);
         for (int i = 0; i < nR; ++i) {
@@ -141,7 +130,6 @@ int main(int argc, char** argv) {
     emit_profiles("kM", false);
     emit_profiles("kLam", true);
 
-    // Loader: nearest baked R -> reconstructed orbitals for synthesis.
     std::fprintf(f,
         "}  // namespace ses::h2p_baked\n\n"
         "export namespace ses {\n"

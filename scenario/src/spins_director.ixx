@@ -18,25 +18,19 @@ export import ses.spinexact;
 import ses.vk.spin_engine;
 
 
-// 25 pinned electron spins, INTERACTING through the mean-field
-// Heisenberg exchange (ses.spinlattice: product ansatz -- honestly a
-// quantum-dressed classical Heisenberg/LLG lattice, no entanglement):
-// each site is a small Bloch sphere with its own <sigma> arrow. J > 0
-// orders ferro (watch a random boot comb itself into alignment under
-// damping), J < 0 weaves the Neel checkerboard; alpha = 0 shows spin
-// waves rippling forever; [M] Born-projects EVERY site onto +-B_hat.
+// Heisenberg spin lattice: mean-field product (no entanglement) vs exact 2^16.
 // CONTRACT: tests/spinlattice_test.cpp (core) + --selftest-spins.
 // volk.h textually first: VK_* macros never cross module boundaries.
 
 
 export namespace ses_shell {
 
-constexpr int kSlN = 4;              // 4 x 4 (= the exact 2^16 stage)
+constexpr int kSlN = 4;              // 16 sites -> 2^16 exact state
 constexpr double kSlDt = 0.002;
 constexpr int kSlStepsPerTick = 20;
-constexpr int kSlExactSteps = 8;     // exact steps cost ~1.7 ms apiece
-constexpr double kSlR = 3.2;         // per-site sphere radius
-constexpr double kSlPitch = 8.0;     // lattice spacing on screen
+constexpr int kSlExactSteps = 8;     // ~1.7 ms per exact step
+constexpr double kSlR = 3.2;
+constexpr double kSlPitch = 8.0;
 constexpr double kSlJ = 0.5;
 constexpr double kSlAlpha = 0.05;
 
@@ -61,7 +55,7 @@ public:
     double j() const override { return j_; }
     void set_alpha(double a) override {
         alpha_ = std::clamp(a, 0.0, 0.3);
-        title_dirty_ = true;  // closed-system exact GPU ignores alpha
+        title_dirty_ = true;  // no sync_gpu_params: closed exact GPU has no alpha
     }
     double alpha() const override { return alpha_; }
     void set_b(int axis, double v) override {
@@ -129,10 +123,7 @@ public:
     }
 
     // ---- the exact/mean-field switch ----
-    // Exact -> mean-field: each arrow COLLAPSES to a unit product spin
-    // (direction kept, entanglement discarded -- that is the honest
-    // meaning of the ansatz). Mean-field -> exact: the product embeds
-    // losslessly.
+    // exact->product: keep site direction, drop entanglement; product->exact: lossless.
     void set_exact(bool on) override {
         if (on == exact_mode_) {
             return;
@@ -178,8 +169,7 @@ public:
 
     // ---- lifecycle / frame ----
     const ses::Grid3D& grid() const override { return grid_; }
-    // Build the GPU exact-spin accelerator when a device is available; on
-    // any failure gpu_ready_ stays false and the CPU exact_step carries it.
+    // GPU exact accelerator; on any failure gpu_ready_ stays false and CPU carries it.
     void init_compute(ses_vk::DeviceContext& ctx, bool device_ok,
                       std::int64_t) override {
         compute_attempted_ = true;
@@ -193,8 +183,7 @@ public:
         gpu_ready_ = false;
     }
     bool compute_attempted() const override { return compute_attempted_; }
-    // The GPU here only accelerates the EXACT step; the scene still runs
-    // (on CPU) without it, so the shell's "gpu scene" gate stays false.
+    // GPU accelerates only the exact step; scene runs on CPU without it, so this stays false.
     bool gpu_ok() const override { return false; }
 
     void run_frame() override {
@@ -202,8 +191,7 @@ public:
             const int n = pending_steps_;
             pending_steps_ = 0;
             if (exact_mode_ && gpu_ready_) {
-                // GPU evolves the 2^16 state; readback keeps exact_
-                // current for the CPU-side Bloch reduction + measurement.
+                // readback keeps exact_ current for CPU Bloch reduction + measurement.
                 gpu_.step(n);
                 const float* st = gpu_.state();
                 for (std::size_t m = 0; m < exact_.c.size(); ++m) {
@@ -213,8 +201,7 @@ public:
             } else {
                 for (int k = 0; k < n; ++k) {
                     if (exact_mode_) {
-                        // Exact mode is a CLOSED quantum system: alpha does
-                        // not apply (dissipation needs an environment).
+                        // exact = closed system: alpha unused.
                         ses::exact_step(exact_, b_[0], b_[1], b_[2], j_,
                                         kSlDt);
                     } else {
@@ -258,8 +245,7 @@ public:
         std::uniform_real_distribution<double> uni(0.0, 1.0);
         int plus = 0;
         if (exact_mode_) {
-            // Rotate every site so B_hat -> z, Born-measure the bits
-            // sequentially (the correct joint sampling), rotate back.
+            // rotate B_hat->z, Born-measure bits sequentially (correct joint sampling), rotate back.
             const double th = std::acos(std::clamp(nz, -1.0, 1.0));
             const double axn = std::hypot(-ny, nx);
             const double ax = axn > 1e-12 ? -ny / axn : 1.0;
@@ -275,7 +261,7 @@ public:
             for (int i = 0; i < kSlN * kSlN; ++i) {
                 ses::exact_site_rotate(exact_, i, ax, ay, 0.0, th);
             }
-            push_exact_to_gpu();  // the collapse must reach the GPU state
+            push_exact_to_gpu();  // collapse must reach the GPU state
         } else {
             for (auto& s : lat_.s) {
                 plus += ses::spin_measure(s, nx, ny, nz, uni(rng_)) > 0
@@ -357,7 +343,7 @@ public:
         return s;
     }
 
-    // Glassy Bloch spheres, one per site (the fresnel marker pass).
+    // one Bloch sphere per site (fresnel marker pass).
     int marker_count() const override { return kSlN * kSlN; }
     SceneMarker marker(int i) const override {
         double cx = 0.0;
@@ -367,7 +353,7 @@ public:
                 static_cast<float>(kSlR), 0.55f, 0.75f, 0.95f};
     }
 
-    // 2 rings per site (static) + 1 arrow per site (live).
+    // per site: 2 static rings + 1 live arrow.
     int overlay_curve_count() const override {
         return 3 * kSlN * kSlN;
     }
@@ -404,7 +390,7 @@ private:
 
     void after_seed(const char* what) {
         if (exact_mode_) {
-            exact_ = ses::exact_from_product(lat_);  // fresh product boot
+            exact_ = ses::exact_from_product(lat_);
             push_exact_to_gpu();
         }
         refresh_bloch();
@@ -415,8 +401,6 @@ private:
         title_dirty_ = true;
     }
 
-    // Keep the resident GPU state in sync with the CPU-side exact_ (after
-    // a seed / mode-switch / measurement); no-op without a GPU.
     void push_exact_to_gpu() {
         if (gpu_ready_) {
             gpu_.upload(exact_.c);
@@ -458,11 +442,11 @@ private:
                     const double th = 2.0 * kPi * t / 32.0;
                     const double a = kSlR * std::cos(th);
                     const double b = kSlR * std::sin(th);
-                    if (part == 0) {  // ring about z (xy circle)
+                    if (part == 0) {  // ring about z
                         r.push_back(static_cast<float>(cx + a));
                         r.push_back(static_cast<float>(cy + b));
                         r.push_back(0.0f);
-                    } else {  // ring about x (yz circle)
+                    } else {  // ring about x
                         r.push_back(static_cast<float>(cx));
                         r.push_back(static_cast<float>(cy + a));
                         r.push_back(static_cast<float>(b));
@@ -478,8 +462,7 @@ private:
             double cx = 0.0;
             double cy = 0.0;
             site_center(site, &cx, &cy);
-            // Exact mode: |<sigma>| < 1 when entangled -- the arrow
-            // honestly SHRINKS.
+            // Exact mode: |<sigma>| < 1 when entangled -> arrow shrinks.
             const double x = bloch_[static_cast<std::size_t>(3 * site)];
             const double y =
                 bloch_[static_cast<std::size_t>(3 * site + 1)];
@@ -509,12 +492,11 @@ private:
                       ses::Grid1D{-25.0, 25.0, 2},
                       ses::Grid1D{-25.0, 25.0, 2}};
     ses::SpinLattice lat_;
-    ses::SpinState16 exact_;  // the full 2^16 wavefunction (exact mode)
+    ses::SpinState16 exact_;
     bool exact_mode_ = false;
-    ses_vk::SpinEngine gpu_;   // GPU accelerator for exact_step (optional)
+    ses_vk::SpinEngine gpu_;
     bool gpu_ready_ = false;
-    // Per-site Bloch vectors (3 doubles/site), refreshed each frame from
-    // whichever engine is live -- the single display source.
+    // per-site Bloch vectors [3/site], refreshed each frame from the live engine.
     std::vector<double> bloch_ =
         std::vector<double>(3 * kSlN * kSlN, 0.0);
     double b_[3] = {0.0, 0.0, 0.2};

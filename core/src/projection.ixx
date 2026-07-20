@@ -8,53 +8,44 @@ export module ses.projection;
 export import ses.grid;
 export import ses.radial;
 export import ses.field;
-export import ses.harmonics;  // real_spherical_harmonic
+export import ses.harmonics;
 
 
-// Orbital-free projection: every amplitude <n|psi> over the tracked manifold
-// with no resident 3-D orbital atlas. Central V factorizes |n> = (u_nl/r) Y_lm,
-// so ONE grid pass (independent of the state count) deposits
-// g_lm[c][j] = sum_cells W_j(r) Y_lm(cell) psi(cell) dV, then each amplitude
-// is a 1-D dot sum_j u_nl[j] g_lm[lm][j]. CPU-double oracle for the GPU deposit
-// kernel. CONTRACT: W_j(r) must mirror fill_orbital (ses.harmonics) exactly.
+// Orbital-free projection: <n|psi> with no resident 3-D atlas. Central V factorizes
+// |n> = (u_nl/r) Y_lm, so ONE grid pass (state-count independent) fills g_lm, then a
+// 1-D radial dot per state gives each amplitude. CPU-double oracle for the GPU deposit.
+// CONTRACT: deposit weights W_j(r) must mirror fill_orbital (ses.harmonics) exactly.
 
 
 export namespace ses {
 
-// A tracked state's generative seed: which radial level (index into the
-// caller's u tables) and its angular quantum numbers. NO 3-D orbital.
+// level indexes the caller's u tables; (l,m) are angular quantum numbers.
 struct ProjectorState {
     int level;
     int l;
     int m;
 };
 
-// Flat index of a real harmonic (l, m): l in [0, l_max], m in [-l, l].
 inline constexpr int lm_index(int l, int m) noexcept { return l * l + (l + m); }
 inline constexpr int lm_count(int l_max) noexcept { return (l_max + 1) * (l_max + 1); }
 
 struct RadialAngularProjection {
     std::vector<std::complex<double>> amp;               // <n|psi>, unit-normalized
     std::vector<double> norm2;                      // N_n = sum_j u[j]^2 h (=1 for eigen-u)
-    std::vector<std::vector<std::complex<double>>> g_lm;  // [lm_count][n_radial], built once
-    // amp[n] = (sum_j u[j] g_lm[lm(n)][j]) / sqrt(N_n);
-    // the RAW amplitude (== the direct grid inner product) = amp[n] * sqrt(N_n).
+    std::vector<std::vector<std::complex<double>>> g_lm;  // [lm_count][n_radial]
+    // raw grid inner product <n|psi> = amp[n] * sqrt(N_n).
 };
 
-// Static geometry for the GPU deposit: cell -> radial bin depends only on the
-// grid, so it is built once. Cells are counting-sorted by primary bin i0 (CSR
-// offsets bin_off) so the GPU runs one workgroup per bin -- deterministic
-// gather, no atomics. i0 uses the IDENTICAL fp32 arithmetic as the shader so
-// both agree on every cell, including ~fp32-eps boundary straddlers.
+// Static GPU-deposit geometry (grid-only, built once): cells CSR-sorted by bin i0
+// so the GPU runs one workgroup/bin -- deterministic gather, no atomics. i0 uses
+// fp32 IDENTICAL to the shader so both agree on every cell (fp32-eps straddlers).
 struct RadialBinIndex {
     std::vector<std::uint32_t> sorted_cell;  // in-sphere cell flat indices, grouped by i0
     std::vector<std::uint32_t> bin_off;      // CSR offsets, length n_radial+1
 };
 
-// The fp32-identical bin key for a cell: -1 if r >= rmax (outside the sphere),
-// 0 if r < h (origin segment), else i0 = int(r/h - 1). Free function so the
-// Slang deposit kernel (project_deposit.comp.slang) and the CPU sort
-// provably share it.
+// fp32 bin key (-1 = outside sphere). Free function so the Slang deposit kernel
+// (project_deposit.comp.slang) and the CPU sort provably share the arithmetic.
 inline int radial_bin_key(const Grid3D& g, const RadialGrid& rgrid, int i, int j,
                           int k) noexcept {
     const float hf = static_cast<float>(rgrid.h());
@@ -74,7 +65,7 @@ inline int radial_bin_key(const Grid3D& g, const RadialGrid& rgrid, int i, int j
     }
     int i0 = static_cast<int>(r / hf - 1.0f);
     if (i0 >= rgrid.n) {
-        i0 = rgrid.n - 1;  // guard: r < rmax should already keep i0 <= n-1
+        i0 = rgrid.n - 1;  // r<rmax should already bound i0<=n-1
     }
     return i0;
 }
@@ -118,7 +109,6 @@ inline RadialBinIndex build_radial_bin_index(const Grid3D& g, const RadialGrid& 
     return out;
 }
 
-// One grid pass over psi -> g_lm; then a 1-D radial dot per state -> amplitudes.
 inline RadialAngularProjection project_radial_angular(
     const Field3D& psi, const RadialGrid& rgrid,
     const std::vector<std::vector<double>>& u_by_level,
@@ -138,7 +128,6 @@ inline RadialAngularProjection project_radial_angular(
                     std::vector<std::complex<double>>(static_cast<std::size_t>(nr),
                                                  std::complex<double>{}));
 
-    // Deposit Y_lm(cell) psi(cell) dV into radial bins (weights mirror fill_orbital).
     for (int k = 0; k < nz; ++k) {
         const double z = g.z.coord(k);
         for (int j = 0; j < ny; ++j) {
@@ -147,10 +136,8 @@ inline RadialAngularProjection project_radial_angular(
                 const double x = g.x.coord(i);
                 const double r = std::sqrt(x * x + y * y + z * z);
                 if (r >= rmax) {
-                    continue;  // outside the radial box -> no deposit (deficit)
+                    continue;  // outside radial box: no deposit (norm deficit)
                 }
-                // Bins/weights, exactly the fill_orbital branches: r < h ->
-                // bin 0 weight 1/h; else linear tent /r into i0 and i0+1.
                 int b0 = 0;
                 int b1 = -1;
                 double w0 = 0.0;
@@ -185,7 +172,6 @@ inline RadialAngularProjection project_radial_angular(
         }
     }
 
-    // --- per-state amplitudes: raw = sum_j u[j] g_lm[lm][j]; norm = sum u^2 h ---
     out.amp.assign(states.size(), std::complex<double>{});
     out.norm2.assign(states.size(), 0.0);
     for (std::size_t s = 0; s < states.size(); ++s) {

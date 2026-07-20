@@ -18,23 +18,17 @@ export module ses.vk.present;
 export import ses.vk.compute;
 
 
-// The shell's OWN presentation layer, raw Vulkan: a swapchain over the SDL
-// window's surface, one fullscreen-triangle pass sampling the SceneRenderer's
-// finished image (which is handed off in
-// SHADER_READ_ONLY_OPTIMAL with fragment-read barriers -- exactly this), and
-// a UI-record callback riding the same pass (ImGui draws there). Frame model
-// matches the renderer's synchronous style: one frame in flight, fence-waited.
-// ses.vk GMF set, textually pre-claimed: volk.h supplies the VK_* macros
-// (macros never cross module boundaries) and inoculates against GMF/textual
-// redefinitions. No VMA here: the presenter never names vma*.
+// Raw-Vulkan presentation: swapchain over the SDL surface; one fullscreen-
+// triangle pass samples the SceneRenderer image (SHADER_READ_ONLY_OPTIMAL) +
+// ImGui UI callback. One frame in flight, fence-waited.
+// volk.h supplies VK_* macros textually -- macros never cross module boundaries.
 
 
 export namespace ses_shell {
 
 class SwapchainPresenter {
 public:
-    // The surface is owned by the caller (created via SDL); everything else
-    // here is owned by the presenter. The blit SPIR-V pair comes baked.
+    // Surface owned by the caller (SDL); everything else owned by the presenter.
     bool init(ses_vk::DeviceContext& ctx, VkSurfaceKHR surface,
               const unsigned char* vert_spv, std::size_t vert_size,
               const unsigned char* frag_spv, std::size_t frag_size) {
@@ -99,22 +93,17 @@ public:
         ctx_ = nullptr;
     }
 
-    // For ImGui_ImplVulkan_Init: the swapchain color format (ImGui draws into
-    // the present pass via dynamic rendering) and the image counts.
     VkFormat color_format() const { return format_.format; }
     std::uint32_t min_image_count() const { return min_images_; }
     std::uint32_t image_count() const {
         return static_cast<std::uint32_t>(images_.size());
     }
 
-    // SDL resize events land here; the swapchain rebuilds on the next frame.
     void request_resize() { resize_requested_ = true; }
 
-    // Acquire the next swapchain image. Called EARLY (loop top, before the
-    // frame's compute): the FIFO/vsync backpressure wait then overlaps the
-    // sim batch and the scene render instead of trailing them as dead time.
-    // Idempotent until present() consumes the image; returns false when
-    // minimized / mid-rebuild (present() will then skip the frame).
+    // Call at loop top, before the frame's compute: the FIFO/vsync backpressure
+    // wait overlaps the sim batch + scene render instead of trailing as dead time.
+    // Idempotent until present() consumes the image; false when minimized/mid-rebuild.
     bool acquire() {
         if (acquired_) {
             return true;
@@ -142,18 +131,15 @@ public:
         return true;
     }
 
-    // [clear pass: fullscreen blit of scene_view (if any) + the UI callback]
-    // -> submit -> present, on the image acquire() got (acquiring here if the
-    // shell did not). One frame in flight, fence-waited (the scene itself was
-    // already rendered synchronously before this). Returns false when the
-    // frame was skipped (minimized / mid-rebuild).
+    // clear+blit scene_view + UI callback -> submit -> present. Acquires if the
+    // shell did not; one frame in flight, fence-waited. False when skipped.
     bool present(VkImageView scene_view,
                  const std::function<void(VkCommandBuffer)>& record_ui) {
         if (!acquire()) {
             return false;
         }
         const std::uint32_t idx = acquired_idx_;
-        acquired_ = false;  // consumed by this frame's submission
+        acquired_ = false;
 
         if (scene_view != last_view_) {
             update_descriptor(scene_view);
@@ -165,11 +151,8 @@ public:
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         vkBeginCommandBuffer(cb_, &bi);
 
-        // Dynamic rendering (Vulkan 1.3 idiom): no render pass / framebuffer.
-        // The acquired image is in an undefined layout -> transition it to
-        // COLOR_ATTACHMENT for the clear+blit, and to PRESENT_SRC afterward.
-        // The acquire semaphore (waited at COLOR_ATTACHMENT_OUTPUT on submit)
-        // gates availability; render_done_ gates the present.
+        // Dynamic rendering (no render pass). Acquire semaphore (waited at
+        // COLOR_ATTACHMENT_OUTPUT on submit) gates availability; render_done_ gates present.
         ses_vk::image_layout_barrier(
             cb_, images_[idx], VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -269,8 +252,8 @@ private:
         vkGetPhysicalDeviceSurfaceFormatsKHR(ctx_->phys_dev, surface_, &n,
                                              fmts.data());
         for (const VkSurfaceFormatKHR& f : fmts) {
-            // UNORM (not SRGB): the scene image is tonemapped RGBA8 UNORM and
-            // the blit must be a bit-copy, not a second gamma encode.
+            // UNORM not SRGB: scene image is tonemapped RGBA8 UNORM; blit must
+            // bit-copy, not gamma-encode twice.
             if ((f.format == VK_FORMAT_B8G8R8A8_UNORM ||
                  f.format == VK_FORMAT_R8G8B8A8_UNORM) &&
                 f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
@@ -377,8 +360,6 @@ private:
         ds.dynamicStateCount = 2;
         ds.pDynamicStates = dyn;
 
-        // Dynamic rendering: the blit pipeline declares the swapchain color
-        // FORMAT instead of referencing a render pass (Vulkan 1.3 idiom).
         VkPipelineRenderingCreateInfo prci{};
         prci.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
         prci.colorAttachmentCount = 1;
@@ -396,7 +377,7 @@ private:
         gpi.pColorBlendState = &cb;
         gpi.pDynamicState = &ds;
         gpi.layout = pipe_layout_;
-        gpi.renderPass = VK_NULL_HANDLE;  // dynamic rendering (see prci above)
+        gpi.renderPass = VK_NULL_HANDLE;  // dynamic rendering
         const bool ok = vkCreateGraphicsPipelines(ctx_->device, VK_NULL_HANDLE,
                                                   1, &gpi, nullptr, &pipe_) ==
                         VK_SUCCESS;
@@ -431,7 +412,7 @@ private:
         if (view == VK_NULL_HANDLE) {
             return;
         }
-        // One frame in flight and the fence was waited: the set is idle.
+        // One frame in flight, fence waited: the set is idle.
         VkDescriptorImageInfo ii{};
         ii.sampler = sampler_;
         ii.imageView = view;
@@ -482,7 +463,7 @@ private:
                                                   &caps);
         extent_ = caps.currentExtent;
         if (extent_.width == 0 || extent_.height == 0) {
-            return true;  // minimized: present() will skip until resize
+            return true;  // minimized: present() skips until resize
         }
         min_images_ = std::max<std::uint32_t>(2, caps.minImageCount);
         std::uint32_t count = min_images_;
@@ -524,8 +505,7 @@ private:
                 return false;
             }
         }
-        // Present waits ride a PER-IMAGE semaphore: a single reused one races
-        // the presentation engine.
+        // Per-image semaphore: a single reused one races the presentation engine.
         if (render_done_.size() != n) {
             for (VkSemaphore s : render_done_) {
                 vkDestroySemaphore(ctx_->device, s, nullptr);
@@ -579,7 +559,7 @@ private:
     VkDescriptorSet desc_set_ = VK_NULL_HANDLE;
     VkImageView last_view_ = VK_NULL_HANDLE;
     VkSemaphore acquire_sem_ = VK_NULL_HANDLE;
-    std::vector<VkSemaphore> render_done_;  // one per swapchain image
+    std::vector<VkSemaphore> render_done_;
     VkFence fence_ = VK_NULL_HANDLE;
     VkCommandPool pool_ = VK_NULL_HANDLE;
     VkCommandBuffer cb_ = VK_NULL_HANDLE;
@@ -588,9 +568,7 @@ private:
     bool resize_requested_ = false;
 };
 
-// --dump-frame verification: read the SceneRenderer's finished image (RGBA8,
-// SHADER_READ_ONLY_OPTIMAL -- transitioned round-trip here) back to the host
-// and write a bottom-up 24-bit BMP.
+// --dump-frame: SceneRenderer image (RGBA8, SHADER_READ_ONLY_OPTIMAL) -> host BMP.
 inline bool dump_scene_bmp(ses_vk::DeviceContext& ctx, VkImage img,
                            std::uint32_t w, std::uint32_t h,
                            const char* path) {
@@ -609,7 +587,7 @@ inline bool dump_scene_bmp(ses_vk::DeviceContext& ctx, VkImage img,
             ctx.destroy_buffer(&host);
             return false;
         }
-        // Round-trip: sample-optimal -> transfer-src, copy, back.
+        // Round-trip: restore SHADER_READ_ONLY after the copy so the image stays usable.
         ses_vk::image_layout_barrier(
             shot.cb(), img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,

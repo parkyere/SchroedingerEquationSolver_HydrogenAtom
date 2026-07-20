@@ -1,6 +1,4 @@
-// Occupancy dilation: 3x3x3 neighborhood max, so a block adjacent to any
-// occupied block also reads occupied. With NEAREST sampling and block-length
-// skips, a ray can then never jump over cloud it should have marched.
+// One-block halo so a NEAREST-sampled, block-skipping ray can't jump over cloud.
 [[vk::binding(0, 0)]] [[vk::image_format("r32f")]] RWTexture3D<float4> dst;
 [[vk::binding(1, 0)]] [[vk::image_format("r32f")]] RWTexture3D<float4> src;
 

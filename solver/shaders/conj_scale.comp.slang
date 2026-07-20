@@ -1,5 +1,5 @@
-// psi <- scale * conj(psi). With a forward FFT this composes the inverse
-// transform (conj -> FFT -> conj/N). std140 UBO n + scale (binding 1).
+// Inverse FFT via conjugation: conj -> forward FFT -> conj/N.
+// std140 UBO: n + scale at binding 1.
 import complex;
 
 [[vk::binding(0, 0)]] RWStructuredBuffer<Complex, Std430DataLayout> data;

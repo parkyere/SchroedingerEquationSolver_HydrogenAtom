@@ -1,8 +1,5 @@
-// Fullscreen-triangle blit: the shell's swapchain pass. The scene
-// itself is rendered by ses_vk into an offscreen image; this pass samples it
-// 1:1 into the swapchain image (Dear ImGui rides the same pass after it).
-// gl_VertexIndex (glsl module) maps to the raw SPIR-V VertexIndex builtin --
-// unlike SV_VertexID it needs no shaderDrawParameters capability.
+// Fullscreen-triangle.
+// gl_VertexIndex (glsl module) avoids SV_VertexID's shaderDrawParameters capability.
 import glsl;
 
 struct VSOut {

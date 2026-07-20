@@ -1,13 +1,9 @@
-// Temporal accumulation: running average of the HDR scene while nothing
-// changes (camera, params, psi all static), snap-reset on any change. The
-// sample count rides in .a (the scene alpha is not needed downstream).
-// Jittered raymarch + accumulation = hundreds of effective samples on a
-// still frame; banding and noise melt away.
+// Sample count packed in accum .a (scene alpha unused downstream).
 [[vk::binding(0, 0)]] [[vk::image_format("rgba16f")]] RWTexture2D<float4> scene;
 [[vk::binding(1, 0)]] [[vk::image_format("rgba16f")]] RWTexture2D<float4> accum;
 
 struct Params {
-    int accumulate;  // 0 = reset (scene changed), 1 = keep averaging
+    int accumulate;  // 0 = reset, 1 = keep averaging
 };
 [[vk::binding(2, 0)]] ConstantBuffer<Params, Std140DataLayout> params;
 

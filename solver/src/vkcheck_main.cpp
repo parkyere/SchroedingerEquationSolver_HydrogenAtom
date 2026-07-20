@@ -1,22 +1,13 @@
 // sesolver_vkcheck: framework-free Vulkan verification harness.
 //
-// volk loads the loader, VMA allocates, and the kernels are the production
-// shader sources compiled offline to SPIR-V and embedded as C arrays
-// (tools/cmake/bin2h.cmake). Every check runs a GPU kernel or an
-// ses_vk::Engine path against a CPU double-precision oracle (core/ code or
-// an inline double reference) with a tolerance sized to the fp32 (or fp16)
-// arithmetic involved. Coverage: element-wise ops, the reductions, the fp16
-// codec (a compute-to-compute hazard), the line FFT at N=64/256, the 3-axis
-// fft3 orchestration (three dispatches aliasing one buffer -- the barrier
-// pattern at the heart of the Strang step, hand-authored and policed by the
-// validation layer), and the engine step/relax/measure paths.
+// volk + VMA; kernels are the production SPIR-V embedded as C arrays
+// (tools/cmake/bin2h.cmake). Each check runs a GPU kernel or ses_vk::Engine
+// path against a CPU double oracle (core/ code or an inline reference).
 //
-// Validation layers: set SES_VK_VALIDATION=1 (and have the layer discoverable
-// via VK_ADD_LAYER_PATH or the SDK registry). Any validation ERROR fails the
-// run even if the numbers pass.
+// SES_VK_VALIDATION=1 enables the layers (VK_ADD_LAYER_PATH / SDK registry);
+// any validation ERROR fails the run.
 //
-// Exit codes: 0 = all checks PASS, 1 = FAIL, 77 = SKIP (no Vulkan runtime /
-// device on this machine; ctest maps 77 to SKIP).
+// Exit: 0 PASS, 1 FAIL, 77 SKIP (no Vulkan runtime; ctest maps 77 to SKIP).
 
 
 // volk + VMA textually first: VK_*/VMA macros never cross module boundaries,
@@ -103,8 +94,6 @@ namespace {
 constexpr VkDescriptorType kStorage = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 constexpr VkDescriptorType kUniform = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 
-// std::complex<double> -> interleaved rg32f, the engine's upload format: the GPU
-// sees exactly the fp32 narrowing of the oracle's double inputs.
 std::vector<float> to_rg32f(const std::vector<std::complex<double>>& src) {
     std::vector<float> out(2 * src.size());
     for (std::size_t i = 0; i < src.size(); ++i) {
@@ -114,9 +103,8 @@ std::vector<float> to_rg32f(const std::vector<std::complex<double>>& src) {
     return out;
 }
 
-// Tears down a check's Vulkan objects at scope exit (declare LAST in the
-// check so its destructor runs first, while the registered objects are
-// still alive). Keeps every early return leak-free.
+// RAII teardown of a check's Vulkan objects. Declare LAST so its dtor runs
+// first, while the registered kernels/buffers are still alive.
 class Scope {
 public:
     explicit Scope(ses_vk::DeviceContext& ctx) : ctx_(ctx) {}
@@ -174,8 +162,7 @@ void invalidate(ses_vk::DeviceContext& ctx, const ses_vk::Buffer& b) {
     vmaInvalidateAllocation(ctx.allocator, b.alloc, 0, VK_WHOLE_SIZE);
 }
 
-// psi <- psi (complex-*) phase, vs a CPU double reference; 1e-5 absolute
-// covers fp32 rounding on these O(1) values.
+// psi <- psi * phase vs a CPU double reference; 1e-5 abs = fp32 on O(1) values.
 bool check_phase_multiply(ses_vk::DeviceContext& ctx) {
     const std::size_t n = 4096;
     std::vector<std::complex<double>> psi_d(n);
@@ -252,8 +239,7 @@ bool check_phase_multiply(ses_vk::DeviceContext& ctx) {
     return pass;
 }
 
-// data <- s * data, vs a CPU double reference (1e-5 absolute: fp32 on O(1)
-// values).
+// data <- s * data vs a CPU double reference; 1e-5 abs = fp32 on O(1) values.
 bool check_scale(ses_vk::DeviceContext& ctx) {
     const std::size_t n = 4096;
     const float sc = 0.5f;
@@ -326,10 +312,9 @@ bool check_scale(ses_vk::DeviceContext& ctx) {
     return pass;
 }
 
-// Fixed-order tree reduction of |psi|^2 into per-workgroup (sum, max)
-// partials, finished on the host, vs a CPU double sum/max. Rel tolerance is
-// looser for the sum (1e-5) than the peak (1e-6): the sum accumulates fp32
-// rounding across the whole field, the peak is one squared value.
+// Tree reduction of |psi|^2 -> per-workgroup (sum, max) partials, finished on
+// the host, vs a CPU double sum/max. Sum tol 1e-5 looser than peak 1e-6: the
+// sum accumulates fp32 rounding across the field, the peak is one value.
 bool check_norm_peak(ses_vk::DeviceContext& ctx) {
     const std::size_t n = 20000;
     std::vector<std::complex<double>> psi_d(n);
@@ -410,8 +395,7 @@ bool check_norm_peak(ses_vk::DeviceContext& ctx) {
     return pass;
 }
 
-// <phi|psi> complex two-input reduction, vs a CPU double reference
-// (rel 1e-5).
+// <phi|psi> complex two-input reduction vs a CPU double reference (rel 1e-5).
 bool check_inner_product(ses_vk::DeviceContext& ctx) {
     const std::size_t n = 20000;
     std::vector<std::complex<double>> psi_d(n);
@@ -615,10 +599,8 @@ bool check_dipole_kick(ses_vk::DeviceContext& ctx) {
 // <grad V> = sum |psi|^2 grad V: vec4 field-input reduction (grad V at
 // binding 4), vs a CPU double reference (rel 1e-4).
 bool check_mean_force(ses_vk::DeviceContext& ctx) {
-    // A synthetic PERIODIC 3D grid: the kernel takes central differences of
-    // the scalar potential in-shader, so the check feeds V (not a precomputed
-    // gradient) and the CPU reference applies the same periodic differences in
-    // double.
+    // The kernel takes periodic central differences of V in-shader, so the
+    // check feeds V (not a precomputed gradient); the CPU reference matches.
     const std::uint32_t nx = 40, ny = 25, nz = 20;
     const std::size_t n = std::size_t(nx) * ny * nz;
     const double i2h[3] = {1.0 / (2.0 * 0.5), 1.0 / (2.0 * 0.4),
@@ -945,10 +927,9 @@ bool check_fp16_roundtrip(ses_vk::DeviceContext& ctx) {
     return pass;
 }
 
-// Radix-2 shared-memory line FFT at a baked N: forward unnormalized DFT of
-// one contiguous line vs ses::fft (CPU double); 1e-3 absolute at the N=256
-// reference because the unnormalized spectrum magnitudes grow with N,
-// scaling up fp32 rounding -- so the gate rides N linearly past 256.
+// Radix-2 shared-memory line FFT at a baked N: forward unnormalized DFT of one
+// line vs ses::fft (CPU double). Tol rides N past 256 (1e-3 at the reference):
+// unnormalized magnitudes grow with N, scaling fp32 rounding.
 bool check_line_fft(ses_vk::DeviceContext& ctx, int N, const unsigned char* spv,
                     std::size_t spv_size) {
     std::vector<std::complex<double>> line(static_cast<std::size_t>(N));
@@ -967,7 +948,7 @@ bool check_line_fft(ses_vk::DeviceContext& ctx, int N, const unsigned char* spv,
         std::int32_t mod_a, mul_b, mul_c, stride, n_lines, pad0, pad1, pad2;
     };
     Params params{};
-    params.mod_a = N;  // l=0 -> base = (0 % N)*1 + (0 / N)*0 = 0
+    params.mod_a = N;
     params.mul_b = 1;
     params.mul_c = 0;
     params.stride = 1;
@@ -1027,12 +1008,11 @@ bool check_line_fft(ses_vk::DeviceContext& ctx, int N, const unsigned char* spv,
     return pass;
 }
 
-// The exact 2^16 spin gates on GPU (fp32) vs ses.spinexact (fp64): a mixed
-// sequence of single-site rotations and Heisenberg bond gates, run as
-// aliasing dispatches on one 65536-amplitude buffer with a
-// compute-to-compute barrier between each, then compared amplitude-wise.
-// Both sides share the SAME gate coefficients (site_gate_matrix /
-// bond_gate_params), so this isolates the GPU index math + fp32 arithmetic.
+// Exact 2^16 spin gates on GPU (fp32) vs ses.spinexact (fp64): a mixed site-
+// rotation + Heisenberg-bond sequence, aliasing dispatches on one 65536-
+// amplitude buffer with a compute-to-compute barrier between each. Both sides
+// share the SAME gate coefficients (site_gate_matrix / bond_gate_params), so
+// this isolates GPU index math + fp32 arithmetic.
 bool check_spin_step(ses_vk::DeviceContext& ctx) {
     struct alignas(16) SiteParams {
         std::uint32_t half_n, site, pad0, pad1;
@@ -1044,8 +1024,8 @@ bool check_spin_step(ses_vk::DeviceContext& ctx) {
         float gate[4];  // phase.re,phase.im, diag.re,diag.im
         float off4[4];  // off.re,off.im, 0, 0
     };
-    // A generic (fully populated) state -- a stronger test than a product
-    // boot since every one of the 2^16 amplitudes is nonzero.
+    // A fully populated state (every 2^16 amplitude nonzero) -- stronger than
+    // a product boot.
     const std::size_t dim = ses::kExactDim;
     ses::SpinState16 cpu;
     cpu.c.resize(dim);
@@ -1060,7 +1040,6 @@ bool check_spin_step(ses_vk::DeviceContext& ctx) {
         z *= inv;
     }
 
-    // The gate sequence: site + bond, adjacent and non-adjacent bits.
     struct Gate {
         bool bond;
         int a, b;      // site (a) or bond sites (a,b)
@@ -1075,7 +1054,6 @@ bool check_spin_step(ses_vk::DeviceContext& ctx) {
         {false, 0, 0, 0.4, 1.0, 0.0, 0.0},   // Rx on site 0
         {true, 0, 4, 0.25, 0, 0, 0},         // bond touching site 0
     };
-    // CPU reference: apply the identical gates via ses.spinexact.
     for (const Gate& g : seq) {
         if (g.bond) {
             ses::exact_bond_gate(cpu, g.a, g.b, g.param);
@@ -1223,11 +1201,9 @@ bool check_spin_step(ses_vk::DeviceContext& ctx) {
     return pass;
 }
 
-// The full SpinEngine step orchestration (80 dispatches/step: 16 half-
-// field + 24 forward bonds + 24 reversed + 16 half-field) over several
-// steps vs ses::exact_step (fp64). Tests the multi-step barrier chain and
-// the bond ordering, not just the isolated gates -- the arrows-shrink
-// physics rides on this being right.
+// The full SpinEngine step orchestration over several steps vs ses::exact_step
+// (fp64): tests the multi-step barrier chain and bond ordering, not just the
+// isolated gates.
 bool check_spin_engine_step(ses_vk::DeviceContext& ctx) {
     const double bx = 0.1, by = -0.05, bz = 0.2, jj = 0.5, dt = 0.05;
     const int steps = 40;
@@ -1239,8 +1215,7 @@ bool check_spin_engine_step(ses_vk::DeviceContext& ctx) {
     for (int y = 0; y < ses::kExactSide; ++y) {
         for (int x = 0; x < ses::kExactSide; ++x) {
             const double sgn = ((x + y) & 1) != 0 ? -1.0 : 1.0;
-            // Unit Bloch vector (tilted Neel) -> the product state is
-            // already normalized.
+            // Unit Bloch vector -> product state already normalized.
             lat.s[static_cast<std::size_t>(y * ses::kExactSide + x)] =
                 ses::spinor_from_bloch(0.6, 0.0, sgn * 0.8);
         }
@@ -1271,7 +1246,7 @@ bool check_spin_engine_step(ses_vk::DeviceContext& ctx) {
                 static_cast<double>(out[2 * m + 1]) * out[2 * m + 1];
     }
     eng.destroy();
-    // fp32 over 40 steps x 80 gates: per-amplitude error stays ~1e-4.
+    // fp32 over 40 steps: per-amplitude error stays ~1e-4.
     const bool pass = max_err < 2e-4 && std::abs(norm - 1.0) < 1e-3;
     std::printf("spin engine %d steps (raw Vulkan, 2^16): max |gpu - cpu| = "
                 "%.3e, norm %.6f  [%s]\n",
@@ -1280,10 +1255,9 @@ bool check_spin_engine_step(ses_vk::DeviceContext& ctx) {
 }
 
 // 3-D forward FFT of an 8x8x8 cube: the line FFT once per axis, three
-// dispatches aliasing ONE buffer with explicit compute-to-compute barriers
-// between axes -- the multi-axis orchestration at the heart of the engine's
-// Strang step. Three descriptor sets share one kernel; per-axis uniforms in
-// three tiny UBOs.
+// dispatches aliasing ONE buffer with compute-to-compute barriers between
+// axes -- the multi-axis orchestration at the heart of the engine's Strang
+// step.
 bool check_fft3(ses_vk::DeviceContext& ctx) {
     const int nx = 8;
     const int ny = 8;
@@ -1475,8 +1449,7 @@ bool check_engine_step(ses_vk::DeviceContext& ctx) {
     ses::Field3D cpu = psi0;
     cpu_prop.step(cpu, 20);
 
-    // Verify the default step path (native VkFFT when the plan built), THEN
-    // force the hand-rolled line-FFT path so both keep coverage.
+    // Cover both FFT paths: native VkFFT (when planned) then hand-rolled line.
     bool all_pass = true;
     for (int mode = 0; mode < 2; ++mode) {
         const bool want_vkfft = (mode == 0);
@@ -1515,10 +1488,9 @@ bool check_engine_step(ses_vk::DeviceContext& ctx) {
 }
 
 // The Strang step on a PLANAR 512x512x1 grid (the 2D scenes' shape) vs
-// SplitOperator3D (CPU double oracle): the engine must accept nz = 1 with
-// the z axis held at DC, on BOTH FFT paths (native VkFFT plans 2D; the
-// hand-rolled fallback enumerates per-axis lines and skips the length-1
-// z pass). 2D harmonic well, 20 steps, coherent-state drift in x.
+// SplitOperator3D (CPU double oracle): the engine must accept nz = 1 with the
+// z axis held at DC, on BOTH FFT paths (native VkFFT plans 2D; the hand-rolled
+// fallback enumerates per-axis lines and skips the length-1 z pass).
 bool check_engine_planar(ses_vk::DeviceContext& ctx) {
     const ses::Grid1D axis{-16.0, 16.0, 512};
     const ses::Grid3D g{axis, axis, ses::Grid1D{0.0, 2.0, 1}};
@@ -1693,14 +1665,12 @@ bool check_engine_absorber(ses_vk::DeviceContext& ctx) {
     return pass;
 }
 
-// GPU marching cubes vs the CPU oracle at 64^3 (512 cell blocks: the scan
-// stitching is exercised, not just one workgroup). Both sides classify the
-// SAME fp32-quantized density against the SAME float-rounded iso, so the
-// triangle COUNT must match exactly; the GPU emits block-major, the CPU
-// row-major, so both meshes are canonicalized by a grid-rounded triangle key
-// before the per-vertex compare (position/normal tight; phase colour compared
-// as a CYCLIC hue distance -- the wheel is discontinuous in RGB at its seams,
-// where fp32/fp64 atan2 disagree, so a raw channel diff is the wrong metric).
+// GPU marching cubes vs the CPU oracle at 64^3 (512 cell blocks exercise the
+// scan stitching, not just one workgroup). Both sides classify the SAME
+// fp32-quantized density against the SAME float-rounded iso, so the triangle
+// COUNT must match exactly; GPU emits block-major, CPU row-major, so both
+// meshes are canonicalized by a grid-rounded triangle key before the
+// per-vertex compare (position/normal tight, colour by cyclic hue distance).
 bool check_engine_marching_cubes(ses_vk::DeviceContext& ctx) {
     const ses::Grid1D axis{-8.0, 8.0, 64};
     const ses::Grid3D g{axis, axis, axis};
@@ -1808,13 +1778,12 @@ bool check_engine_marching_cubes(ses_vk::DeviceContext& ctx) {
         const auto less = [](const Key& a, const Key& b) { return a.k < b.k; };
         std::sort(ck.begin(), ck.end(), less);
         std::sort(gk.begin(), gk.end(), less);
-        // The vertex colour is the cyclic HSV phase wheel (S=V=1), which is
-        // DISCONTINUOUS in RGB at its six seams: near a seam the fp32-GPU and
-        // fp64-CPU atan2 land in adjacent sextants and a raw channel diff
-        // jumps to ~1.0 -- a coordinate artifact, not a colour error. So
-        // compare the HUE ANGLE recovered from RGB, cyclically (a seam flip
-        // is ~0 hue distance; a real wheel/sampling bug is large). Both sides
-        // are pure wheel outputs, so the standard hexagon inversion is exact.
+        // Compare the HUE ANGLE recovered from RGB, cyclically: the phase
+        // wheel (S=V=1) is DISCONTINUOUS in RGB at its six seams, where the
+        // fp32-GPU and fp64-CPU atan2 land in adjacent sextants and a raw
+        // channel diff jumps to ~1.0 (a coordinate artifact). A seam flip is
+        // ~0 hue distance, a real bug is large; both sides are pure wheel
+        // outputs, so the hexagon inversion below is exact.
         const auto hue01 = [](double r, double g, double b) {
             const double mx = std::max({r, g, b});
             const double mn = std::min({r, g, b});
@@ -2214,7 +2183,6 @@ bool check_engine_magnetic(ses_vk::DeviceContext& ctx) {
         return false;
     }
 
-    // Exact three-shear rotation vs core rotate_z.
     engine.rotate_z_shear(0.6);
     std::vector<float> gpu_out;
     if (!engine.readback(gpu_out)) {
@@ -2238,7 +2206,6 @@ bool check_engine_magnetic(ses_vk::DeviceContext& ctx) {
         "(tol %.3e)  [%s]\n",
         rot_err, rot_tol, rot_ok ? "PASS" : "FAIL");
 
-    // Full magnetic step vs MagneticPropagator3D, field along z then x.
     bool step_ok = true;
     for (int fa = 2; fa >= 0; fa -= 2) {  // axis z then x
         const ses::MagneticPropagator3D mprop{g, v, dt, b, fa};
@@ -2352,7 +2319,6 @@ bool check_engine_force(ses_vk::DeviceContext& ctx) {
     }
     const ses::Vec3d gpu = engine.mean_force();
 
-    // CPU double reference with the identical periodic central differences.
     const int n = g.x.n;
     double cpu[3] = {0.0, 0.0, 0.0};
     const double i2h[3] = {1.0 / (2.0 * g.x.spacing()),
@@ -2504,7 +2470,6 @@ bool check_engine_dipole_between(ses_vk::DeviceContext& ctx) {
     }
     const ses::DipoleMatrixElement gpu = engine.dipole_between(to_h, from_h);
 
-    // CPU: same normalized orbitals in double, same reduction.
     ses::Field3D to_f = ses::synthesize_orbital(g, rg, s0.u, 0, 0);
     ses::Field3D from_f = ses::synthesize_orbital(g, rg, p0.u, 1, 0);
     const double dv = g.cell_volume();
@@ -2934,13 +2899,11 @@ bool check_engine_bridge(ses_vk::DeviceContext& ctx) {
     return pass;
 }
 
-// The feature negotiation in create_device must ENABLE (not merely advertise)
-// the bits the app builds on -- timeline semaphores, synchronization2, dynamic
-// rendering, host query reset, 16-bit storage, and
-// shaderDemoteToHelperInvocation (SPIR-V 1.6 lowers `discard` to it). All are
-// supported on the Pascal floor, so all must read back enabled; a device that
-// genuinely lacks one fails here loudly rather than faulting later when a fast
-// path (or a render shader) uses it.
+// Feature negotiation in create_device must ENABLE (not merely advertise) the
+// bits the app builds on. All are supported on the Pascal floor, so all must
+// read back enabled; a device that genuinely lacks one fails here loudly
+// rather than faulting later when a fast path or render shader uses it.
+// (shaderDemoteToHelperInvocation: SPIR-V 1.6 lowers `discard` to it.)
 bool check_device_features(const ses_vk::DeviceContext& ctx) {
     const bool pass = ctx.feat_timeline_semaphore && ctx.feat_synchronization2 &&
                       ctx.feat_dynamic_rendering && ctx.feat_host_query_reset &&

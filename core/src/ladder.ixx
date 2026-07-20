@@ -13,26 +13,14 @@ import ses.parallel;
 import ses.spectral;
 
 
-// 1D HO ladder operators (atomic units, m = hbar = 1):
-//     a, adag = sqrt(omega/2) x +- 1/sqrt(2 omega) d/dx;
-//     adag|n> = sqrt(n+1)|n+1>, a|n> = sqrt(n)|n-1>, a|0> = 0.
-// The derivative is spectral (FFT ik multiply), consistent with the
-// split-operator periodic grid, so repeated applications climb/descend
-// the Fock chain cleanly to near machine epsilon.
-//
-// Both entry points return ||O psi||^2 BEFORE the internal renormalization
-// (the sqrt(n+1) / sqrt(n) counting weight squared) and leave psi normalized.
-// ladder_lower is guarded: ||a psi||^2 = <N> can vanish (a|0> = 0), in which
-// case psi is left UNCHANGED and the tiny return value is the caller's
-// forbidden-transition signal. ladder_raise needs no guard:
-// ||adag psi||^2 = <N> + 1 >= 1 on any normalized state.
+// 1D HO ladder operators, atomic units (m = hbar = 1).
 
 
 export namespace ses {
 
 namespace ladder_detail {
 
-// (sqrt(omega/2) x + deriv_sign / sqrt(2 omega) d/dx) psi, spectral d/dx.
+// Shared a/adag kernel; d/dx spectral (FFT ik).
 inline std::vector<std::complex<double>> apply(const Field1D& psi, double omega,
                                                double deriv_sign) {
     const Grid1D& g = psi.grid();
@@ -54,7 +42,6 @@ inline std::vector<std::complex<double>> apply(const Field1D& psi, double omega,
     return out;
 }
 
-// ||v||^2 with the grid weight h (the Field1D norm convention).
 inline double norm_sq_h(const std::vector<std::complex<double>>& v, double h) noexcept {
     double acc = 0.0;
     for (const std::complex<double>& z : v) {
@@ -63,7 +50,6 @@ inline double norm_sq_h(const std::vector<std::complex<double>>& v, double h) no
     return acc * h;
 }
 
-// Normalize `v` into psi's storage.
 inline void store_normalized(Field1D& psi, const std::vector<std::complex<double>>& v,
                              double norm2) noexcept {
     const double inv = 1.0 / std::sqrt(norm2);
@@ -73,25 +59,18 @@ inline void store_normalized(Field1D& psi, const std::vector<std::complex<double
 }
 
 // ---- scaled Hermite chain ------------------------------------------------
-// The plain recurrence seeds psi_0 = a0 exp(-omega x^2 / 2), which leaves
-// double range past omega x^2 / 2 > ~745 -- the seed becomes EXACT ZERO
-// there, and a zero seed stays zero at every level (the recurrence only
-// multiplies and mixes), silently deleting the outer lobes of deep states
-// (at n = 1200, omega = 1 that is ~44% of the probability). The chain is
-// therefore carried per point as mantissa * 2^exponent. Every rescale is a
-// power of two -- EXACT in binary floating point -- so wherever the plain
-// chain never left double range the mantissa path computes bitwise the
-// same values: the representation extends the range, never the arithmetic.
+// Plain seed exp(-omega x^2/2) underflows to EXACT zero (arg > ~745), zeroing
+// the outer lobes of deep states forever. Carried as mantissa * 2^exponent;
+// power-of-two rescales are exact, so in-range values stay bitwise identical.
 
-constexpr double kChainHi = 0x1p+500;  // rescale down above this ...
-constexpr double kChainLo = 0x1p-500;  // ... or up when BOTH fall below
+constexpr double kChainHi = 0x1p+500;
+constexpr double kChainLo = 0x1p-500;
 constexpr double kChainDn = 0x1p-512;
 constexpr double kChainUp = 0x1p+512;
 constexpr int kChainExp = 512;
 
-// psi_0(x) as (mantissa, exponent): exact (exponent 0) wherever the plain
-// exp is a normal double; log2-domain split otherwise (relative error
-// ~|log2 psi_0| * eps ~ 1e-11, in a region physically below 1e-290).
+// Seed psi_0 as (mantissa, exponent): exact where plain exp is normal,
+// log2-domain split otherwise.
 inline void chain_seed(double a0, double omega, double x, double& m, int& e) {
     const double arg = 0.5 * omega * x * x;
     if (arg < 690.0) {
@@ -106,10 +85,8 @@ inline void chain_seed(double a0, double omega, double x, double& m, int& e) {
 }
 
 // One recurrence rung on a scaled (prev, cur) pair sharing one exponent.
-// c1x = sqrt(2 omega / k) * x, c2 = sqrt((k-1)/k) -- the same expressions,
-// in the same order, as the plain chain (bitwise-identical when no rescale
-// triggers; a rescale only triggers outside (2^-500, 2^500), where the
-// plain chain was already denormal or could never arrive).
+// Same evaluation order as the plain chain: bitwise-identical until a rescale
+// fires (only outside (2^-500, 2^500), where plain was denormal anyway).
 inline void chain_advance(double c1x, double c2, double& p, double& c,
                           int& e) {
     const double next = c1x * c - c2 * p;
@@ -127,11 +104,10 @@ inline void chain_advance(double c1x, double c2, double& p, double& c,
     }
 }
 
-// The whole-grid scaled chain: SoA rows (p, c, e) advanced level by level.
-// advance_to runs TRANSPOSED (each worker walks its own points through all
-// pending levels with the shared coefficient tables) -- one pool dispatch
-// per block, per-point work independent, so the result is deterministic.
-// Copying the object is the snapshot used by ho_level_cap's bisection.
+// Whole-grid scaled chain: SoA rows (p, c, e) advanced level by level.
+// advance_to is transposed (each worker walks its own points through all
+// pending levels), per-point work independent -> deterministic. Copying the
+// object is the snapshot ho_level_cap's bisection rewinds to.
 class ScaledChain {
   public:
     ScaledChain(const Grid1D& g, double omega)
@@ -176,7 +152,6 @@ class ScaledChain {
         level_ = target;
     }
 
-    // The chain's value at point i (0 when genuinely below double range).
     double value(int i) const noexcept {
         const std::size_t s = static_cast<std::size_t>(i);
         return std::ldexp(c_[s], e_[s]);
@@ -213,21 +188,10 @@ inline double ladder_raise(Field1D& psi, double omega) {
     return norm2;
 }
 
-// The exact HO eigenstate |n> built DIRECTLY from the normalized
-// Hermite-Gauss recurrence in x-space (atomic units, m = hbar = 1):
-//     psi_0 = (omega/pi)^{1/4} exp(-omega x^2 / 2)
-//     psi_1 = sqrt(2 omega) x psi_0
-//     psi_{k} = sqrt(2 omega / k) x psi_{k-1} - sqrt((k-1)/k) psi_{k-2}
-// The NORMALIZED recurrence keeps every intermediate O(1) (no 2^n n!
-// overflow) and -- crucially -- uses NO derivative, so unlike the ladder
-// chain it suffers no spectral round-off amplification: it is exact to
-// round-off for every level the grid can represent. A final discrete
-// normalize absorbs the sampling error. This is the ground-truth oracle
-// the ladder is measured against, and lets the scene jump to any level.
-// Carried as a per-point scaled (mantissa, 2^exponent) chain so the seed
-// never leaves double range: deep levels keep their outer lobes past the
-// plain exp's underflow wall (|x| ~ 38.6/sqrt(omega)), and the ceiling
-// becomes the honest grid physics (box vs Nyquist), not the FP floor.
+// Exact HO eigenstate |n> from the normalized Hermite-Gauss recurrence in
+// x-space -- no derivative, so no spectral round-off (exact to round-off for
+// every representable level). The ground-truth oracle the ladder is measured
+// against.
 inline Field1D ho_eigenstate(const Grid1D& g, double omega, int n) {
     ladder_detail::ScaledChain chain{g, omega};
     chain.advance_to(n);
@@ -237,9 +201,8 @@ inline Field1D ho_eigenstate(const Grid1D& g, double omega, int n) {
     return cur;
 }
 
-// Eigenbasis decomposition of psi up to e_max: (E_n, |<n|psi>|^2) pairs,
-// E_n = (n + 1/2) omega -- the LINEAR-COMBINATION spectrum the HUD
-// strip stacks (not emitted photons: what the cloud IS made of).
+// Eigenbasis decomposition of psi up to e_max: (E_n = (n+1/2) omega,
+// |<n|psi>|^2) pairs -- the superposition spectrum, not emitted photons.
 // CONTRACT: tests/ho_spectrum_test.cpp.
 inline std::vector<std::pair<double, double>> ho1d_spectrum(
     const Field1D& psi, double omega, double e_max) {
@@ -261,11 +224,9 @@ inline std::vector<std::pair<double, double>> ho1d_spectrum(
     return lines;
 }
 
-// The REPRESENTABILITY ceiling: the largest level whose direct Hermite
-// oracle is still faithful on the grid (discrete energy within 0.1% of
-// (n+1/2)w). Box-limited for a soft well (wide turning points), Nyquist-
-// band-limited for a stiff one; peaks near omega = k_max/x_max where the
-// two meet. This is what caps the STABLE rungs -- far above ladder_cap.
+// Representability ceiling: largest level whose Hermite oracle stays faithful
+// on the grid (energy within 0.1% of (n+1/2)w). Box-limited for a soft well,
+// Nyquist-limited for a stiff one; caps the STABLE rungs (>> ladder_cap).
 inline int ho_level_cap(const Grid1D& g, double omega) {
     std::vector<double> v(static_cast<std::size_t>(g.n));
     for (int i = 0; i < g.n; ++i) {
@@ -273,18 +234,12 @@ inline int ho_level_cap(const Grid1D& g, double omega) {
         v[static_cast<std::size_t>(i)] = 0.5 * omega * omega * x * x;
     }
     const std::vector<double> k = wavenumbers(g);
-    // Faithful = (a) CONTAINED and (b) energy-exact.
-    // (a) catches box truncation, which the energy check CANNOT: a clipped
-    //     Hermite slice still satisfies k(x)^2/2 + V = E locally at every
-    //     sample, so its grid energy stays within ~1e-5 of (n+1/2)w even
-    //     with the turning points outside the box (measured at w = 4 on
-    //     the 65536-pt scene grid, where energy alone ran the cap into
-    //     the arbitrary probe bound). A representable eigenstate has its
-    //     tail decayed to nothing at the edges: boundary density below
-    //     1e-6 of the bulk peak.
-    // (b) catches the Nyquist side (aliased spectral <T>) and any leftover
-    //     construction error; scale-invariant, so the unnormalized chain
-    //     is fine.
+    // Faithful = (a) contained AND (b) energy-exact.
+    // (a) catches box truncation that (b) CANNOT: a clipped Hermite slice still
+    //     satisfies k(x)^2/2 + V = E at every sample, so its grid energy stays
+    //     within ~1e-5 of (n+1/2)w with turning points outside the box. Test:
+    //     boundary density below 1e-6 of the bulk.
+    // (b) catches the Nyquist side (aliased <T>); scale-invariant.
     std::vector<std::complex<double>> phi(static_cast<std::size_t>(g.n));
     auto faithful = [&](const ladder_detail::ScaledChain& chain, int n) {
         parallel_for(g.n, [&](int i) {
@@ -316,15 +271,11 @@ inline int ho_level_cap(const Grid1D& g, double omega) {
         const double e_exact = (n + 0.5) * omega;
         return std::abs(e - e_exact) <= 1e-3 * e_exact;
     };
-    // Probe bound: a SAFETY NET above the physics ceilings, not the cap.
-    // Near n_box (level energy = edge potential) faithfulness fades over
-    // the Airy transition width (~|dV/dx| * (2 omega^2 x)^{-1/3} in energy,
-    // a few hundred levels on fine grids), so the measured boundary can
-    // overhang n_box slightly; 1.5x + 64 is comfortably past it on both
-    // the box and the Nyquist side. The scan STOPS at the first failed
-    // check, so the generous bound costs nothing -- it only guards the
-    // loop. GRID-DERIVED, not a constant (the old fixed 400 silently
-    // clipped fine grids whose true ceiling sits in the thousands).
+    // Probe bound: a safety net above the physics ceilings, not the cap. The
+    // measured boundary can overhang n_box (faithfulness fades over an Airy
+    // transition width), so 1.5x + 64 clears it; the scan stops at the first
+    // failure, so a generous bound only guards the loop. Grid-derived so fine
+    // grids (ceiling in the thousands) are not clipped.
     const double x_edge = std::min(std::abs(g.xmin), std::abs(g.xmax));
     const double k_max = 3.14159265358979323846 / g.spacing();
     const double n_box = 0.5 * omega * x_edge * x_edge;
@@ -333,15 +284,13 @@ inline int ho_level_cap(const Grid1D& g, double omega) {
         1,
         static_cast<int>(std::min(1.5 * std::min(n_box, n_nyq), 1048576.0)) +
             64);
-    // Representability is MONOTONE in n (higher n = wider turning points
-    // AND higher k content: once lost, never regained). Stride scan with
-    // the scaled chain, snapshot (= chain copy) at the last good check,
-    // then BISECT the last window from the snapshot: O(chain) grid work
-    // plus ~(bound/stride + log2 stride) FFT energy checks -- this runs
-    // on every omega-slider apply, at up to 64k points per level.
+    // Representability is MONOTONE in n (once lost, never regained), so:
+    // stride-scan, snapshot at the last good check, then bisect the last
+    // window from the snapshot. Runs on every omega-slider apply, up to 64k
+    // points per level.
     const int stride = std::clamp(bound / 64, 16, 512);
     ladder_detail::ScaledChain chain{g, omega};
-    ladder_detail::ScaledChain snap = chain;  // rows at last_good
+    ladder_detail::ScaledChain snap = chain;
     int last_good = 0;
     int first_bad = -1;
     while (chain.level() < bound) {
@@ -371,31 +320,23 @@ inline int ho_level_cap(const Grid1D& g, double omega) {
     return last_good;
 }
 
-// Ladder step computed in the truncated Fock basis |0..n_top> -- the
-// superposition counterpart of ladder_rung_stable. Project c_n = <n|psi>,
-// act EXACTLY on the coefficients (adag: c'_{n+1} = sqrt(n+1) c_n;
-// a: c'_n = sqrt(n+1) c_{n+1}), resynthesize from the noise-free oracles.
-// The same linear operator, computed in the basis where it is trivial --
-// no spectral derivative, so it works at ANY grid k_max (the raw chain's
-// noise gain grows with k_max and dies on fine grids). *out_residual gets
-// the input's outside-band weight; psi is written only when the band holds
-// the state (residual <= 1/2) AND the result does not vanish (annihilation
-// on lowering the ground). Returns the counting norm^2 inside the band
-// (== <N>+1 / <N> for in-band states).
+// Ladder step in the truncated Fock basis |0..n_top> -- superposition
+// counterpart of ladder_rung_stable. Project c_n = <n|psi>, act on the
+// coefficients, resynthesize from noise-free oracles: no spectral derivative,
+// so it works at ANY grid k_max. *out_residual gets the outside-band weight;
+// psi is written only when the band holds the state (residual <= 1/2) AND the
+// result does not vanish. Returns counting norm^2 inside the band.
 inline double ladder_fock(Field1D& psi, double omega, bool up, int n_top,
                           double* out_residual = nullptr,
                           double vanish_eps = 1e-6) {
     const Grid1D& g = psi.grid();
     const double h = g.spacing();
     const double psi_n2 = norm_sq(psi);
-    // Pass 1: project c_n = <n|psi> level by level off ONE scaled chain --
-    // no basis storage (the old stored basis was O(band * grid) memory,
-    // which forbade deep bands). EARLY STOP once the scanned band has
-    // captured all but 1e-10 of the state: every unscanned |c_n|^2 is then
-    // bounded by that leftover, so the residual claim stays honest and the
-    // common case (a low superposition under a deep band top) costs only
-    // the levels the state actually occupies. Per-level sums use the
-    // chunk-ordered parallel reduction (bitwise-deterministic).
+    // Pass 1: project c_n = <n|psi> off ONE scaled chain -- no basis storage
+    // (O(band*grid) memory would forbid deep bands). Early stop once the band
+    // holds all but 1e-10 of the state: every unscanned |c_n|^2 is then bounded
+    // by that leftover, so the residual stays honest. Sums use the chunk-ordered
+    // parallel reduction (bitwise-deterministic).
     struct DotAcc {
         std::complex<double> dot{};
         double n2 = 0.0;
@@ -450,8 +391,8 @@ inline double ladder_fock(Field1D& psi, double omega, bool up, int n_top,
         return norm2;  // outside the band, or annihilated: psi untouched
     }
     // Pass 2: resynthesize psi = sum d_n |n> off a fresh chain, reusing the
-    // cached level norms (the up-shift's top level n = m + 1 was not normed
-    // in pass 1; it is measured here the same way).
+    // cached level norms (the up-shift top level n = m+1 was not normed in
+    // pass 1; measured here).
     std::vector<std::complex<double>> out(static_cast<std::size_t>(g.n));
     ladder_detail::ScaledChain synth{g, omega};
     for (int n = 0; n < nd; ++n) {
@@ -481,17 +422,11 @@ inline double ladder_fock(Field1D& psi, double omega, bool up, int n_top,
     return norm2;
 }
 
-// The largest Fock level the FFT ladder reaches cleanly on a given grid --
-// MEASURED, not modeled. a-dag carries two competing round-off gains: the
-// derivative term k_max/sqrt(2w) (worse for a soft, wide well) and the x
-// term x_max*sqrt(w/2) (worse for a stiff well whose tail round-off is
-// leveraged by the large |x| box edge), plus a boundary/periodicity effect
-// when a wide state does not fit the box. The net clean cap is non-monotone
-// (it peaks near w = k_max/x_max) and no simple closed form captures all
-// three mechanisms -- so we probe it directly: raise from the ground and
-// return the last level still matching the direct Hermite oracle to within
-// `defect_tol` (fidelity defect ~ (amplitude noise)^2; 1e-6 ~ 0.1% amplitude,
-// below display relevance). ~cap FFTs, run only when omega changes.
+// Largest Fock level the FFT ladder reaches cleanly -- MEASURED, not modeled:
+// adag's round-off gains (derivative k_max/sqrt(2w), x-term x_max*sqrt(w/2))
+// make the cap non-monotone with no closed form, so probe directly. Returns
+// the last level matching the Hermite oracle within defect_tol (1e-6 ~ 0.1%
+// amplitude). ~cap FFTs, only on omega change.
 inline int ladder_cap(const Grid1D& g, double omega, double defect_tol = 1e-6) {
     Field1D psi = ho_eigenstate(g, omega, 0);
     int cap = 0;
@@ -525,22 +460,14 @@ inline double ladder_lower(Field1D& psi, double omega, double vanish_eps = 1e-6)
     return norm2;
 }
 
-// Noise-free ladder rung for a state KNOWN to be the eigenstate |n_from>
-// (up to a global phase; the caller's Var(H) classifier is the gate). The
-// raw spectral operator is still what ACTS: it supplies the counting
-// norm^2 (n+1 / n) and the global phase of the result. Only the state
-// body is then rebuilt from the direct Hermite oracle carrying that phase
-// -- the same mathematical object (adag|n> = sqrt(n+1)|n+1>) computed by
-// the stable route, so the round-off floor RESETS at every rung instead
-// of compounding. Descending is the payoff: the raw chain's noise gains
-// (derivative k_max/sqrt(2w), x-term x_max*sqrt(w/2)) amplify residue
-// FASTER on the way down (the signal shrinks as sqrt(n)), which showed up
-// as visible high-k garbage in the scene; stable rungs kill it, and the
-// usable range becomes the grid's representability ceiling (ho_level_cap),
-// not the raw-chain noise cap. Down at the ground still refuses via the
-// operator itself (returns ~0, psi untouched). If psi is NOT the claimed
-// eigenstate (oracle overlap < 1/2), the raw result is kept as-is: the
-// caller misclassified, and the honest operator output stands.
+// Noise-free ladder rung for a state KNOWN to be eigenstate |n_from> (caller's
+// Var(H) classifier is the gate). The raw spectral operator still ACTS -- it
+// supplies the counting norm^2 and the global phase -- but the state body is
+// rebuilt from the direct Hermite oracle carrying that phase, so the round-off
+// floor RESETS each rung instead of compounding (cap becomes ho_level_cap, not
+// the raw-chain noise cap). At the ground the operator refuses (returns ~0,
+// psi untouched). If psi is NOT the claimed eigenstate (oracle overlap < 1/2),
+// the raw result is kept: caller misclassified, honest output stands.
 inline double ladder_rung_stable(Field1D& psi, double omega, int n_from,
                                  bool up, double vanish_eps = 1e-6) {
     const Grid1D& g = psi.grid();

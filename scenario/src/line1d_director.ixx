@@ -21,17 +21,10 @@ export import ses.potential;
 export import ses.propagator;
 
 
-// Shared base for the six textbook 1D scenes (HO ladder, tunneling,
-// double well, Poschl-Teller, Morse, Bloch). Physics is pure CPU double
-// -- even the 64k-point split-operator step is cheap, so no engine is
-// involved and gpu_ok() stays false by design. Display goes through the overlay polyline
-// seam: the wavefunction as the white phasor curve (radius = r_scale |psi|^2,
-// twist = arg psi -- ON THE CURVE phase is geometry, never color), its
-// |psi|^2 shadow band on the z = 0 plane (phase as per-vertex hue there,
-// the volume view's wheel -- the plane is where color-coded phase lives),
-// and the potential as the red profile in the z = 0 plane. The 3D
-// machinery (volume, mesh, flow) is disabled wholesale: cloud() false, no
-// staging, no marker.
+// Shared base for the 1D textbook scenes.
+// CPU-only: the split-operator step is cheap, so gpu_ok() is false by design.
+// Overlay convention: white phasor curve (r = r_scale |psi|^2, twist = arg psi);
+// |psi|^2 shadow band + per-vertex phase hue on z = 0; red potential.
 // volk.h textually first: VK_* macros never cross module boundaries.
 
 
@@ -43,7 +36,7 @@ public:
     const ses::Grid3D& grid() const override { return grid3d_; }
     void init_compute(ses_vk::DeviceContext& /*ctx*/, bool /*device_ok*/,
                       std::int64_t /*free_vram_bytes*/) override {
-        compute_attempted_ = true;  // CPU-only scene: nothing to set up
+        compute_attempted_ = true;
     }
     void release_gpu() override {}
     bool compute_attempted() const override { return compute_attempted_; }
@@ -60,10 +53,7 @@ public:
             psi_dirty_ = true;
             after_batch();
         }
-        // Rebuild the phasor curve and its plane shadow only when psi
-        // actually moved (steps, key mutations, resets): the 64k-point
-        // color pass is real per-frame money, and a paused scene recomputes
-        // byte-identical arrays otherwise.
+        // Rebuild curves only when psi moved: the color pass is real per-frame cost.
         if (std::exchange(psi_dirty_, false)) {
             rebuild_psi_display();
         }
@@ -73,8 +63,7 @@ public:
         }
     }
     void tick() override {
-        // One tick's supply per rendered frame (the BaseDirector pacing
-        // rule): catch-up ticks drop instead of bundling.
+        // Drop catch-up ticks instead of bundling (BaseDirector pacing).
         const int per_tick = steps_per_tick() * time_scale_;
         pending_steps_ = std::min(pending_steps_ + per_tick, per_tick);
         if (++ticks_ % 10 == 0) {
@@ -83,7 +72,7 @@ public:
     }
 
     // ---- generic controls ----
-    void do_set_real_time() override {}  // no-op: NVI base already resets time_scale to 1
+    void do_set_real_time() override {}  // NVI base already resets time_scale
     void reset_simulation() override {
         psi_ = initial_;
         sim_time_ = 0.0;
@@ -94,7 +83,7 @@ public:
         after_reset();
     }
     void measure_now() override {}
-    void toggle_view_mode() override {}  // single (overlay) view
+    void toggle_view_mode() override {}
     bool handle_key(char /*key*/) override { return false; }
 
     // ---- shell gating ----
@@ -118,8 +107,6 @@ public:
     }
     bool take_volume_dirty() override { return false; }
     bool take_mesh_dirty() override { return false; }
-    // Scene code calls this after mutating psi in place (ladder rungs):
-    // the psi-derived curves must follow.
     void mark_display_dirty() override {
         display_changed_ = true;
         psi_dirty_ = true;
@@ -133,24 +120,21 @@ public:
                     sim_time_, dt_, grid1d_.n, title_suffix().c_str());
     }
 
-    int marker_count() const override { return 0; }  // a line has no nucleus
+    int marker_count() const override { return 0; }
 
     int overlay_curve_count() const override { return 4; }
     OverlayCurve overlay_curve(int i) const override {
-        if (i == 0) {  // faint xy (z = 0) reference sheet, drawn first
+        if (i == 0) {
             return {plane_quad_.data(), 4, 0.45f, 0.55f, 0.75f, 0.07f, true};
         }
         if (i == 1) {
-            // |psi|^2 projected onto the plane as the phasor tube's shadow
-            // band, phase as per-vertex hue (the volume view's wheel) --
-            // constant rgba here is ignored, the color array wins.
+            // The constant rgba here is ignored -- the color array wins.
             return {dens_band_.data(), 2 * grid1d_.n, 1.0f, 1.0f,
                     1.0f,              1.0f,          true, dens_cols_.data()};
         }
-        if (i == 2) {  // the potential profile: warm red, slightly translucent
+        if (i == 2) {
             return {pot_curve_.data(), grid1d_.n, 1.0f, 0.30f, 0.25f, 0.9f};
         }
-        // The wavefunction: white phasor curve, on top.
         return {psi_curve_.data(), grid1d_.n, 1.0f, 1.0f, 1.0f, 1.0f};
     }
 
@@ -169,10 +153,7 @@ protected:
           initial_(g) {
         prop_ = std::make_unique<ses::SplitOperator1D>(grid1d_, potential_, dt_);
         pot_curve_ = ses::potential_curve(grid1d_, potential_, e_scale_, y_clamp_);
-        // Faint z = 0 (xy) reference sheet: makes the phasor twist legible
-        // (in-plane vs out-of-plane), and face-on -- the Z snap view -- it
-        // frames the textbook 2D plot. Spans the box in x, a quarter box
-        // in y, as one triangle-strip quad.
+        // Faint z = 0 reference sheet: makes the phasor twist (in/out of plane) legible.
         const float hh = static_cast<float>(0.25 * grid1d_.xmax);
         const float x0 = static_cast<float>(grid1d_.xmin);
         const float x1 = static_cast<float>(grid1d_.xmax);
@@ -180,28 +161,23 @@ protected:
                        x0, hh,  0.0f, x1, hh,  0.0f};
     }
 
-    // Scenario-specific hooks.
     virtual const char* scene_name() const = 0;
     virtual std::string title_suffix() { return ""; }
     virtual int steps_per_tick() const { return 1; }
     virtual void after_batch() {}
     virtual void after_reset() {}
 
-    // The initial state; also the reset target. Builds the first phasor
-    // curve immediately so overlay_curve() is valid before any run_frame.
+    // Builds the first curve now so overlay_curve() is valid before the first run_frame.
     void set_state(ses::Field1D f) {
         initial_ = f;
         psi_ = std::move(f);
         rebuild_psi_display();
         display_changed_ = true;
     }
-    // Boundary absorber (tunneling): psi *= mask each step.
+    // Boundary absorber: psi *= mask each step.
     void set_mask(std::vector<double> mask) { mask_ = std::move(mask); }
 
-    // Swap the potential on the SAME grid/dt: rebuilds the propagator
-    // tables and the red profile. psi is deliberately untouched -- a
-    // sudden quench is legitimate physics (the state persists, the well
-    // changes under it).
+    // psi deliberately untouched: a sudden quench is legitimate physics.
     void set_potential(std::vector<double> v) {
         potential_ = std::move(v);
         prop_ = std::make_unique<ses::SplitOperator1D>(grid1d_, potential_, dt_);
@@ -209,9 +185,7 @@ protected:
         display_changed_ = true;
         title_dirty_ = true;
     }
-    // Retarget reset without touching the live psi (quench bookkeeping).
     void set_reset_target(ses::Field1D f) { initial_ = std::move(f); }
-    // Replace the live psi without touching the reset target.
     void replace_state(ses::Field1D f) {
         psi_ = std::move(f);
         rebuild_psi_display();
@@ -219,15 +193,12 @@ protected:
         title_dirty_ = true;
     }
 
-    // The white curve, its plane-shadow band, and the band's phase hues
-    // move together with psi.
     void rebuild_psi_display() {
         psi_curve_ = ses::phasor_curve(psi_, r_scale_);
         dens_band_ = ses::density_band(psi_, r_scale_);
         dens_cols_ = ses::phase_band_colors(psi_, kBandAlpha);
     }
 
-    // Overridable: the Bloch scene substitutes its tilted propagator.
     virtual void step_batch(int n) {
         for (int s = 0; s < n; ++s) {
             prop_->step(psi_);
@@ -266,11 +237,10 @@ protected:
     bool title_due_ = false;
     bool title_dirty_ = true;
     bool display_changed_ = true;
-    bool psi_dirty_ = true;  // psi moved since the last curve rebuild
+    bool psi_dirty_ = true;
     bool compute_attempted_ = false;
 
-    // Loud enough to read hue, quiet enough that the white curve and the
-    // red potential stay the foreground.
+    // Loud enough to read hue, quiet enough to keep the curve/potential foreground.
     static constexpr float kBandAlpha = 0.35f;
 
     std::vector<float> psi_curve_;

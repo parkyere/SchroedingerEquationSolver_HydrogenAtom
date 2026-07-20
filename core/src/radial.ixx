@@ -9,28 +9,23 @@ export module ses.radial;
 export import ses.decay;
 
 
-// Radial engine: bound levels and E1 lifetimes for every orbital with
-// n <= n_max. Central V(r) reduces the eigenproblem exactly to 1D per l:
-//     u'' = 2 (V + l(l+1)/(2 r^2) - E) u,  u(0) = u(R) = 0,  psi = (u/r) Y_lm.
-// 3-point FD on r_i = i h -> symmetric tridiagonal H; eigenvalues by Sturm
-// bisection, eigenvectors by shifted inverse iteration. The k-th state for a
-// given l has k radial nodes and n = l + 1 + k.
+// Reduced radial u = r R, psi = (u/r) Y_lm: u'' = 2(V + l(l+1)/(2 r^2) - E) u, u(0)=u(R)=0.
+// k radial nodes -> n = l + 1 + k.
 
 
 export namespace ses {
 
 struct RadialGrid {
     double rmax{};
-    int n{};  // interior points; r_i = (i+1) h, h = rmax / (n+1)
+    int n{};  // interior points; boundary nodes r=0,R excluded
 
     constexpr double h() const noexcept { return rmax / (n + 1); }
     constexpr double r(int i) const noexcept { return (i + 1) * h(); }
 };
 
-// Symmetric tridiagonal radial Hamiltonian for angular momentum l.
 struct RadialHamiltonian {
     std::vector<double> diag;
-    double off{};  // constant off-diagonal -1/(2 h^2)
+    double off{};
 };
 
 inline RadialHamiltonian radial_hamiltonian(const RadialGrid& g,
@@ -49,8 +44,7 @@ inline RadialHamiltonian radial_hamiltonian(const RadialGrid& g,
     return ham;
 }
 
-// Sturm count: the number of eigenvalues strictly below e, via the sign
-// count of the LDL^T pivots q_i = (d_i - e) - off^2 / q_{i-1}.
+// Sturm/Sylvester inertia: #eigenvalues below e = #negative LDL^T pivots.
 inline int sturm_count_below(const RadialHamiltonian& ham, double e) noexcept {
     const double off2 = ham.off * ham.off;
     int count = 0;
@@ -74,14 +68,12 @@ struct RadialState {
 
 namespace radial_detail {
 
-// Thomas solve of (T - sigma I) x = b for symmetric tridiagonal T; the
-// slight shift keeps the pivots nonzero near an eigenvalue, and inverse
-// iteration thrives on the near-singularity.
+// Shift sigma keeps pivots nonzero for inverse iteration near an eigenvalue.
 inline void shifted_thomas_solve(const RadialHamiltonian& ham, double sigma,
                                  std::vector<double>& x) {
     const std::size_t n = ham.diag.size();
-    std::vector<double> c(n);   // modified superdiagonal factors
-    std::vector<double> d(n);   // modified rhs
+    std::vector<double> c(n);
+    std::vector<double> d(n);
     double piv = ham.diag[0] - sigma;
     if (std::abs(piv) < 1e-300) {
         piv = 1e-300;
@@ -115,9 +107,6 @@ inline void normalize_u(std::vector<double>& u, double h) noexcept {
 
 }  // namespace radial_detail
 
-// The k-th eigenstate (k = 0, 1, ... = number of radial nodes) of the given
-// radial Hamiltonian: Sturm bisection to machine width, then a few rounds
-// of shifted inverse iteration.
 inline RadialState radial_eigenstate(const RadialGrid& g, const RadialHamiltonian& ham,
                                      int k) {
     double lo = ham.diag[0];
@@ -128,7 +117,6 @@ inline RadialState radial_eigenstate(const RadialGrid& g, const RadialHamiltonia
     }
     lo -= 2.0 * std::abs(ham.off);
     hi += 2.0 * std::abs(ham.off);
-    // Bisect until the interval isolates exactly the k-th eigenvalue.
     for (int it = 0; it < 200 && (hi - lo) > 1e-13 * (1.0 + std::abs(lo)); ++it) {
         const double mid = 0.5 * (lo + hi);
         if (sturm_count_below(ham, mid) <= k) {
@@ -140,7 +128,6 @@ inline RadialState radial_eigenstate(const RadialGrid& g, const RadialHamiltonia
     RadialState s;
     s.energy = 0.5 * (lo + hi);
 
-    // Inverse iteration with a shift nudged off the eigenvalue.
     const double sigma = s.energy + 1e-9 * (1.0 + std::abs(s.energy));
     s.u.assign(ham.diag.size(), 1.0);
     radial_detail::normalize_u(s.u, g.h());
@@ -157,7 +144,6 @@ inline RadialState radial_eigenstate(const RadialGrid& g, const RadialHamiltonia
     return s;
 }
 
-// Rint = integral u1(r) r u2(r) dr (midpoint rule on the uniform grid).
 inline double radial_dipole_integral(const RadialGrid& g, const std::vector<double>& u1,
                                      const std::vector<double>& u2) noexcept {
     double s = 0.0;
@@ -167,8 +153,7 @@ inline double radial_dipole_integral(const RadialGrid& g, const std::vector<doub
     return s * g.h();
 }
 
-// Level-averaged E1 rate (summed over final m/polarizations, averaged over
-// initial m): A = einstein_a(omega, max(l,l')/(2 l_upper + 1) * Rint^2).
+// Level-averaged E1 (sum final m, avg initial m): factor = max(l,l')/(2 l_upper+1).
 inline double einstein_a_level(double omega, int l_upper, int l_lower,
                                double radial_integral) noexcept {
     const double lmax = static_cast<double>(std::max(l_upper, l_lower));
@@ -183,8 +168,6 @@ struct LevelInfo {
     double lifetime{};  // au; 0 = stable (no open E1 channel)
 };
 
-// All bound levels with n <= n_max: energies from the radial eigensolver,
-// lifetimes from the full downward E1 rate sums.
 inline std::vector<LevelInfo> bound_level_table(const RadialGrid& g,
                                                 const std::vector<double>& v,
                                                 int n_max) {
@@ -200,9 +183,8 @@ inline std::vector<LevelInfo> bound_level_table(const RadialGrid& g,
             solved.push_back(Solved{l + 1 + k, l, radial_eigenstate(g, ham, k)});
         }
     }
-    // Gaps below the FD resolution (h^2 ~ 1e-5..1e-4, e.g. hydrogen 2s/2p)
-    // are degenerate physics: their omega^3-suppressed rates (A < 1e-14)
-    // would fake a decay path for E1-stable levels.
+    // kDegenerateGap: gaps below FD resolution (~h^2, e.g. H 2s/2p) are degenerate physics;
+    // their omega^3-suppressed rates would fake an E1 decay path for stable levels.
     constexpr double kDegenerateGap = 1e-4;
     std::vector<LevelInfo> table;
     table.reserve(solved.size());

@@ -12,14 +12,10 @@ export module ses.vk.vram_probe;
 export import ses.vram_budget;
 
 
-// Free VRAM in bytes via VK_EXT_memory_budget (heap budget minus current
-// usage, summed over device-local heaps), or ses::kVramUnknown when the
-// extension / entry points are absent. Pure volk -- call AFTER a
-// DeviceContext create()/adopt() has run volkLoadInstance. Physical-device
-// property queries only need the extension SUPPORTED, not enabled.
-// ses.vk.device's GMF set, textually pre-claimed: volk.h both supplies the
-// VK_* macros (macros never cross module boundaries) and inoculates the TU
-// against GMF/textual std redefinitions.
+// Ordering: call AFTER DeviceContext create()/adopt() has run volkLoadInstance.
+// Property queries need the extension SUPPORTED, not enabled.
+// volk.h + std headers textual in GMF: VK_* macros never cross module
+// boundaries; textual std inoculates the TU against GMF std redefinitions.
 
 
 export namespace ses_shell {

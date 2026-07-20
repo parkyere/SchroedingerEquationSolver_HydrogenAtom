@@ -44,48 +44,33 @@ export import ses.drive;
 export import ses.decay;
 
 
-// ses_vk::Engine: the split-operator Strang step and imaginary-time
-// relaxation, on raw Vulkan via the ses.vk.compute layer.
-// SPIR-V blobs are dependency-injected (EngineKernels), so the engine has
-// no resource system; the DeviceContext is passed in, so the same engine
-// runs on a self-created device (headless: checks, clusters) or on handles
-// adopted from the GUI shell.
-//
-// Numerical contract: Slang kernels baked offline to SPIR-V, the
-// dispatch chain halfV . IFFT . kin . FFT . halfV (the inverse FFT = conj .
-// FFT . conj/N), std140 parameter blocks, host-double reduction finishes.
-// Synchronization is fully explicit: a compute-to-compute memory barrier
-// before every dispatch that aliases psi (all of them), transfer barriers
-// around uploads/readbacks, and a fence wait per submission.
-// ses.vk GMF set, textually pre-claimed: volk.h supplies the VK_* macros
-// (macros never cross module boundaries); vk_mem_alloc.h (same config as the
-// module GMFs) keeps direct vma* calls compiling; both inoculate the TU
-// against GMF/textual redefinitions.
-// volk (this GMF's own include) already defined VK_NO_PROTOTYPES and declared the
-// canonical vk* names as global function pointers, so header-only VkFFT
-// compiles and links against volk's dispatch unmodified -- no include-order
-// hack, no external command-buffer blocks: the engine owns the device and
-// records VkFFTAppend straight into its own primary command buffers.
+// ses_vk::Engine: split-operator Strang step + imaginary-time relaxation on
+// raw Vulkan (ses.vk.compute). SPIR-V blobs and the DeviceContext are
+// injected, so one engine serves headless (checks, clusters) and the GUI shell.
+// Sync contract: compute-to-compute barrier before every psi-aliasing
+// dispatch, transfer barriers around uploads/readbacks, fence wait per submit.
+// GMF macro pre-claim (C++20 modules): volk.h supplies the VK_* macros (macros
+// don't cross module boundaries) and vk_mem_alloc.h keeps vma* calls compiling;
+// volk's VK_NO_PROTOTYPES lets header-only VkFFT link against volk dispatch.
 
 
 export namespace ses_vk {
 
-// The SPIR-V blobs the engine's core propagation needs. The caller owns the
-// storage (embedded C arrays in the harness; a file loader later).
+// SPIR-V blobs; caller owns the storage (embedded C arrays in the harness).
 struct EngineKernels {
     const unsigned char* mul = nullptr;    // phase_multiply.comp
-    const unsigned char* half_mul = nullptr;  // half_mul.comp (in-shader V phase)
+    const unsigned char* half_mul = nullptr;  // half_mul.comp
     std::size_t half_mul_size = 0;
-    const unsigned char* kin_mul = nullptr;   // kin_mul.comp (1D k^2 tables)
+    const unsigned char* kin_mul = nullptr;   // kin_mul.comp
     std::size_t kin_mul_size = 0;
-    const unsigned char* damp = nullptr;      // damp_mul.comp (real absorber)
+    const unsigned char* damp = nullptr;      // damp_mul.comp
     std::size_t damp_size = 0;
-    const unsigned char* pd = nullptr;  // phase_damp_mul.comp (fused V+mask;
-    std::size_t pd_size = 0;            // optional: absent => separate passes)
-    const unsigned char* mcwf = nullptr;  // mcwf_axpy.comp (fused multi-state
-    std::size_t mcwf_size = 0;            // axpy; optional => per-state chain)
-    const unsigned char* mc_density = nullptr;  // GPU marching cubes (all four
-    std::size_t mc_density_size = 0;            // present or the path is off)
+    const unsigned char* pd = nullptr;  // phase_damp_mul.comp; fused V+mask,
+    std::size_t pd_size = 0;            // optional (else separate passes)
+    const unsigned char* mcwf = nullptr;  // mcwf_axpy.comp; multi-state axpy,
+    std::size_t mcwf_size = 0;            // optional (else per-state chain)
+    const unsigned char* mc_density = nullptr;  // GPU marching cubes: all four
+    std::size_t mc_density_size = 0;            // present or the path is off
     const unsigned char* mc_classify = nullptr;
     std::size_t mc_classify_size = 0;
     const unsigned char* mc_scan = nullptr;
@@ -95,14 +80,14 @@ struct EngineKernels {
     std::size_t mul_size = 0;
     const unsigned char* conj = nullptr;   // conj_scale.comp
     std::size_t conj_size = 0;
-    const unsigned char* fft = nullptr;    // fft_line<n>.comp for the grid n
+    const unsigned char* fft = nullptr;    // fft_line<n>.comp
     std::size_t fft_size = 0;
     const unsigned char* norm = nullptr;   // norm_peak.comp
     std::size_t norm_size = 0;
     const unsigned char* scale = nullptr;  // scale.comp
     std::size_t scale_size = 0;
     const unsigned char* norm_finalize = nullptr;  // norm_finalize.comp
-    std::size_t norm_finalize_size = 0;             // (optional -> 2-submit relax)
+    std::size_t norm_finalize_size = 0;             // optional (else 2-submit relax)
     const unsigned char* scale_buf = nullptr;       // scale_buf.comp
     std::size_t scale_buf_size = 0;
     const unsigned char* kick = nullptr;   // dipole_kick.comp
@@ -125,11 +110,11 @@ struct EngineKernels {
     std::size_t project_size = 0;
     const unsigned char* bridge_store = nullptr;  // bridge_store.comp
     std::size_t bridge_store_size = 0;
-    const unsigned char* bridge_load = nullptr;   // bridge_load.comp (checks)
+    const unsigned char* bridge_load = nullptr;   // bridge_load.comp
     std::size_t bridge_load_size = 0;
-    const unsigned char* flow_velocity = nullptr;  // flow_velocity.comp (fp32
-    std::size_t flow_velocity_size = 0;            // Bohmian v; optional)
-    const unsigned char* pack = nullptr;    // pack_half.comp (fp16 atlas)
+    const unsigned char* flow_velocity = nullptr;  // flow_velocity.comp; fp32
+    std::size_t flow_velocity_size = 0;            // Bohmian v, optional
+    const unsigned char* pack = nullptr;    // pack_half.comp
     std::size_t pack_size = 0;
     const unsigned char* unpack = nullptr;  // unpack_half.comp
     std::size_t unpack_size = 0;
@@ -165,8 +150,7 @@ struct KinMulParams {
 
 class Engine {
 public:
-    // Free-energy estimate + normalized peak density from the per-step
-    // renormalization.
+    // Free-energy estimate + normalized peak, from the per-step renorm.
     struct RelaxStats {
         double energy = 0.0;
         double peak = 0.0;
@@ -182,12 +166,10 @@ public:
     Engine& operator=(const Engine&) = delete;
     ~Engine() { destroy(); }
 
-    // half_v / kinetic are SplitOperator3D's phase tables; psi0 the initial
-    // field. Grids: cubic n^3 or planar n x n x 1 (the 2D scenes) -- ONE
-    // baked fft_line<n> serves every transformed axis, so x/y share n and
-    // z is n or 1 (a length-1 axis is skipped: its DFT is the identity).
-    // The propagator's phases are computed IN-SHADER from the scalar
-    // potential (R32) and three 1D k^2 tables -- no complex phase tables.
+    // Grids: cubic n^3 or planar n x n x 1 -- ONE baked fft_line<n> serves
+    // every transformed axis (x/y share n, z is n or 1; a length-1 axis is
+    // skipped, its DFT the identity). Phases are computed in-shader from the
+    // R32 potential + three 1D k^2 tables, so no complex phase tables.
     bool initialize(DeviceContext& ctx, const ses::Grid3D& grid,
                     const EngineKernels& blobs,
                     const std::vector<double>& potential, double dt,
@@ -206,8 +188,7 @@ public:
         mul_groups_ = static_cast<std::uint32_t>((cells_ + 255) / 256);
         field_bytes_ = 2 * cells_ * sizeof(float);
 
-        // Dynamic-offset UBO slot stride: the device's minimum offset
-        // alignment, grown to hold one KickParams block.
+        // Kick UBO slot stride: device min offset alignment, grown to a KickParams.
         VkPhysicalDeviceProperties props{};
         vkGetPhysicalDeviceProperties(ctx.phys_dev, &props);
         kick_stride_ = static_cast<std::uint32_t>(
@@ -330,8 +311,7 @@ public:
         }
         staging_bytes_ = field_bytes_;
 
-        // Optional fused V+mask kernel: absent blob => step() falls back to
-        // separate half-kick + damp passes.
+        // Optional fused V+mask: absent blob => step() uses separate half-kick + damp.
         if (blobs.pd != nullptr) {
             if (!phase_damp_.create(ctx, blobs.pd, blobs.pd_size,
                                     {{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
@@ -352,9 +332,8 @@ public:
             }
             mcwf_kernel_ok_ = true;
         }
-        // Optional fused relax renorm: both blobs present => the GPU finishes
-        // the norm (partials -> inv) and rescales in the same submit, so
-        // relax_step() needs no host round-trip. Absent => 2-submit path.
+        // Optional fused relax renorm: both blobs => GPU finishes norm
+        // (partials -> inv) and rescales in one submit; absent => 2-submit.
         if (blobs.norm_finalize != nullptr && blobs.scale_buf != nullptr) {
             if (!finalize_.create(ctx, blobs.norm_finalize,
                                   blobs.norm_finalize_size,
@@ -369,9 +348,8 @@ public:
             }
             fused_relax_ok_ = true;
         }
-        // Optional fp32 Bohmian-velocity kernel for the streakline flow. Absent
-        // blob => no velocity volume (the renderer's flow feature needs it).
-        // Planar grids skip it: the z-gradient needs depth.
+        // Optional fp32 Bohmian-velocity kernel (streakline flow). Planar grids
+        // skip it: the z-gradient needs depth.
         if (blobs.flow_velocity != nullptr && grid.z.n > 1) {
             if (!flow_vel_k_.create(ctx, blobs.flow_velocity,
                                     blobs.flow_velocity_size,
@@ -424,11 +402,10 @@ public:
                                0.0f};
         const ConjParams conjN{static_cast<std::uint32_t>(cells_),
                                1.0f / static_cast<float>(cells_), 0.0f, 0.0f};
-        // Per-axis line enumeration (base = (l % mod_a)*mul_b +
-        // (l / mod_a)*mul_c, element step = stride); n_lines doubles as the
-        // dispatch count and a length-1 axis dispatches ZERO lines (fft3 /
-        // record_shear skip it: identity). Cubic grids reproduce the old
-        // n^2 tables bitwise.
+        // Per-axis line enumeration (base = (l % mod_a)*mul_b + (l / mod_a)*mul_c,
+        // step = stride); n_lines is the dispatch count, ZERO for a length-1 axis
+        // (fft3/record_shear skip it: identity). Cubic grids reproduce the tables
+        // bitwise.
         const std::int32_t nx = grid.x.n;
         const std::int32_t ny = grid.y.n;
         const std::int32_t nz = grid.z.n;
@@ -442,12 +419,11 @@ public:
             fft_lines_[a] =
                 len > 1 ? static_cast<std::uint32_t>(fftp[a].n_lines) : 0;
         }
-        // conjA: the per-axis inverse-FFT scale (1/n, the single transformed
-        // axis) used by the shear path.
+        // conjA: per-axis inverse-FFT scale 1/n (single transformed axis; shear).
         const ConjParams conjA{static_cast<std::uint32_t>(cells_),
                                1.0f / static_cast<float>(n_), 0.0f, 0.0f};
-        // finalize params: reuse ConjParams as {ngroups, cell_volume} so the
-        // GPU can turn sum(partials)*dV into inv = 1/sqrt(norm_sq).
+        // finalize params: ConjParams reused as {ngroups, cell_volume}; GPU
+        // turns sum(partials)*dV into inv = 1/sqrt(norm_sq).
         const ConjParams renormp{kGroups,
                                  static_cast<float>(grid.cell_volume()), 0.0f,
                                  0.0f};
@@ -475,8 +451,7 @@ public:
         }
         kick_slots_ = 2;
 
-        // conj (0,0) coefficients: the axpy UBO is rewritten per projection;
-        // the synth UBO per synthesis.
+        // Zeroed seeds: the axpy UBO is rewritten per projection, synth per synth.
         const AxpyParams axpy0{static_cast<std::uint32_t>(cells_), 0, 0.0f,
                                0.0f};
         const SynthParams synth0{};
@@ -596,9 +571,8 @@ public:
             !upload_field(psi_, psi0)) {
             return false;
         }
-        // Plan the VkFFT 3D transform directly on psi_'s VkBuffer (plan
-        // creation compiles shaders via glslang). Failure leaves the engine
-        // on the hand-rolled line FFT.
+        // Plan VkFFT on psi_'s VkBuffer (plan creation compiles shaders via
+        // glslang); failure leaves the engine on the hand-rolled line FFT.
         ensure_vkfft();
         return true;
     }
@@ -628,17 +602,15 @@ public:
         shot.submit_and_wait(*ctx_);
         shot.destroy(*ctx_);
         if (bridged) {
-            flip_volume();  // fence observed: the write is the display now
+            flip_volume();
         }
     }
 
-    // step()'s content into an arbitrary command buffer. Strang batch with
-    // interior FULL kicks: e^{-iVdt/2} (kin e^{-iVdt})^{n-1} kin e^{-iVdt/2}
-    // -- the operator product is IDENTICAL to per-step half-kick pairs, one
-    // elementwise pass fewer per step. With absorb the mask rides the
-    // trailing kick of every step (fused kernel; diagonal factors commute
-    // exactly, per-step damping rate unchanged); fallback without the fused
-    // kernel: separate passes. Returns whether the bridge tail recorded.
+    // step()'s body into an arbitrary cb. Strang batch, interior FULL kicks:
+    // e^{-iVdt/2} (kin e^{-iVdt})^{n-1} kin e^{-iVdt/2} -- product identical to
+    // per-step half-kick pairs, one pass fewer per step. With absorb the mask
+    // rides each trailing kick (diagonal factors commute; rate unchanged);
+    // else separate passes. Returns whether the bridge tail recorded.
     bool record_step_batch(VkCommandBuffer cb, int nsteps, bool absorb,
                            bool bridge) {
         Recorder r{cb, true};
@@ -897,7 +869,7 @@ public:
         shot.submit_and_wait(*ctx_);
         shot.destroy(*ctx_);
         if (bridged) {
-            flip_volume();  // fence observed: the write is the display now
+            flip_volume();
         }
     }
 
@@ -983,11 +955,10 @@ public:
     }
     void rotate_z_shear(double theta) { rotate_axis_shear(2, theta); }
 
-    // Magnetic Strang step: R(a) . real-step . R(a), a = (B/2)(dt/2), about
-    // the field axis. half_ must hold the diamagnetic-augmented table
-    // (set_half_potential). The half-angle is the same for every rotation in
-    // the batch, so the two shear parameter sets are staged once and the
-    // whole batch records as one submission.
+    // Magnetic Strang step: R(a) . real-step . R(a), a = (B/2)(dt/2), about the
+    // field axis; the potential must be the diamagnetic-augmented one. Same
+    // half-angle every rotation, so the two shear UBOs stage once and the whole
+    // batch is one submission.
     void magnetic_step(int axis, double half_angle, int nsteps,
                        bool absorb = false, bool bridge = false) {
         const int b = (axis + 1) % 3;
@@ -1008,7 +979,7 @@ public:
         shot.submit_and_wait(*ctx_);
         shot.destroy(*ctx_);
         if (bridged) {
-            flip_volume();  // fence observed: the write is the display now
+            flip_volume();
         }
     }
 
@@ -1534,14 +1505,12 @@ public:
         r.dispatch(mc_classify_, mc_classify_set_, mc_nblocks_);
         r.dispatch(mc_scan_, mc_scan_set_, 1);
         r.dispatch(mc_emit_, mc_emit_set_, mc_nblocks_);
-        // Make the mc writes available. mc_vbuf_ (vertex fetch) and
-        // mc_indirect_ (draw-indirect args) are read on the GRAPHICS queue in a
-        // LATER submission (cross-queue), and mc_indirect_ by the transfer
-        // readback just below. A COMPUTE-queue barrier CANNOT name graphics
-        // stages (VERTEX_ATTRIBUTE_INPUT is invalid here -- validation flagged
-        // it), so make the writes available broadly (ALL_COMMANDS + MEMORY_READ)
-        // and let the submit_and_wait fence + CONCURRENT buffer sharing carry
-        // the cross-queue visibility.
+        // Make the mc writes available: mc_vbuf_ (vertex fetch) and mc_indirect_
+        // (draw-indirect + the readback below) are read on the GRAPHICS queue
+        // later. A compute-queue barrier cannot name graphics stages
+        // (VERTEX_ATTRIBUTE_INPUT is invalid here), so make the writes broadly
+        // available (ALL_COMMANDS + MEMORY_READ) and let the fence + CONCURRENT
+        // sharing carry cross-queue visibility.
         VkBufferMemoryBarrier2 bmb[2]{};
         const VkBuffer bufs[2] = {mc_vbuf_.buf, mc_indirect_.buf};
         for (int i = 0; i < 2; ++i) {
@@ -1691,7 +1660,6 @@ public:
         shot.destroy(*ctx_);
     }
 
-    // GPU-reduced norm (sum |psi|^2 dV) and raw peak density.
     NormPeak norm_and_peak() {
         NormPeak out;
         OneShot shot;
@@ -1762,7 +1730,7 @@ public:
         record_flow_velocity(shot.cb());
         shot.submit_and_wait(*ctx_);
         shot.destroy(*ctx_);
-        flip_volume();  // fence observed: the write is the display now
+        flip_volume();
         return true;
     }
 
@@ -3119,8 +3087,8 @@ private:
         return a == 0 ? grid_.x : (a == 1 ? grid_.y : grid_.z);
     }
 
-    // Shearing lines along freq_axis (frequency space along freq_axis),
-    // shift each line by coeff * (its coord_axis coordinate).
+    // FFT-space lines along freq_axis, shifted by coeff * their coord_axis
+    // coordinate.
     ShearParams make_shear_params(int freq_axis, int coord_axis,
                                   double coeff) const {
         const ses::Grid1D& fa = axis_grid(freq_axis);
@@ -3141,9 +3109,9 @@ private:
         return sp;
     }
 
-    // Write the two shear parameter sets one (or many) three-shear
-    // rotation(s) about the axis perpendicular to (b, c) need: set0 =
-    // (b, c, -tan(theta/2)) used twice, set1 = (c, b, sin(theta)).
+    // Stage the two shear UBOs a three-shear rotation about the axis
+    // perpendicular to (b, c) needs: set0 = (b, c, -tan(theta/2)) used twice,
+    // set1 = (c, b, sin(theta)).
     void stage_rotation_ubos(int b, int c, double theta) {
         const double t = std::tan(0.5 * theta);
         const double sn = std::sin(theta);
@@ -3229,8 +3197,8 @@ private:
         return upload_raw(v_buf_, vf.data(), cells_ * sizeof(float));
     }
     bool upload_k2_tables(const ses::Grid3D& grid) {
-        // Per-axis lengths: a planar z axis has ONE bin (DC = 0), so the
-        // old to-n_ loops would read past its 1-element wavenumbers vector.
+        // Per-axis lengths: a planar z axis has ONE bin (DC = 0); looping to
+        // n_ would read past its 1-element wavenumbers vector.
         const auto fill = [this](Buffer& buf, const ses::Grid1D& axis) {
             const std::vector<double> k = ses::wavenumbers(axis);
             std::vector<float> t(k.size());
@@ -3276,7 +3244,7 @@ private:
         conf.size[2] = static_cast<std::uint64_t>(grid_.z.n);
         conf.physicalDevice = &ctx_->phys_dev;
         conf.device = &ctx_->device;
-        conf.queue = &ctx_->compute_queue;  // the engine's queue (see ctx)
+        conf.queue = &ctx_->compute_queue;  // the engine's queue
         conf.commandPool = &vkfft_pool_;
         conf.fence = &vkfft_fence_;
         conf.buffer = &vkfft_psi_buf_;
@@ -3436,7 +3404,7 @@ private:
     int flow_vel_m_ = 0;  // velocity-volume side (0 = not created)
     Buffer decode_scratch_[2]{};
     std::vector<State> states_;
-    std::vector<int> free_full_states_;  // released full-state slots, reusable
+    std::vector<int> free_full_states_;  // released full-state slots
     VkDeviceSize staging_bytes_ = 0;
     VkDeviceSize radial_bytes_ = 0;
     int proj_nr_ = 0;

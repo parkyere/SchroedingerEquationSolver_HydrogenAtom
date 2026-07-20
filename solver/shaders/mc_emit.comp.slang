@@ -1,13 +1,7 @@
-// Marching-cubes emit pass: same 8^3-cell blocking as classify. Each cell
-// recomputes its case, a shared Hillis-Steele scan turns per-cell triangle
-// counts into in-block offsets, and every triangle writes 3 interleaved
-// vertices (pos3 normal3 color3 -- the mesh pipeline's exact layout) at
-// slot block_offsets[wg] + prefix: a fixed function of the field, so the
-// output is deterministic and cell-ordered within each block. Normals are
-// interpolated central-difference gradients (down-gradient = outward,
-// indices clamped at the walls -- core marching_cubes verbatim); colors are
-// arg(psi) sampled trilinearly at the vertex through the cyclic HSV wheel
-// (core sampling/colormap verbatim).
+// Marching-cubes emit: 8^3-cell blocks (matches classify pass); vertices packed
+// interleaved pos3/normal3/color3 -- the mesh pipeline's exact vertex layout;
+// deterministic cell order. MC tables, gradient, sampling and colormap are
+// verbatim ports of the CPU core (keep in sync).
 import complex;
 import grid;
 
@@ -18,10 +12,10 @@ import grid;
 [[vk::binding(4, 0)]] StructuredBuffer<Complex, Std430DataLayout> psi;
 
 struct Params {
-    int4 npts;      // grid points per axis (.xyz)
-    int4 nblk;      // cell blocks per axis (.xyz)
-    float4 box_min; // .xyz
-    float4 cell_h;  // .xyz
+    int4 npts;
+    int4 nblk;
+    float4 box_min;
+    float4 cell_h;
     float iso;
     int max_tris;
 };
@@ -48,7 +42,7 @@ float den_clamped(int3 p) {
     return den[flat_at(p)];
 }
 
-// Central-difference density gradient (one-sided at the walls via clamping).
+// central-difference gradient; one-sided at the walls via index clamping
 float3 gradient_at(int3 p) {
     return float3(
         (den_clamped(p + int3(1, 0, 0)) - den_clamped(p - int3(1, 0, 0))) /
@@ -59,7 +53,6 @@ float3 gradient_at(int3 p) {
             (2.0 * params.cell_h.z));
 }
 
-// Trilinear complex sample + cyclic HSV phase wheel (core verbatim).
 float3 phase_color_at(float3 pos) {
     float3 s = (pos - params.box_min.xyz) / params.cell_h.xyz;
     int3 i0 = clamp(int3(floor(s)), int3(0, 0, 0), params.npts.xyz - 2);
@@ -105,7 +98,7 @@ void main(uint3 grp : SV_GroupID, uint lidx : SV_GroupIndex) {
         tris = uint(mc_tab[4352 + cube]);
     }
 
-    // Exclusive in-block scan of per-cell triangle counts.
+    // exclusive in-block scan of triangle counts
     s_cnt[li] = tris;
     GroupMemoryBarrierWithGroupSync();
     for (uint stride = 1u; stride < 512u; stride <<= 1u) {
@@ -121,7 +114,6 @@ void main(uint3 grp : SV_GroupID, uint lidx : SV_GroupIndex) {
         return;
     }
 
-    // Corner geometry once per cell.
     float3 cpos[8];
     float cval[8];
     for (int c = 0; c < 8; ++c) {
@@ -151,7 +143,7 @@ void main(uint3 grp : SV_GroupID, uint lidx : SV_GroupIndex) {
     for (uint tr = 0u; tr < tris; ++tr) {
         uint slot = base + tr;
         if (slot >= uint(params.max_tris)) {
-            return;  // cap: offsets are monotone, the tail is a clean prefix cut
+            return;  // cap: monotone offsets, tail is a clean prefix cut
         }
         for (uint v = 0u; v < 3u; ++v) {
             int e = mc_tab[256 + cube * 16 + int(tr) * 3 + int(v)];

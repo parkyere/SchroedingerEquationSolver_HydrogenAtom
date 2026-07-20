@@ -8,8 +8,7 @@ export import ses.grid;
 export import ses.vec;
 
 
-// Gaussian wavepacket factory (atomic units): psi = (2 pi s^2)^(-1/4) exp(-(x-x0)^2/(4 s^2)) exp(i k0 x).
-// Continuum amplitude is unit-norm; final discrete normalize absorbs grid sampling error.
+// Analytic prefactor is unit-norm; normalize() absorbs discrete sampling error.
 
 
 export namespace ses {
@@ -26,7 +25,6 @@ inline Field1D gaussian_wavepacket(const Grid1D& g, double x0, double sigma, dou
     return psi;
 }
 
-// 3D packet: product of three 1D packets with per-axis width and momentum.
 inline Field3D gaussian_wavepacket(const Grid3D& g, Vec3d r0, Vec3d sigma, Vec3d k0) {
     Field3D psi{g};
     auto envelope = [](double u, double u0, double s) {

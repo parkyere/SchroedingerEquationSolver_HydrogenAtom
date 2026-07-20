@@ -1,5 +1,4 @@
-// Strang half-kick without a phase table: psi[i] *= exp(i * coef * V[i]),
-// coef = -dt/2, phase computed in-shader from the scalar potential (R32).
+// Strang half-kick; coef = -dt/2, psi *= exp(i*coef*V), V = R32 potential.
 import complex;
 
 [[vk::binding(0, 0)]] RWStructuredBuffer<Complex, Std430DataLayout> psi;

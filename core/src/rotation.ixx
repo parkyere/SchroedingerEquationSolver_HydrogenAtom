@@ -11,12 +11,8 @@ export import ses.fft;
 export import ses.field;
 
 
-// Exact, unitary rotation of a 3D field about a coordinate axis via the
-// three-shear (Paeth) decomposition in the perpendicular plane,
-//     R(theta) = Bshear(-tan(theta/2)) . Cshear(sin theta) . Bshear(-tan(theta/2)),
-// each shear a per-line shift applied exactly by the Fourier shift theorem
-// (X(k) *= e^{-i k d}). Norm-conserving, no interpolation blur; |theta| < pi.
-// Used for the paramagnetic (B/2) L_axis factor of the magnetic propagator.
+// Exact unitary axis rotation via Paeth three-shear (norm-conserving, no
+// interpolation blur). Paramagnetic (B/2) L_axis factor of the magnetic propagator.
 
 
 export namespace ses {
@@ -27,9 +23,7 @@ inline constexpr const Grid1D& axis_grid(const Grid3D& g, int a) noexcept {
     return a == 0 ? g.x : (a == 1 ? g.y : g.z);
 }
 
-// Shift every line along `freq_axis` by d = coeff * (its `coord_axis`
-// coordinate), exactly, via the Fourier shift theorem X(k) *= e^{-i k d}.
-// freq_axis != coord_axis (both lie in the rotation plane).
+// Fourier-shift each freq_axis line; requires freq_axis != coord_axis (rotation plane).
 inline void axis_shear(Field3D& f, int freq_axis, int coord_axis, double coeff) {
     const Grid3D& g = f.grid();
     const int n[3] = {g.x.n, g.y.n, g.z.n};
@@ -39,7 +33,7 @@ inline void axis_shear(Field3D& f, int freq_axis, int coord_axis, double coeff) 
     const int nf = n[freq_axis];
     const int sf = s[freq_axis];
 
-    int perp[2];  // the two axes perpendicular to freq_axis (ascending)
+    int perp[2];
     int pc = 0;
     for (int a = 0; a < 3; ++a) {
         if (a != freq_axis) {
@@ -74,8 +68,7 @@ inline void axis_shear(Field3D& f, int freq_axis, int coord_axis, double coeff) 
     }
 }
 
-// The two in-plane axes (b, c) for a rotation about `axis`, right-handed
-// (b x c = axis): z->(x,y), x->(y,z), y->(z,x).
+// In-plane axes for rotation about `axis`, right-handed: b x c = axis.
 inline constexpr void plane_axes(int axis, int& b, int& c) noexcept {
     b = (axis + 1) % 3;
     c = (axis + 2) % 3;
@@ -83,8 +76,7 @@ inline constexpr void plane_axes(int axis, int& b, int& c) noexcept {
 
 }  // namespace rotation_detail
 
-// Rotate the field about coordinate `axis` (0=x,1=y,2=z) by theta (active,
-// right-handed), exactly and unitarily. |theta| < pi.
+// Rotate about `axis` (0=x,1=y,2=z) by theta, active right-handed. |theta| < pi.
 inline void rotate_axis(Field3D& f, int axis, double theta) {
     int b = 0;
     int c = 0;
@@ -96,7 +88,6 @@ inline void rotate_axis(Field3D& f, int axis, double theta) {
     rotation_detail::axis_shear(f, b, c, -t);
 }
 
-// Rotate about +z (the common case).
 inline void rotate_z(Field3D& f, double theta) { rotate_axis(f, 2, theta); }
 
 }  // namespace ses

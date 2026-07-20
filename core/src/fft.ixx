@@ -18,17 +18,14 @@ import ses.parallel;
 // Convention (matches FFTW/NumPy, pinned by tests/fft_test.cpp):
 //     forward:  X_k = sum_n x_n e^{-2 pi i k n / N}   (unnormalized)
 //     inverse:  x_n = (1/N) sum_k X_k e^{+2 pi i k n / N}
-// Sizes must be powers of two.
 
 
 export namespace ses {
 
-// Twiddle table w[j] = e^{-2 pi i j / n}, j = 0 .. n/2-1, computed directly
-// so every factor sits within ~1 ulp of the unit circle. (The recurrence
-// w *= wlen drifts off the circle and damps the norm -- caught by
-// SplitOperator.ConservesNorm.) Stateless by design (no thread_local):
-// the 3D passes share one read-only table per axis, cheaper than a
-// per-thread cache.
+// Twiddle table w[j] = e^{-2 pi i j / n}, computed directly not by the w *= wlen
+// recurrence (drifts off the unit circle, damps norm; caught by
+// SplitOperator.ConservesNorm). Stateless (no thread_local): 3D passes share one
+// read-only table per axis, cheaper than a per-thread cache.
 inline std::vector<std::complex<double>> fft_twiddles(std::size_t n) {
     std::vector<std::complex<double>> w(n / 2);
     const double ang = -2.0 * std::numbers::pi / static_cast<double>(n);
@@ -39,13 +36,9 @@ inline std::vector<std::complex<double>> fft_twiddles(std::size_t n) {
     return w;
 }
 
-// In-place forward transform of a contiguous line of length n against a
-// prebuilt fft_twiddles(n) table. Iterative: bit-reversal permutation, then
-// butterfly passes of doubling length.
 inline void fft(std::complex<double>* a, std::size_t n, const std::complex<double>* w) {
-    // Runtime guard, not just assert: under NDEBUG a mis-sized axis would
-    // silently produce garbage or spin (the bit-reversal loop assumes a
-    // power of two).
+    // Runtime guard not assert: under NDEBUG a mis-sized axis spins/garbles
+    // (bit-reversal assumes a power of two).
     if ((n & (n - 1)) != 0) {
         throw std::invalid_argument("ses::fft: size must be a power of two");
     }
@@ -65,7 +58,7 @@ inline void fft(std::complex<double>* a, std::size_t n, const std::complex<doubl
         }
     }
 
-    // Butterfly passes: len = 2, 4, ..., n. Stage len uses w_len^j = w[j * n/len].
+    // Butterfly passes. Stage len uses w_len^j = w[j * n/len].
     for (std::size_t len = 2; len <= n; len <<= 1) {
         const std::size_t stride = n / len;
         for (std::size_t i = 0; i < n; i += len) {
@@ -92,8 +85,7 @@ inline void fft(std::complex<double>* a, std::size_t n) {
 
 inline void fft(std::vector<std::complex<double>>& a) { fft(a.data(), a.size()); }
 
-// In-place inverse transform via the conjugation identity:
-//     ifft(X) = conj(fft(conj(X))) / N
+// Conjugation identity: ifft(X) = conj(fft(conj(X))) / N
 inline void ifft(std::vector<std::complex<double>>& a) {
     for (std::complex<double>& z : a) {
         z = conj(z);
@@ -105,9 +97,8 @@ inline void ifft(std::vector<std::complex<double>>& a) {
     }
 }
 
-// 3D forward transform: 1D FFT per axis (x-lines contiguous in the x-fastest
-// layout; y/z lines gathered into per-worker scratch). Each line is owned by
-// exactly one worker, so the threaded result is BITWISE IDENTICAL to serial.
+// 3D forward: 1D FFT per axis. x-lines contiguous; y/z gathered into per-worker
+// scratch. Each line owned by one worker -> bitwise identical to serial.
 inline void fft(Field3D& f) {
     std::vector<std::complex<double>>& a = f.data();
     const Grid3D& g = f.grid();
@@ -115,8 +106,7 @@ inline void fft(Field3D& f) {
     const int ny = g.y.n;
     const int nz = g.z.n;
 
-    // Validate every axis up front: a mis-sized grid must throw on the
-    // caller's thread, never inside the worker pool.
+    // Validate up front: throw on the caller's thread, never inside the pool.
     if (((nx & (nx - 1)) | (ny & (ny - 1)) | (nz & (nz - 1))) != 0) {
         throw std::invalid_argument("ses::fft: size must be a power of two");
     }
@@ -131,7 +121,7 @@ inline void fft(Field3D& f) {
         });
     }
 
-    // One gather/scatter line per worker, reused across the y and z passes.
+    // Scratch line per worker, reused across the y and z passes.
     std::vector<std::vector<std::complex<double>>> scratch(
         static_cast<std::size_t>(parallel_workers()));
 
@@ -182,8 +172,8 @@ inline void fft(Field3D& f) {
     }
 }
 
-// 3D inverse: conjugation identity with N = nx*ny*nz. The elementwise loops
-// are threaded (disjoint elements: bitwise identical to serial).
+// 3D inverse: conjugation identity. Elementwise loops threaded
+// (disjoint -> bitwise identical to serial).
 inline void ifft(Field3D& f) {
     std::vector<std::complex<double>>& a = f.data();
     const int n = static_cast<int>(a.size());

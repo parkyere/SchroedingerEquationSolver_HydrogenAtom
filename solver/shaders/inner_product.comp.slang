@@ -1,6 +1,5 @@
-// Complex inner product <phi|psi> = sum conj(phi)*psi, tree-reduced into one
-// complex partial per workgroup; the host sums the partials.
-// Bindings: psi (0), partials (2), phi (3), std140 UBO n (1).
+// Complex inner product <phi|psi>; one partial per workgroup, host sums them.
+// Bindings: psi=0, partials=2, phi=3, std140 UBO n=1.
 import complex;
 
 [[vk::binding(0, 0)]] StructuredBuffer<Complex, Std430DataLayout> psi;

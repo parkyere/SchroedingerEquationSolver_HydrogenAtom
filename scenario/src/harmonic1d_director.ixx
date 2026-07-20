@@ -14,58 +14,26 @@ import ses.mcwf1d;
 import ses.wavepacket;
 
 
-// Textbook 1D harmonic oscillator with ladder-operator controls. The ground
-// state is the exact Gaussian (sigma = 1/sqrt(2 omega)); [U] applies a-dag,
-// [D] applies a, [S] prepares a random coherent superposition, [2] resets
-// to the current well's ground. Down from the ground state is refused by
-// the operator itself (a|0> = 0: vanishing norm, psi untouched) -- physics,
-// not a UI rule. Up is capped at the MEASURED grid representability
-// ceiling (ses.ladder ho_level_cap): on this box the ceiling is the box
-// itself -- the level's turning points must fit inside +-100 Bohr -- so
-// the cap rises with omega (~1200 at w = 0.25, ~19000 at w = 4).
-//
-// The HUD classifies the state honestly with Var(H) -- no measurement, no
-// basis bookkeeping: Var ~ 0 names the Fock level n; otherwise the state
-// is a superposition and <N> = <H>/w - 1/2 is a real number. The well
-// stiffness omega is live-adjustable as a sudden QUENCH: psi is KEPT, so
-// the old state breathes in the new well (and the classifier duly reports
-// a superposition); reset then lands in the new ground.
-
-
 export namespace ses_shell {
 
-constexpr double kHo1dOmega = 0.25;   // boot default; panel-adjustable
+constexpr double kHo1dOmega = 0.25;
 constexpr double kHo1dOmegaMin = 0.05;
-// The dial spans two decades of stiffness; with the box-limited ceiling
-// the cap now RISES with omega across the whole dial (Nyquist would only
-// take over near w ~ k_max/x_max ~ 10, past the stop).
+// Nyquist would only bind near w ~ k_max/x_max ~ 10, past this stop.
 constexpr double kHo1dOmegaMax = 4.0;
-// A 1D line is ~4 decades cheaper than the 256^3 volumes: the box is
-// widened to raise the BOX-LIMITED level ceiling (turning point x_n =
-// sqrt((2n+1)/w) must fit): +-100 holds n ~ 1200 at w = 0.25 and ~19000
-// at w = 4 -- with the scaled Hermite chain (ses.ladder) the MEASURED
-// ho_level_cap now reaches that box ceiling; nothing artificial remains
-// below it. The line runs at 65536 points (2^16, h ~ 0.003 -- still
-// 1/256th of one 256^3 volume, k_max ~ 1000, so Nyquist never binds on
-// this dial). The huge k_max would murder the raw spectral chain, but
-// eigenstates rung via the stable oracle path and superpositions via the
-// streaming Fock-basis path -- neither cares about k_max.
+// x_n = sqrt((2n+1)/w) turning point must fit the box; 65536 pts keep
+// k_max well above Nyquist.
 constexpr double kHo1dBox = 100.0;    // Bohr half-extent
 constexpr int kHo1dPoints = 65536;
 constexpr double kHo1dDt = 0.04;
-constexpr double kHo1dRScale = 18.0;  // radius = 18 |psi|^2 (~5 Bohr at n=0)
+constexpr double kHo1dRScale = 18.0;  // radius ~ |psi|^2
 constexpr double kHo1dEScale = 0.8;   // V display: Ha -> Bohr height
-// No display clamp: a clamped parabola reads as a FLAT-TOPPED (finite)
-// well -- wrong physics on screen. The red curve honestly leaves the frame.
+// effectively no clamp; a clamped parabola would read as a finite well.
 constexpr double kHo1dYClamp = 1e30;
-// Var(H) below this reads as an eigenstate: grid eigenstates sit at
-// ~1e-13, the closest superposition (adjacent levels, tiny weight eps has
-// Var ~ eps^2 w^2) crosses it only below display relevance.
+// eigenstate iff Var(H) < this; grid eigenstates ~1e-13, superpositions
+// far above.
 constexpr double kHo1dVarEigenTol = 1e-8;
-constexpr int kHo1dRandomTop = 5;     // random superposition spans n = 0..5
-// Schrodinger cat |a> + |-a>: lobe offset (alpha = x0 sqrt(w/2), <n> ~ 8
-// at the boot omega) and the cavity photon-loss rate for the MCWF
-// decoherence lens (each lost photon flips the cat parity).
+constexpr int kHo1dRandomTop = 5;
+// cat lobe offset x0 (coherent alpha = x0 sqrt(w/2)); photon-loss rate.
 constexpr double kHo1dCatX0 = 8.0;
 constexpr double kHo1dKappa = 0.05;
 
@@ -89,12 +57,7 @@ public:
     double level_energy() const override {
         return ses::mean_energy(psi_, potential_);
     }
-    // Two regimes, two noise-free paths: a classified EIGENSTATE rungs via
-    // the stable oracle-rebuilt path (representability ceiling applies); a
-    // superposition rungs in the truncated Fock basis (ladder_fock: exact
-    // coefficient action, capped by the tracked band). The raw spectral
-    // chain -- whose noise cap collapses at this grid's k_max -- remains
-    // only as the honest fallback for a state outside the Fock band.
+    // two rung algorithms, two ceilings: grid (eigenstate) vs Fock (superposition).
     int max_level() const override {
         return level_ >= 0 ? cap_level_ : fock_top();
     }
@@ -125,14 +88,12 @@ public:
                     psi_ = std::move(trial);
                 }
             } else {
-                // Outside the Fock band: the raw operator is the honest
-                // (noise-amplifying) fallback.
+                // outside the Fock band: raw operator, noise-amplifying fallback.
                 norm2 = up ? ses::ladder_raise(psi_, omega_)
                            : ses::ladder_lower(psi_, omega_);
             }
         }
         if (norm2 < 1e-6) {
-            // ||a psi||^2 = <N> ~ 0: annihilation (psi untouched).
             note_ = "a|0> = 0: refused";
             title_dirty_ = true;
             return false;
@@ -146,8 +107,7 @@ public:
 
     void set_omega(double w) override {
         omega_ = std::clamp(w, kHo1dOmegaMin, kHo1dOmegaMax);
-        // Sudden quench: swap the well under the LIVE psi (kept), retarget
-        // reset at the new ground, re-measure both caps.
+        // Sudden quench: well swapped under the LIVE (kept) psi.
         set_potential(ses::harmonic_potential(grid1d_, omega_));
         set_reset_target(ground());
         remeasure_caps();
@@ -156,11 +116,7 @@ public:
     }
 
     void random_superposition() override {
-        // Complex-Gaussian amplitudes over n = 0..kHo1dRandomTop, each
-        // basis state built DIRECTLY from the Hermite oracle (clean at any
-        // grid k_max; the raw raise chain would already be noise-corrupted
-        // here) -- a PURE coherent superposition (mixtures are not
-        // representable in a wavefunction solver).
+        // Hermite-oracle basis: clean at any k_max, unlike the raw raise chain.
         ses::Field1D acc{grid1d_};
         std::normal_distribution<double> gauss;
         const int top = std::min(kHo1dRandomTop, fock_top());
@@ -177,9 +133,9 @@ public:
         classify();
     }
 
-    // ---- cat + photon-loss MCWF (the decoherence lens) ----
+    // ---- cat + photon-loss MCWF ----
     // CONTRACT: tests/mcwf1d_test.cpp (parity flip, kappa bleed) +
-    // --selftest-cat (scene-scale energy decay and jump count).
+    // --selftest-cat (scene energy decay + jump count).
     void cat() override {
         const double sig = 1.0 / std::sqrt(2.0 * omega_);
         ses::Field1D a =
@@ -203,9 +159,8 @@ public:
     bool loss_on() const override { return kappa_ > 0.0; }
     long long jump_count() const override { return jumps_; }
 
-    // Lazy eigen-decomposition strip (0..100 eV = 3.675 Ha): recomputed
-    // only when a MUTATION touched the weights (unitary evolution never
-    // does). CONTRACT: tests/ho_spectrum_test.cpp (the core helper).
+    // Lazy spectrum strip (0..100 eV): recomputed only on state mutation,
+    // never by unitary evolution. CONTRACT: tests/ho_spectrum_test.cpp.
     int spectrum_count() override {
         ensure_spectrum();
         return static_cast<int>(spec_.size());
@@ -277,8 +232,7 @@ protected:
         return s;
     }
 
-    // Loss on: interleave the MCWF photon-loss step (jump = parity flip,
-    // no-jump = conditional kappa damping) with the unitary stride.
+    // kappa > 0: interleave the MCWF photon-loss step with the unitary stride.
     void step_batch(int n) override {
         if (kappa_ <= 0.0) {
             Line1DDirector::step_batch(n);
@@ -308,7 +262,6 @@ protected:
 
 private:
     ses::Field1D ground() const {
-        // sigma = 1/sqrt(2 omega): the exact HO ground state.
         return ses::gaussian_wavepacket(grid1d_, 0.0,
                                         1.0 / std::sqrt(2.0 * omega_), 0.0);
     }
@@ -321,7 +274,7 @@ private:
         spec_ = ses::ho1d_spectrum(psi_, omega_, 100.0 / 27.211386);
     }
 
-    // The no-jump damping ITP rides omega and kappa; rebuild on change
+    // no-jump damping ITP depends on omega & kappa; rebuild on change
     // (quench-safe: potential_ always matches omega_).
     void ensure_damp() {
         if (damp_ && damp_w_ == omega_ && damp_k_ == kappa_) {
@@ -333,9 +286,8 @@ private:
         damp_k_ = kappa_;
     }
 
-    // Honest state classification via Var(H): eigenstates name their n,
-    // everything else is a superposition (level -1). Every mutation path
-    // routes through here, so it doubles as the spectrum invalidation.
+    // Var(H) < tol names the Fock level n, else superposition (-1). Every
+    // mutation routes here, so it also invalidates the spectrum cache.
     void classify() {
         spec_dirty_ = true;
         if (ses::energy_variance(psi_, potential_) < kHo1dVarEigenTol) {
@@ -346,10 +298,7 @@ private:
         }
     }
 
-    // ho_level_cap sweeps the whole scaled chain (up to the box ceiling,
-    // ~1200 levels at w = 0.25 and ~19000 at w = 4 on this grid), so each
-    // distinct omega is measured ONCE and memoized -- revisiting a slider
-    // value costs nothing.
+    // ho_level_cap sweep is expensive; memoize the cap per distinct omega.
     void remeasure_caps() {
         for (const auto& [w, cap] : cap_memo_) {
             if (w == omega_) {
@@ -360,22 +309,17 @@ private:
         cap_level_ = ses::ho_level_cap(grid1d_, omega_);
         cap_memo_.emplace_back(omega_, cap_level_);
     }
-    // Fock band top for superposition laddering: the representability
-    // ceiling is the ONLY cap (an up-rung targets fock_top() + 1); the
-    // streaming ladder_fock scans just the levels the state occupies, so a
-    // deep band top costs nothing for low superpositions.
+    // Fock band top (cap - 1) so an up-rung to fock_top()+1 stays in band.
     int fock_top() const { return cap_level_ - 1; }
 
     double omega_ = kHo1dOmega;
-    std::vector<std::pair<double, int>> cap_memo_;  // measured cap per omega
-    int cap_level_ = 0;  // stable rungs: grid representability ceiling
+    std::vector<std::pair<double, int>> cap_memo_;
+    int cap_level_ = 0;  // grid representability ceiling
     int level_ = 0;
     std::string note_;
     std::mt19937 rng_;
-    // Lazy spectrum cache (dirty on every state mutation).
     std::vector<std::pair<double, double>> spec_;
     bool spec_dirty_ = true;
-    // Photon-loss MCWF state (the cat decoherence lens).
     double kappa_ = 0.0;
     std::unique_ptr<ses::ImaginaryTimePropagator1D> damp_;
     double damp_w_ = -1.0;

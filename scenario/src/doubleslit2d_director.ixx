@@ -19,22 +19,12 @@ export import ses.lattice2d;
 import ses.parallel;
 
 
-// The REAL double-slit + Aharonov-Bohm experiment, in 2D, literally: ONE
-// normalized electron packet per shot flies +x into a high potential wall
-// pierced by two slits; a solenoid (flux along z, drawn as the amber arrow
-// + core circle) hides INSIDE the wall between the slits; a screen line on
-// the right integrates the arrivals ACROSS shots -- the single-electron-
-// at-a-time story: fire again (key 2 / the panel button) and the pattern
-// builds up. Electrons don't interact: a new shot replaces the previous
-// field (the old electron is done -- absorbed or detected); the open CAP
-// frame eats whatever leaves (no re-entry). Physics is the Peierls
-// lattice propagator (ses.lattice2d): the flux enters as EXACT link
-// phases, B = 0 in every plaquette the electron can reach -- pure AB
-// fringe shift, period 2 pi.
-//
-// Display: the phase-hued volume slab, face-on (user call -- the STM
-// height surface read as visual noise here). Physics lives on one z-plane
-// (nz = 1); staging replicates it into a thin display slab.
+// 2D double-slit + Aharonov-Bohm: one normalized packet per shot into a
+// two-slit wall; a z-solenoid hides between the slits; a screen line
+// integrates arrivals across non-interacting shots.
+// Peierls lattice (ses.lattice2d): flux enters as exact link phases,
+// B = 0 in every reachable plaquette -- pure AB fringe shift, period 2 pi.
+// Physics on one z-plane (nz = 1); staging replicates it into the display slab.
 // volk.h textually first: VK_* macros never cross module boundaries.
 
 
@@ -44,11 +34,10 @@ constexpr double kDs2dBoxX = 60.0;
 constexpr double kDs2dBoxY = 60.0;
 constexpr int kDs2dNx = 512;
 constexpr int kDs2dNy = 512;
-constexpr int kDs2dNz = 4;        // display slab thickness (cells)
+constexpr int kDs2dNz = 4;
 constexpr double kDs2dZHalf = 2.0;
 constexpr double kDs2dDt = 0.01;
-// Long wavelength (user order): lambda = 2 pi, fringe ~17 au at d = 8 --
-// a calm, readable pattern (kh ~ 0.23).
+// k0 = 1: fringe ~17 au at d = 8 (user's call).
 constexpr double kDs2dK0 = 1.0;
 constexpr double kDs2dSigma = 8.0;
 constexpr double kDs2dLaunchX = -35.0;
@@ -63,9 +52,7 @@ constexpr double kDs2dWidthMin = 1.0;
 constexpr double kDs2dWidthMax = 4.0;
 constexpr double kDs2dScreenX = 45.0;
 constexpr double kDs2dAbsorb = 10.0;
-// Gentle quadratic CAP, exp(-W0 (1 - d/width)^2 dt) per step: the cos^2
-// display mask is far too stiff for the slow shot (-ln m / dt ~ Ha at the
-// ramp head reflects ~30% of k0 = 1 back into the stage).
+// Quadratic CAP: cos^2 too stiff for the slow shot (~30% reflection at k0 = 1).
 // CONTRACT: lattice2d_test SinglePacketDrainsThroughTheOpenBoundary.
 constexpr double kDs2dAbsorbW0 = 4.0;
 constexpr int kDs2dStepsPerTick = 16;  // ~9.6 au/s at 60 fps: ~9 s transit
@@ -104,15 +91,11 @@ public:
         flux_ = phi;
         prop_->set_solenoid(flux_, solenoid_x(), 0.0);
         fire();
-        rebuild_props_overlays();  // the flux arrow length encodes Phi
+        rebuild_props_overlays();  // arrow length encodes Phi
     }
     double flux() const override { return flux_; }
-    // The panel's fire button / key 2: ONE more electron onto the stage;
-    // the screen keeps accumulating (CONTRACT: the selftest arc's shot2
-    // leg doubles the axis histogram).
+    // CONTRACT: the selftest arc's shot2 leg doubles the axis histogram.
     void refire() override { launch(); }
-    // Instantaneous probability past the wall (the absorbers eat both
-    // exits eventually; read while the pattern crosses the screen).
     double transmitted_fraction() const override {
         const double cell = phys_grid_.x.spacing() * phys_grid_.y.spacing() *
                             phys_grid_.z.spacing();
@@ -126,7 +109,6 @@ public:
         }
         return acc * cell;
     }
-    // The accumulated screen histogram at the row nearest y.
     double screen_at(double y) const override {
         int best = 0;
         for (int j = 1; j < kDs2dNy; ++j) {
@@ -161,7 +143,7 @@ public:
         }
         if (staging_dirty_) {
             staging_dirty_ = false;
-            rebuild_staging();  // phase-hued volume slab (face-on cloud)
+            rebuild_staging();
             rebuild_screen_curve();
         }
         if (++frames_ % 10 == 0) {
@@ -197,7 +179,7 @@ public:
     int steps_per_tick_x1() const override { return kDs2dStepsPerTick; }
 
     // ---- display ----
-    bool cloud() const override { return true; }  // face-on phase-hued slab
+    bool cloud() const override { return true; }
     double peak() const override { return peak_; }
     VkImageView psi_volume_view() override { return VK_NULL_HANDLE; }
     float next_flash_intensity() override { return 0.0f; }
@@ -235,26 +217,23 @@ public:
 
     int marker_count() const override { return 0; }
 
-    // Overlays: the wall slabs (filled), the solenoid arrow + core circle,
-    // the screen plate, and the accumulated arrival histogram.
     int overlay_curve_count() const override { return 4; }
     OverlayCurve overlay_curve(int i) const override {
-        if (i == 0) {  // pierced wall: translucent red slabs
+        if (i == 0) {
             return {wall_curve_.data(),
                     static_cast<int>(wall_curve_.size() / 3),
                     1.0f, 0.30f, 0.25f, 0.55f, true};
         }
-        if (i == 1) {  // solenoid: amber flux arrow along z + core circle
+        if (i == 1) {
             return {solenoid_curve_.data(),
                     static_cast<int>(solenoid_curve_.size() / 3),
                     1.0f, 0.70f, 0.20f, 1.0f};
         }
-        if (i == 2) {  // screen plate
+        if (i == 2) {
             return {plate_curve_.data(),
                     static_cast<int>(plate_curve_.size() / 3),
                     0.85f, 0.85f, 0.90f, 0.35f};
         }
-        // accumulated arrivals: cyan histogram growing off the plate
         return {screen_curve_.data(),
                 static_cast<int>(screen_curve_.size() / 3),
                 0.35f, 0.85f, 1.0f, 0.95f};
@@ -266,15 +245,13 @@ public:
 
 private:
     double solenoid_x() const {
-        // Buried mid-wall, quarter-cell off a lattice line so the cell
-        // containing it is unambiguous.
+        // Quarter-cell off a lattice line: unambiguous host plaquette.
         return 0.5 * (kDs2dWallLo + kDs2dWallHi) +
                0.25 * phys_grid_.x.spacing();
     }
 
     void build_mask() {
-        // 2D CAP frame, exp(-(Wx + Wy) dt) per step with the quadratic
-        // ramps (see kDs2dAbsorbW0): reflection-quiet for the slow shot.
+        // 2D CAP frame (see kDs2dAbsorbW0).
         auto ramp_w = [](const ses::Grid1D& ax, double x) {
             const double d = std::min(x - ax.xmin, ax.xmax - x);
             if (d >= kDs2dAbsorb) {
@@ -321,10 +298,7 @@ private:
         rebuild_props_overlays();
     }
 
-    // Launch ONE normalized electron packet (replacing whatever is in
-    // flight -- electrons don't interact; the previous one counts as
-    // detected/absorbed). The accumulated screen SURVIVES: shot after
-    // shot, the interference pattern builds up.
+    // One normalized packet replaces the in-flight one; screen survives (vs fire()).
     void launch() {
         ses::parallel_for(kDs2dNy, [&](int j) {
             const double y = phys_grid_.y.coord(j);
@@ -353,8 +327,7 @@ private:
         title_dirty_ = true;
     }
 
-    // Full reset: fresh screen + clock + one first electron. Geometry /
-    // flux changes come through here (the old pattern is void).
+    // Full reset; geometry/flux edits route here.
     void fire() {
         screen_.assign(static_cast<std::size_t>(kDs2dNy), 0.0);
         sim_time_ = 0.0;
@@ -373,8 +346,7 @@ private:
         }
         for (int s = 0; s < n; ++s) {
             prop_->step(psi_);
-            // Edge CAP: leaked flux VANISHES (open stage) -- no injection,
-            // no renormalization; the norm IS the electron still on stage.
+            // Edge CAP: leaked flux vanishes, no renorm -- norm = electron on stage.
             ses::parallel_for(kDs2dNy, [&](int j) {
                 const std::size_t row =
                     static_cast<std::size_t>(j) *
@@ -385,14 +357,12 @@ private:
                         mask_[static_cast<std::size_t>(j * kDs2dNx + i)];
                 }
             });
-            // The screen integrates arrivals: sum |psi|^2 dt on its line.
             for (int j = 0; j < kDs2dNy; ++j) {
                 screen_[static_cast<std::size_t>(j)] +=
                     std::norm(psi_(i_scr, j, 0)) * kDs2dDt;
             }
         }
-        // Brightness normalizer: decayed running max (no flicker as the
-        // packet dilutes through the slits).
+        // Brightness normalizer: decayed running max, no flicker as packet dilutes.
         double pk = 0.0;
         for (int j = 0; j < kDs2dNy; ++j) {
             for (int i = 0; i < kDs2dNx; ++i) {
@@ -418,7 +388,6 @@ private:
                 staging_[o + 1] = static_cast<float>(z.imag());
             }
         });
-        // Replicate the plane through the display slab.
         for (int k = 1; k < kDs2dNz; ++k) {
             std::copy(staging_.begin(),
                       staging_.begin() + static_cast<std::ptrdiff_t>(
@@ -428,8 +397,6 @@ private:
         }
     }
 
-    // Static scene furniture: wall slabs, solenoid arrow + core circle,
-    // screen plate.
     void rebuild_props_overlays() {
         wall_curve_.clear();
         auto slab = [&](double y0, double y1) {
@@ -458,8 +425,7 @@ private:
         slab(-0.5 * sep_ + 0.5 * width_, 0.5 * sep_ - 0.5 * width_);
         slab(0.5 * sep_ + 0.5 * width_, kDs2dBoxY);
 
-        // Solenoid: core circle in the plane + flux arrow along z with
-        // signed length ~ Phi (zero-length = invisible at Phi = 0).
+        // Solenoid: core circle + z arrow, signed length ~ Phi.
         solenoid_curve_.clear();
         const double pi = 3.14159265358979323846;
         const float xs = static_cast<float>(solenoid_x());
@@ -483,7 +449,6 @@ private:
         put(xs, 0.0f, len);
         put(xs + 0.8f, 0.0f, back);
 
-        // Screen plate.
         plate_curve_ = {static_cast<float>(kDs2dScreenX),
                         -static_cast<float>(kDs2dBoxY - kDs2dAbsorb), 0.0f,
                         static_cast<float>(kDs2dScreenX),
@@ -495,9 +460,7 @@ private:
         for (const double s : screen_) {
             smax = std::max(smax, s);
         }
-        // Absolute floor: the histogram is drawn self-normalized, and
-        // before any real arrival the accumulated Gaussian TAIL (~1e-22)
-        // would otherwise render as a full-height fake pattern.
+        // 1e-6 floor: else the self-normalized tail (~1e-22) renders as a fake pattern.
         const double scale = smax > 1e-6 ? 12.0 / smax : 0.0;
         screen_curve_.clear();
         for (int j = 0; j < kDs2dNy; ++j) {

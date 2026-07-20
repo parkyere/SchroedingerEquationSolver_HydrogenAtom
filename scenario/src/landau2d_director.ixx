@@ -20,12 +20,8 @@ import ses.parallel;
 import ses.potential;
 
 
-// Landau levels / cyclotron: 2D electron, uniform B along z (Peierls
-// lattice uniform plaquette flux -- gauge-exact, tested). Orbit:
-// r = k0/B, omega_c = B, CCW in the lattice's A_x = +B y gauge.
-// Amber overlay = PREDICTED orbit circle + center cross; white
-// breadcrumb trail = MEASURED <r>(t), closing at T = 2 pi / B (ladder
-// E_n = B(n + 1/2) revival). HUD: <n> = <E>/B - 1/2 off live lattice energy.
+// Landau/cyclotron: 2D electron, uniform B||z. Peierls lattice,
+// A_x = +B y gauge (gauge-exact), CCW orbit about the origin.
 
 
 export namespace ses_shell {
@@ -34,9 +30,8 @@ constexpr double kLd2dBox = 30.0;
 constexpr int kLd2dN = 512;
 constexpr int kLd2dNz = 4;
 constexpr double kLd2dZHalf = 2.0;
-// dt rides h^2: the bond angle tx*dt/2 = dt/(4 h^2) is the Trotter knob,
-// and 512^2 at dt = 0.01 hit 0.18 rad/bond (orbit closure 0.38 -> 0.99).
-// 0.0025 restores the 256^2 angle; StepsPerTick x4 keeps the visual pace.
+// dt=0.0025 holds the 256^2 bond angle tx*dt/2 at 512^2 (Trotter knob);
+// StepsPerTick x4 offsets the dt cut to hold the visual pace.
 constexpr double kLd2dDt = 0.0025;
 constexpr double kLd2dB = 0.4;
 constexpr double kLd2dBMin = 0.15;
@@ -81,27 +76,20 @@ public:
     double radius_pred() const override { return k0_ / b_; }
     double orbit_x() const override { return mean_[0]; }
     double orbit_y() const override { return mean_[1]; }
-    // Lattice energy expectation (hops + onsite) over B, minus the zero
-    // point: the live Landau index.
     double mean_n() const override { return energy_ / b_ - 0.5; }
     double antipode_dist() const override { return antipode_dist_; }
     double closure_dist() const override { return closure_dist_; }
-    // One cyclotron quantum up/down (CONTRACT: lattice2d LandauLadder test);
-    // the orbit records reset -- a level jump invalidates the old circle.
+    // One quantum up/down; a level jump invalidates the old orbit records.
+    // CONTRACT: lattice2d LandauLadder test.
     bool ladder(bool up) override {
         ses::Field3D next = ses::landau_ladder(psi_, b_, up);
         if (ses::norm_sq(next) < 1e-6) {
             return false;  // a|lowest> = 0: refuse the down-jump
         }
         ses::normalize(next);
-        // Measurement-based cap (the 1D ladder_cap rule; calibrated by the
-        // band probe on this grid: eigen-rungs hold +B to n ~ 13 = E ~
-        // 0.30/h^2, then the central-difference ladder pumps band-top
-        // artifacts -- rungs explode 12x then fold NEGATIVE). The guard is
-        // an energy CEILING, not a rung check: a-dag on the coherent orbit
-        // legitimately adds ~2B (it only shifts energy by B on
-        // eigenstates). CONTRACT: lattice2d_test
-        // LadderRefusesPastTheLatticeBand.
+        // Energy ceiling 0.30/h^2 = lattice band top (1D ladder_cap rule),
+        // not a rung check: a-dag adds ~2B on the coherent orbit (only B on
+        // eigenstates). CONTRACT: lattice2d_test LadderRefusesPastTheLatticeBand.
         const double e_cur = prop_->energy(psi_);
         const double e_next = prop_->energy(next);
         if (up) {
@@ -110,13 +98,12 @@ public:
                 return false;
             }
         } else if (e_cur - e_next < 0.05 * b_) {
-            // a removes no clean quantum here: the coherent displacement
-            // dominates (a|alpha> = alpha|alpha>, near-diagonal even on
-            // the raised tower -- measured), the honest floor.
+            // a removes no clean quantum: coherent state is ~eigen of a
+            // (a|alpha> = alpha|alpha>).
             return false;
         }
         psi_ = std::move(next);
-        measure();  // freshen <r>/energy caches (mean_n readout)
+        measure();
         trail_.clear();
         push_trail();
         antipode_dist_ = -1.0;
@@ -143,9 +130,8 @@ public:
         if (pending_steps_ > 0) {
             int n = pending_steps_;
             pending_steps_ = 0;
-            // Chunked stepping: the orbital-phase records (antipode /
-            // closure) and the breadcrumb trail need finer granularity
-            // than one big time-scaled batch.
+            // Chunk so trail + antipode/closure records get finer
+            // granularity than one time-scaled batch.
             while (n > 0) {
                 const int chunk = std::min(n, 8);
                 prop_->step(psi_, chunk);
@@ -166,7 +152,7 @@ public:
         }
         if (staging_dirty_) {
             staging_dirty_ = false;
-            rebuild_staging();  // phase-hued volume slab (face-on cloud)
+            rebuild_staging();
         }
         if (++frames_ % 10 == 0) {
             title_dirty_ = true;
@@ -207,7 +193,7 @@ public:
     int steps_per_tick_x1() const override { return kLd2dStepsPerTick; }
 
     // ---- display ----
-    bool cloud() const override { return true; }  // face-on phase-hued slab
+    bool cloud() const override { return true; }
     double peak() const override { return peak_; }
     VkImageView psi_volume_view() override { return VK_NULL_HANDLE; }
     float next_flash_intensity() override { return 0.0f; }
@@ -245,8 +231,6 @@ public:
 
     int marker_count() const override { return 0; }
 
-    // Overlays: predicted orbit + center cross (amber), measured trail
-    // (white breadcrumbs).
     int overlay_curve_count() const override { return 2; }
     OverlayCurve overlay_curve(int i) const override {
         if (i == 0) {
@@ -269,14 +253,13 @@ private:
         prop_ = std::make_unique<ses::PeierlsLattice2D>(phys_grid_, zero,
                                                         kLd2dDt);
         prop_->set_uniform_field(b_);
-        // Infinite plane, not a periodic torus: tunneled-out amplitude is
-        // ABSORBED at the frame (it visibly wrapped back before), and the
-        // conditional state renormalizes each chunk (the corral rule).
+        // Open plane, not a torus: absorb tunneled amplitude at the frame,
+        // renormalize each chunk (corral rule).
         mask_ = ses::absorbing_mask(phys_grid_, 4.0);
     }
 
-    // Launch on the y = 0 row (where mechanical = canonical momentum in
-    // this gauge), tangentially: the orbit circles the ORIGIN.
+    // Launch on the y=0 row (mechanical = canonical momentum in this gauge),
+    // tangentially -> orbit circles the origin.
     void fire() {
         const double x0 = radius_pred();
         ses::parallel_for(kLd2dN, [&](int j) {

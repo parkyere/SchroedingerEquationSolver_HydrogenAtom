@@ -6,14 +6,6 @@ module;
 export module ses.field;
 export import ses.grid;
 
-
-// Complex scalar field over a Grid1D -- the container for the wavefunction psi.
-//
-// The discrete norm includes the grid weight:
-//     ||psi||^2 = sum_i |psi_i|^2 * h
-// so a continuum-normalized function sampled on the grid keeps unit norm.
-
-
 export namespace ses {
 
 class Field1D {
@@ -27,7 +19,6 @@ public:
     std::complex<double>& operator[](int i) noexcept { return data_[static_cast<std::size_t>(i)]; }
     const std::complex<double>& operator[](int i) const noexcept { return data_[static_cast<std::size_t>(i)]; }
 
-    // Raw storage access for in-place spectral transforms (fft/ifft).
     std::vector<std::complex<double>>& data() noexcept { return data_; }
     const std::vector<std::complex<double>>& data() const noexcept { return data_; }
 
@@ -36,7 +27,6 @@ private:
     std::vector<std::complex<double>> data_;
 };
 
-// ||psi||^2 = sum_i |psi_i|^2 * h
 inline double norm_sq(const Field1D& f) noexcept {
     double acc = 0.0;
     for (int i = 0; i < f.size(); ++i) {
@@ -45,7 +35,6 @@ inline double norm_sq(const Field1D& f) noexcept {
     return acc * f.grid().spacing();
 }
 
-// Rescale so that ||psi||^2 == 1.
 inline void normalize(Field1D& f) noexcept {
     const double inv = 1.0 / std::sqrt(norm_sq(f));
     for (int i = 0; i < f.size(); ++i) {
@@ -53,7 +42,6 @@ inline void normalize(Field1D& f) noexcept {
     }
 }
 
-// Complex scalar field over a Grid3D (x-fastest flat storage).
 class Field3D {
 public:
     explicit Field3D(Grid3D grid)
@@ -77,7 +65,6 @@ private:
     std::vector<std::complex<double>> data_;
 };
 
-// ||psi||^2 = sum_ijk |psi_ijk|^2 * hx hy hz
 inline double norm_sq(const Field3D& f) noexcept {
     double acc = 0.0;
     for (const std::complex<double>& z : f.data()) {
@@ -97,8 +84,6 @@ inline void normalize(Field3D& f) noexcept {
     }
 }
 
-// Discrete inner product <a|b> = sum conj(a_i) b_i * dV. The building block
-// of state projections (deflation) and populations |<phi|psi>|^2.
 inline std::complex<double> inner_product(const Field3D& a, const Field3D& b) noexcept {
     double re = 0.0;
     double im = 0.0;
@@ -111,9 +96,7 @@ inline std::complex<double> inner_product(const Field3D& a, const Field3D& b) no
     return std::complex<double>{re * dv, im * dv};
 }
 
-// |psi|^2 per grid point -- the probability-density scalar field handed to
-// visualization (marching cubes, volume rendering). No volume weight: this
-// is a density, not an integral.
+// no volume weight: a density, not an integral
 inline std::vector<double> probability_density(const Field3D& f) {
     std::vector<double> rho(f.data().size());
     for (std::size_t i = 0; i < rho.size(); ++i) {

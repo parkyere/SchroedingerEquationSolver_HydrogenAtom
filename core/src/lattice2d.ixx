@@ -11,34 +11,15 @@ export import ses.grid;
 import ses.parallel;
 
 
-// 2D lattice (finite-difference) propagator with Peierls link phases: the
-// honest engine for a LOCALIZED magnetic flux (the double-slit solenoid).
-// The FFT split-operator cannot Trotterize (p - A)^2/2 for a flux line --
-// in every gauge A couples both coordinates, so no factor is diagonal in
-// any FFT basis, and approximate A.p splittings drift the norm. On the
-// lattice the flux enters EXACTLY:
-//
-//   H = sum_bonds -t (e^{i theta_ab} |a><b| + h.c.) + diag(V + 2tx + 2ty)
-//
-// with t = 1/(2 h^2) per axis (the FD Laplacian; onsite 2t per axis kept
-// so energies are honest). Kinetic bonds split into 4 disjoint groups
-// (x-even, x-odd, y-even, y-odd); each group is a direct sum of 2-site
-// bonds whose exponential is an EXACT 2x2 rotation:
-//
-//   exp(-i dt H_bond):  a' = c a + i s e^{i theta} b
-//                       b' = i s e^{-i theta} a + c b
-//   c = cos(t dt), s = sin(t dt)
-//
-// -- unitary to round-off by construction; the only approximation is the
-// (symmetric Strang) ordering, O(dt^2). Dispersion is the DISCRETE band
-// E(k) = (1 - cos k h)/h^2 per axis, group velocity sin(k h)/h.
-//
-// The solenoid (string gauge): the cut runs from the solenoid cell
-// straight up (+y, or down) to the boundary; the x-links crossing it
-// carry e^{-+i Phi}. The phase-product around every elementary plaquette
-// is then 1 EXCEPT the solenoid's own plaquette, which carries Phi:
-// B = 0 everywhere the electron goes, the flux is pure topology.
-// Boundaries are OPEN (no wrap bonds): a hard box; scenes add absorbers.
+// 2D finite-difference propagator with Peierls link phases: the engine for a
+// LOCALIZED magnetic flux (double-slit solenoid), where FFT split-operator
+// fails -- (p-A)^2/2 has no FFT-diagonal factor for a flux line. Kinetic
+// bonds split into 4 disjoint parity groups, each an exact 2x2 rotation;
+// symmetric-Strang ordering is the only approximation, O(dt^2). Onsite
+// carries +2tx+2ty (FD Laplacian diagonal, t = 1/(2h^2) per axis) so energies
+// stay honest. Solenoid = string gauge: straddling x-links carry e^{-+i Phi},
+// so every plaquette product is 1 except the solenoid's -- B=0 on the
+// electron's domain. Boundaries OPEN (no wrap bonds); scenes add absorbers.
 
 
 export namespace ses {
@@ -52,15 +33,14 @@ public:
         assert(static_cast<int>(potential.size()) == g.size());
         tx_ = 0.5 / (g.x.spacing() * g.x.spacing());
         ty_ = 0.5 / (g.y.spacing() * g.y.spacing());
-        // Exact 2x2 bond rotations, half-dt for the palindromic ordering
-        // (the y-odd group sits in the middle at full dt).
+        // half-dt for the palindrome; y-odd (cy2) is the full-dt center.
         cx_ = std::cos(tx_ * 0.5 * dt);
         sx_ = std::sin(tx_ * 0.5 * dt);
         cy_ = std::cos(ty_ * 0.5 * dt);
         sy_ = std::sin(ty_ * 0.5 * dt);
         cy2_ = std::cos(ty_ * dt);
         sy2_ = std::sin(ty_ * dt);
-        // Imaginary-time (relax) twins: cosh/sinh mixing, real decay.
+        // imaginary-time twins: cosh/sinh mixing.
         rcx_ = std::cosh(tx_ * 0.5 * dt);
         rsx_ = std::sinh(tx_ * 0.5 * dt);
         rcy_ = std::cosh(ty_ * 0.5 * dt);
@@ -81,10 +61,8 @@ public:
 
     double dt() const noexcept { return dt_; }
 
-    // Thread flux phi through the plaquette containing (xs, ys). String
-    // gauge: with cut_up the x-links of the straddling column ABOVE the
-    // solenoid carry e^{-i phi}; with cut_down those below carry e^{+i
-    // phi} -- same physics (a gauge transformation), tested as such.
+    // String gauge: cut_up puts e^{-i phi} on the x-links above the solenoid,
+    // cut_down e^{+i phi} below -- gauge-equivalent (tested as such).
     void set_solenoid(double phi, double xs, double ys, bool cut_up = true) {
         link_x_.assign(link_x_.size(), 1.0);
         int is = -1;
@@ -100,7 +78,7 @@ public:
             }
         }
         if (is < 0 || js < 0) {
-            return;  // solenoid outside the lattice: no flux anywhere
+            return;  // solenoid outside the lattice
         }
         const std::complex<double> up{std::cos(phi), -std::sin(phi)};
         const std::complex<double> dn{std::cos(phi), std::sin(phi)};
@@ -115,14 +93,9 @@ public:
         }
     }
 
-    // UNIFORM field B along z (Landau levels / cyclotron motion), Landau
-    // gauge ANCHORED at y = 0 (the box center): the x-links of row j
-    // carry e^{-i B hx y_j}. By the plane-wave band E ~ (k + theta/h)^2/2
-    // this is the Peierls form of A_x = +B y, A_y = 0: every plaquette
-    // holds the same flux B hx hy, mechanical = canonical momentum on the
-    // y = 0 row, and v rotates COUNTERCLOCKWISE at omega_c = B (anchoring
-    // at ymin instead would hand the packet a spurious v_x = -B*ymin).
-    // Replaces any solenoid.
+    // Uniform field B along z, Landau gauge A_x = +B y, A_y = 0: x-links of
+    // row j carry e^{-i B hx y_j}. Anchor at y = 0, NOT ymin, or the packet
+    // gets a spurious v_x = -B*ymin. Replaces any solenoid.
     void set_uniform_field(double b) {
         const double bh = b * g_->x.spacing();
         for (int j = 0; j < ny_; ++j) {
@@ -134,8 +107,8 @@ public:
         }
     }
 
-    // Directed link variables (U on edge (i,j)->(i+1,j) resp. (i,j)->
-    // (i,j+1)) for the plaquette-topology contract.
+    // Directed link U on edge (i,j)->(i+1,j) [x] resp. (i,j)->(i,j+1) [y];
+    // exposed for the plaquette-topology contract.
     std::complex<double> link_x(int i, int j) const {
         return link_x_[static_cast<std::size_t>(j * nx_ + i)];
     }
@@ -145,30 +118,24 @@ public:
 
     void step(Field3D& psi, int nsteps = 1) const;
 
-    // Imaginary-time relaxation toward the ground state: the SAME bond
-    // splitting with cosh/sinh mixing (e^{-tau H_bond} since the bond
-    // Hamiltonian squares to t^2 I) and a real onsite decay, renormalized
-    // every step. The LINK PHASES ride along, so this can relax the
-    // ground of a dot IN a magnetic field (the Fock-Darwin ground) --
-    // out of reach for any B = 0 imaginary-time machinery.
+    // Imaginary-time relaxation: same bond splitting with cosh/sinh mixing
+    // plus real onsite decay, renormalized each step. Reaches the ground of
+    // a dot IN a B field (Fock-Darwin), out of reach for B=0 imaginary time.
     void relax(Field3D& psi, int nsteps = 1) const;
 
-    // <H> = hops + onsite (V + 2tx + 2ty), normalized -- the live energy
-    // readout (and the relax convergence check).
+    // <H> = hops + onsite, normalized; live readout + relax convergence check.
     double energy(const Field3D& psi) const;
 
 private:
     void phase(std::vector<std::complex<double>>& a,
                const std::vector<std::complex<double>>& table) const;
 
-    // One x-bond group (bonds (i, i+1) with i of the given parity), all
-    // rows: rows are independent, bonds within a row disjoint by parity.
-    // mix = i*sin for real time, sinh (real) for imaginary time.
+    // One x-bond parity group, all rows (rows independent, bonds disjoint by
+    // parity -> parallel-safe). mix = i*sin (real time) or sinh (imaginary).
     void sweep_x(std::vector<std::complex<double>>& a, int parity, double c,
                  std::complex<double> mix) const;
 
-    // One y-bond group (bonds (j, j+1) with j of the given parity):
-    // bond-rows are disjoint by parity, x runs contiguous inside.
+    // One y-bond parity group (bond-rows disjoint by parity -> parallel-safe).
     void sweep_y(std::vector<std::complex<double>>& a, int parity, double c,
                  std::complex<double> mix) const;
 
@@ -192,13 +159,10 @@ private:
 };
 
 
-// Out-of-class definitions ON PURPOSE: members defined outside the class
-// in a module interface are NOT implicitly inline, so they are compiled
-// exactly once, in THIS module's TU. Defined in-class they were compiled
-// per importer, and one importing scene TU's instantiation of the
-// parallel_for bodies crashed a pool worker at runtime (MSVC modules
-// codegen roulette; kin of the OpenMP-in-module-interface miscompile
-// that begat ses.parallel). One canonical copy, no roulette.
+// Out-of-class ON PURPOSE: members defined outside the class in a module
+// interface are NOT implicitly inline, so they compile once in this TU.
+// In-class, an importer's parallel_for instantiation crashed a pool worker
+// (MSVC modules codegen). Keep one canonical copy. See ses.parallel.
 
 void PeierlsLattice2D::phase(
     std::vector<std::complex<double>>& a,
@@ -309,14 +273,10 @@ double PeierlsLattice2D::energy(const Field3D& psi) const {
     return e / den;
 }
 
-// Landau-level ladder operator, in the SAME Landau gauge as
-// set_uniform_field (A = (-B y, 0), anchored at y = 0):
-//     a(-)    = (pi_x - i pi_y) / sqrt(2 B)   (lowers; annihilates the LLL)
-//     a(-dag) = (pi_x + i pi_y) / sqrt(2 B)   (raises <H> by omega_c = B)
-// with pi = -i grad - A discretized by central differences (periodic wrap;
-// the gauge is not wrap-consistent, so states must stay off the boundary --
-// magnetic length 1/sqrt(B) against the box, as the scene guarantees).
-// Result is UNNORMALIZED (a|n> = sqrt(n)|n-1>); callers renormalize.
+// Landau-level ladder in the SAME gauge as set_uniform_field. pi = -i grad
+// - A, central differences with periodic wrap; the gauge is not wrap-
+// consistent, so states must stay off the boundary (magnetic length
+// 1/sqrt(B) << box, as the scene guarantees). UNNORMALIZED; callers renormalize.
 // CONTRACT: tests/lattice2d_test.cpp LandauLadderClimbsOneCyclotronQuantum.
 inline Field3D landau_ladder(const Field3D& psi, double b, bool up) {
     const Grid3D& g = psi.grid();
@@ -338,10 +298,8 @@ inline Field3D landau_ladder(const Field3D& psi, double b, bool up) {
                 (psi(ip, j, 0) - psi(im, j, 0)) * inv2h;
             const std::complex<double> ddy =
                 (psi(i, jp, 0) - psi(i, jm, 0)) * inv2h;
-            // pi_x = -i d_x - B y, pi_y = -i d_y: the lattice link
-            // theta = -B h y corresponds to A_x = +B y (empirically pinned
-            // by the contract -- the +B y sign made the pair the intra-level
-            // guiding-center operators, <H> unchanged).
+            // A_x = +B y, sign pinned by the contract (guiding-center pair,
+            // <H> unchanged).
             const std::complex<double> pix = -kI * ddx - b * y * psi(i, j, 0);
             const std::complex<double> piy = -kI * ddy;
             out(i, j, 0) = s * (up ? (pix + kI * piy) : (pix - kI * piy));
@@ -350,16 +308,12 @@ inline Field3D landau_ladder(const Field3D& psi, double b, bool up) {
     return out;
 }
 
-// 2D isotropic-HO CIRCULAR ladder at B = 0: a_R = (a_x - i a_y)/sqrt(2)
-// (right-circular quantum: a_R-dag adds exactly omega to <H> and +1 to
-// <L_z>). Central differences; UNNORMALIZED like landau_ladder.
+// 2D isotropic-HO circular ladder at B=0: a_R = (a_x - i a_y)/sqrt(2)
+// (dagger adds omega to <H>, +1 to <L_z>). UNNORMALIZED; callers renormalize.
 // CONTRACT: tests/ho2d_test.cpp.
-// Fock-Darwin spectral decomposition of a LATTICE-GAUGE state: gauge-
-// rotate to the symmetric gauge (e^{-i B x y / 2}), project onto the
-// circular HO basis |n_R, n_L> at the hybrid frequency Omega =
-// sqrt(w0^2 + B^2/4), and ladder the energies E = Omega + n_R w_- +
-// n_L w_+ (w_-+ = Omega -+ B/2: the CCW cyclotron chirality is the slow
-// mode). Returns (E, |c|^2) pairs up to e_max, largest-E last.
+// Fock-Darwin spectrum of a lattice-gauge state: rotate to symmetric gauge,
+// project onto the circular HO basis at Omega, ladder the energies. Returns
+// (E, |c|^2) up to e_max, largest-E last.
 // CONTRACT: tests/ho_spectrum_test.cpp (delta lines + <H> reconstruction).
 inline Field3D ho2d_ladder(const Field3D& psi, double omega, bool up,
                            bool left = false);
@@ -368,11 +322,10 @@ inline std::vector<std::pair<double, double>> fock_darwin_spectrum(
     const Field3D& psi, double omega0, double b, double e_max) {
     const Grid3D& g = psi.grid();
     const double om = std::sqrt(omega0 * omega0 + 0.25 * b * b);
-    const double w_r = om - 0.5 * b;  // right-circular = CCW cyclotron
+    const double w_r = om - 0.5 * b;  // right = CCW cyclotron (slow)
     const double w_l = om + 0.5 * b;
     const double cell = g.x.spacing() * g.y.spacing() * g.z.spacing();
-    // Gauge-rotate the lattice state (A_x = +B y) into the symmetric
-    // gauge the circular basis lives in: chi = -B x y / 2.
+    // Rotate the lattice-gauge state into the symmetric gauge: chi = -B x y/2.
     Field3D rot{g};
     for (int j = 0; j < g.y.n; ++j) {
         const double y = g.y.coord(j);
@@ -382,8 +335,8 @@ inline std::vector<std::pair<double, double>> fock_darwin_spectrum(
                            std::complex<double>{std::cos(th), std::sin(th)};
         }
     }
-    // Circular basis at Omega, built by the two ladder chains from the
-    // analytic ground; each column normalized before the overlap.
+    // Circular basis at Omega: two ladder chains from the analytic ground,
+    // each column normalized before the overlap.
     Field3D ground{g};
     for (int j = 0; j < g.y.n; ++j) {
         const double y = g.y.coord(j);
@@ -433,9 +386,9 @@ inline Field3D ho2d_ladder(const Field3D& psi, double omega, bool up,
                            bool left) {
     const Grid3D& g = psi.grid();
     const double inv2h = 1.0 / (2.0 * g.x.spacing());
-    const double cx = std::sqrt(omega / 2.0);   // sqrt(w/2) x term
-    const double cd = 1.0 / std::sqrt(2.0 * omega);  // d/dx term
-    const double s = 1.0 / std::sqrt(2.0);      // circular mix
+    const double cx = std::sqrt(omega / 2.0);
+    const double cd = 1.0 / std::sqrt(2.0 * omega);
+    const double s = 1.0 / std::sqrt(2.0);
     Field3D out{g};
     parallel_for(g.y.n, [&](int j) {
         const int ny = g.y.n;
@@ -452,9 +405,8 @@ inline Field3D ho2d_ladder(const Field3D& psi, double omega, bool up,
                 (psi(ip, j, 0) - psi(im, j, 0)) * inv2h;
             const std::complex<double> ddy =
                 (psi(i, jp, 0) - psi(i, jm, 0)) * inv2h;
-            // a_x = sqrt(w/2) x + d_x / sqrt(2w) (and the dagger flips
-            // the derivative sign); a_R = (a_x - i a_y)/sqrt(2), and the
-            // LEFT chirality (a_x + i a_y)/sqrt(2) flips q.
+            // a_R = (a_x - i a_y)/sqrt(2); LEFT chirality (+i a_y) flips q,
+            // dagger flips the derivative sign.
             const std::complex<double> qI = left ? -kI : kI;
             out(i, j, 0) =
                 up ? s * (cx * (x + qI * y) * psi(i, j, 0) -

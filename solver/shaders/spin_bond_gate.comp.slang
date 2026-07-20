@@ -1,19 +1,18 @@
-// Heisenberg bond gate exp(+i theta sigma_i.sigma_j) on the exact 2^N spin
-// wavefunction, EXACT via sigma.sigma = 2 SWAP - 1: parallel amplitudes get
-// a phase, the antiparallel pair mixes. One thread per disjoint 4-amplitude
-// block (quarter_n = 2^(N-2) work-items) via the two-zero-bit index
-// expansion. CONTRACT: vkcheck check_spin_step.
+// Heisenberg bond gate exp(+i theta sigma_i.sigma_j); sigma.sigma = 2 SWAP - 1
+// -> parallel amplitudes phase, antiparallel pair mixes. Thread per disjoint
+// 4-amplitude block (quarter_n = 2^(N-2)).
+// CONTRACT: vkcheck check_spin_step.
 import complex;
 
 [[vk::binding(0, 0)]] RWStructuredBuffer<Complex, Std430DataLayout> data;
 
 struct Params {
-    uint quarter_n;  // 2^(N-2) work-items
+    uint quarter_n;
     uint site_i;
     uint site_j;
     uint pad;
-    float4 gate;     // phase.re, phase.im, diag.re, diag.im
-    float4 off4;     // off.re, off.im, _, _
+    float4 gate;     // phase.re,im, diag.re,im
+    float4 off4;     // off.re,im, pad
 };
 [[vk::binding(1, 0)]] ConstantBuffer<Params, Std140DataLayout> params;
 
@@ -24,8 +23,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     if (t >= params.quarter_n) {
         return;
     }
-    // Insert two 0 bits at the two site positions to build `base` (both
-    // clear); the block is {base, base|bi, base|bj, base|bi|bj}.
+    // base = t with 0 bits inserted at p0<p1, clearing both sites.
     uint p0 = min(params.site_i, params.site_j);
     uint p1 = max(params.site_i, params.site_j);
     uint low = t & ((1u << p0) - 1u);
@@ -37,11 +35,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
     Complex phase = Complex(params.gate.xy);
     Complex diag = Complex(params.gate.zw);
     Complex off = Complex(params.off4.xy);
-    // Parallel pairs (both up / both down): a global phase.
     data[base] = phase * data[base];
     data[base | bi | bj] = phase * data[base | bi | bj];
-    // Antiparallel mix: a = (i up, j down) = base|bj; b = (i down, j up) =
-    // base|bi. new(base|bj)=diag*a+off*b; new(base|bi)=off*a+diag*b.
     Complex a = data[base | bj];
     Complex b = data[base | bi];
     data[base | bj] = diag * a + off * b;

@@ -1,9 +1,8 @@
-// Marching-cubes count pass: one workgroup per 8^3 CELL block, one thread
-// per cell. Case index from the 8 corner densities vs iso; the block's
-// triangle total (shared atomic, order-independent int sum) lands in
-// block_sums[wg] for the scan pass. Tables live in one int SSBO uploaded
-// from the ses.mc.tables core module (single source of truth):
-// [0,256) edge table, [256,4352) tri table 256x16, [4352,4608) tri counts.
+// MC tri-count pass: one workgroup per 8^3 cell block, one thread per cell.
+// Block total via shared int atomic (order-independent sum) -> block_sums[wg]
+// for the downstream scan pass.
+// mc_tab from ses.mc.tables core module (single source of truth); layout:
+// edge [0,256), tri 256x16 [256,4352), counts [4352,4608).
 import grid;
 
 [[vk::binding(0, 0)]] StructuredBuffer<float, Std430DataLayout> den;
@@ -11,10 +10,10 @@ import grid;
 [[vk::binding(2, 0)]] RWStructuredBuffer<uint, Std430DataLayout> block_sums;
 
 struct Params {
-    int4 npts;      // grid points per axis (.xyz)
-    int4 nblk;      // cell blocks per axis (.xyz)
-    float4 box_min; // .xyz
-    float4 cell_h;  // .xyz
+    int4 npts;
+    int4 nblk;
+    float4 box_min;
+    float4 cell_h;
     float iso;
     int max_tris;
 };
@@ -38,7 +37,7 @@ void main(uint3 grp : SV_GroupID, uint lidx : SV_GroupIndex) {
     GroupMemoryBarrierWithGroupSync();
 
     int wg = int(grp.x);
-    // block index (nblk power-agnostic %/), then cell within the 8^3 block.
+    // block index via moddiv (nblk power-agnostic), then cell within the 8^3 block.
     int3 blk = unflatten_moddiv(grp.x, params.nblk.x, params.nblk.y);
     int3 cell = blk * 8 + unflatten_moddiv(lidx, 8, 8);
 

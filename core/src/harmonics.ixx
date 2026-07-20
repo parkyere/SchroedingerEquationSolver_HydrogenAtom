@@ -10,16 +10,14 @@ export import ses.grid;
 import ses.parallel;
 
 
-// Real spherical harmonics (l <= 5) and 3D orbital synthesis:
-// psi = (u_nl(r)/r) Y_lm from the radial engine's u tables. Cartesian
-// polynomial forms keep the nodal planes exact on the grid.
+// Real tesseral Y_lm (l <= 5) + orbital synthesis; Cartesian polynomial
+// forms keep the nodal planes exact on the grid.
 
 
 export namespace ses {
 
-// Y_lm normalization constants, hoisted out of real_spherical_harmonic:
-// MSVC /fp:precise does not constant-fold sqrt(literal), so evaluating them
-// inline would cost one libm call per grid point in fill_orbital.
+// Y_lm norms hoisted: MSVC /fp:precise won't constant-fold sqrt(literal),
+// so inlining would cost one libm call per grid point.
 namespace ynorm {
 inline constexpr double kPi = 3.14159265358979323846;
 inline const double sqrt_pi = std::sqrt(kPi);                    // l = 0
@@ -41,15 +39,15 @@ inline const double s165_pi = std::sqrt(165.0 / kPi);
 inline const double s11_pi = std::sqrt(11.0 / kPi);
 }  // namespace ynorm
 
-// Real tesseral Y_lm at (x, y, z)/r, m = -l..l: m < 0 sin / m > 0 cos sector,
-// canonical (x+iy)^|m| real/imag parts (l=1 anchor: -1 -> y, 0 -> z, +1 -> x).
+// Real tesseral Y_lm at (x,y,z)/r: m<0 sin sector, m>0 cos sector
+// (l=1 anchor: -1 -> y, 0 -> z, +1 -> x).
 inline double real_spherical_harmonic(int l, int m, double x, double y, double z) noexcept {
     const double r2 = x * x + y * y + z * z;
     if (l == 0) {
         return 1.0 / (2.0 * ynorm::sqrt_pi);
     }
     if (r2 == 0.0) {
-        return 0.0;  // direction undefined; l > 0 harmonics vanish with r^l
+        return 0.0;  // l > 0 vanishes as r^l
     }
     if (l == 1) {
         const double c = ynorm::s3_4pi / std::sqrt(r2);
@@ -82,7 +80,6 @@ inline double real_spherical_harmonic(int l, int m, double x, double y, double z
         }
     }
     if (l == 4) {
-        // l == 4; default case is m = +4.
         const double r4 = r2 * r2;
         switch (m) {
             case -4: return 0.75 * ynorm::s35_pi * x * y * (x * x - y * y) / r4;
@@ -100,12 +97,12 @@ inline double real_spherical_harmonic(int l, int m, double x, double y, double z
                        (x * x * x * x - 6.0 * x * x * y * y + y * y * y * y) / r4;
         }
     }
-    // l == 5; default case is m = +5 (orthonormality pinned by tests).
+    // l == 5; orthonormality pinned by tests.
     const double r5 = r2 * r2 * std::sqrt(r2);
     const double x2 = x * x;
     const double y2 = y * y;
     const double z2 = z * z;
-    const double zpoly = 21.0 * z2 * z2 - 14.0 * z2 * r2 + r2 * r2;  // m = +-1
+    const double zpoly = 21.0 * z2 * z2 - 14.0 * z2 * r2 + r2 * r2;
     switch (m) {
         case -5:
             return (1.0 / 32.0) * ynorm::s1386_pi *
@@ -141,16 +138,13 @@ inline double real_spherical_harmonic(int l, int m, double x, double y, double z
     }
 }
 
-// psi = (u(r)/r) Y_lm with u linearly interpolated (u/r -> u[0]/h as r -> 0).
-// fill_orbital writes the UN-normalized field; synthesize_orbital normalizes.
-// CONTRACT: ses.projection's deposit shape (core/src/projection.ixx) mirrors this interpolation.
+// psi = (u(r)/r) Y_lm, u linearly interpolated (u/r -> u[0]/h as r -> 0).
+// CONTRACT: ses.projection deposit (core/src/projection.ixx) mirrors this interpolation.
 inline void fill_orbital(Field3D& psi, const Grid3D& g, const RadialGrid& rg,
                          const std::vector<double>& u, int l, int m) noexcept {
     const double h = rg.h();
-    // Disjoint z-slabs via ses.parallel: bitwise-deterministic parallelism
-    // (project rule). NOT OpenMP: MSVC silently miscompiles `#pragma omp`
-    // inside an exported module function (zero field) -- ses.parallel exists
-    // to replace it.
+    // z-slabs via ses.parallel (bitwise-deterministic). NOT OpenMP: MSVC
+    // miscompiles #pragma omp in an exported module fn (zero field).
     parallel_for(g.z.n, [&](int k) {
         for (int j = 0; j < g.y.n; ++j) {
             for (int i = 0; i < g.x.n; ++i) {
@@ -188,25 +182,23 @@ inline Field3D synthesize_orbital(const Grid3D& g, const RadialGrid& rg,
 }
 
 // ---- E1 angular strengths in the tesseral basis --------------------------
-// For states (u(r)/r) Y_lm the dipole integral factorizes exactly:
-// <f|r_q|i> = R_radial * A_q, and |A_q|^2 = (theta recursion element)^2 *
-// (phi overlap)^2 -- every factor an exact RATIONAL, so the table is
-// constexpr. The channel build multiplies by the runtime radial integral;
-// no 3D integral is ever needed.
+// Dipole factorizes exactly: |A_q|^2 = (theta element)^2 (phi overlap)^2,
+// every factor an exact rational -> constexpr table; runtime supplies only
+// the radial integral, no 3D integral needed.
 
 namespace e1_detail {
 
-// <Theta_{l+1,mu}|cos theta|Theta_{l,mu}>^2 between the shell pair (l, l+1).
+// <Theta_{l+1,mu}|cos|Theta_{l,mu}>^2.
 constexpr double cos_sq(int l, int mu) noexcept {
     return static_cast<double>((l + 1) * (l + 1) - mu * mu) /
            static_cast<double>((2 * l + 1) * (2 * l + 3));
 }
-// <Theta_{l+1,mu+1}|sin theta|Theta_{l,mu}>^2: mu raised WITH l.
+// <Theta_{l+1,mu+1}|sin|Theta_{l,mu}>^2: mu raised with l.
 constexpr double sin_up_sq(int l, int mu) noexcept {
     return static_cast<double>((l + mu + 1) * (l + mu + 2)) /
            static_cast<double>((2 * l + 1) * (2 * l + 3));
 }
-// <Theta_{l-1,mu+1}|sin theta|Theta_{l,mu}>^2: mu raised, l lowered.
+// <Theta_{l-1,mu+1}|sin|Theta_{l,mu}>^2: mu raised, l lowered.
 constexpr double sin_down_sq(int l, int mu) noexcept {
     const int num = (l - mu) * (l - mu - 1);
     return num <= 0 ? 0.0
@@ -214,10 +206,8 @@ constexpr double sin_down_sq(int l, int mu) noexcept {
                           static_cast<double>((2 * l - 1) * (2 * l + 1));
 }
 
-// Squared phi overlap of tesseral phi factors under cos(phi) (axis 0 = x)
-// or sin(phi) (axis 1 = y): the product-to-sum algebra leaves 1/2 when one
-// side is the m = 0 constant and 1/4 otherwise; x preserves the cos/sin
-// sector (m = 0 pairs with m' = +1), y flips it (m = 0 pairs with m' = -1).
+// Squared phi overlap; axis 0 = cos phi (x), 1 = sin phi (y). 1/2 when one
+// side is the m=0 constant, else 1/4; x keeps the cos/sin sector, y flips it.
 constexpr double phi_xy_sq(int axis, int m_to, int m_from) noexcept {
     if (m_from == 0 || m_to == 0) {
         const int other = m_from == 0 ? m_to : m_from;
@@ -232,10 +222,9 @@ constexpr double phi_xy_sq(int axis, int m_to, int m_from) noexcept {
 
 }  // namespace e1_detail
 
-// |<Y_{l_to,m_to}| r_q/r |Y_{l_from,m_from}>|^2 for real Y_lm; axis q:
-// 0 = x, 1 = y, 2 = z. Exact E1 selection rules fall out as hard zeros:
-// |dl| = 1, and z: m' == m, x/y: ||m'|-|m|| = 1 with the sector algebra
-// (m' == -m is exactly forbidden). Symmetric in (to, from).
+// |<Y_{l_to,m_to}|r_q/r|Y_{l_from,m_from}>|^2, real Y_lm; axis 0=x, 1=y, 2=z.
+// E1 selection rules are hard zeros (|dl|=1; z: m'=m; x/y: ||m'|-|m||=1,
+// m'=-m forbidden). Symmetric in (to, from).
 constexpr double tesseral_e1_axis_sq(int axis, int l_to, int m_to, int l_from,
                                      int m_from) noexcept {
     const int dl = l_to - l_from;
@@ -257,7 +246,7 @@ constexpr double tesseral_e1_axis_sq(int axis, int l_to, int m_to, int l_from,
     if (phi == 0.0) {
         return 0.0;
     }
-    // Theta element between (la, mua) and (lb, mua + 1), la = lower-mu side.
+    // Theta element (la, mua) -> (lb, mua+1); la = lower-mu side.
     const int la = dmu > 0 ? l_from : l_to;
     const int lb = dmu > 0 ? l_to : l_from;
     const int mua = dmu > 0 ? mu_from : mu_to;
@@ -266,7 +255,7 @@ constexpr double tesseral_e1_axis_sq(int axis, int l_to, int m_to, int l_from,
     return theta * phi;
 }
 
-// Sum over the three polarizations: what Einstein A needs per channel.
+// Polarization sum; Einstein A input per channel.
 constexpr double tesseral_e1_sq(int l_to, int m_to, int l_from,
                                 int m_from) noexcept {
     return tesseral_e1_axis_sq(0, l_to, m_to, l_from, m_from) +
@@ -274,8 +263,7 @@ constexpr double tesseral_e1_sq(int l_to, int m_to, int l_from,
            tesseral_e1_axis_sq(2, l_to, m_to, l_from, m_from);
 }
 
-// Compile-time physics anchors: every 2p -> 1s orientation carries exactly
-// 1/3, and the tesseral m' == -m channel is a hard zero.
+// Compile-time anchors: each 2p->1s orientation = 1/3; tesseral m'=-m = 0.
 static_assert(tesseral_e1_axis_sq(2, 0, 0, 1, 0) == 1.0 / 3.0);
 static_assert(tesseral_e1_axis_sq(0, 0, 0, 1, 1) == 1.0 / 3.0);
 static_assert(tesseral_e1_axis_sq(1, 0, 0, 1, -1) == 1.0 / 3.0);

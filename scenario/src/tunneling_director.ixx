@@ -5,24 +5,11 @@ module;
 export module ses.scenario.tunneling_director;
 export import ses.scenario.base_director;
 
-
-// Quantum tunneling: a Gaussian packet fired at a rectangular barrier its
-// mean energy classically cannot cross (E < V0). The boundary absorber
-// swallows outgoing flux; the title tracks the live population left/right
-// of the slab (title-cadence readback) and the maximum transmitted
-// fraction -- nonzero T through a forbidden barrier IS the demo.
-
-
 export namespace ses_shell {
 
-constexpr double kTunnelBox = 80.0;      // Bohr half-extent (256^3, h = 0.625)
-constexpr double kTunnelV0 = 0.25;       // Ha; barrier height
-// Slab [0, 5): a quarter of the packet's visible size (4 sigma = 20), thick
-// enough that the evanescent decay INSIDE the wall is a visible region (the
-// old 2-Bohr slab was ~3 grid cells). Density decays as e^{-2 kappa x},
-// kappa = sqrt(2(V0-E)) = 0.5 -> a ~2-Bohr glow fading into the wall;
-// plane-wave T = [1 + sinh^2(kappa w)]^{-1} ~ 2.7% (still clearly nonzero
-// through a forbidden barrier -- the demo).
+constexpr double kTunnelBox = 80.0;      // Bohr; h = 0.625 (256^3)
+constexpr double kTunnelV0 = 0.25;       // Ha
+// kappa = sqrt(2(V0-E)) = 0.5; analytic T = [1 + sinh^2(kappa w)]^-1 ~ 2.7%
 constexpr double kTunnelXLo = 0.0;
 constexpr double kTunnelXHi = 5.0;
 constexpr double kTunnelK0 = 0.5;        // mean E = k^2/2 = 0.125 < V0
@@ -35,7 +22,7 @@ public:
 
     TunnelApi* tunnel() override { return this; }
 
-    // Selftest hook: the largest transmitted fraction seen so far.
+    // Selftest hook.
     double transmitted_max() const override { return t_max_; }
 
 protected:
@@ -44,16 +31,14 @@ protected:
     double absorber_width() const override { return 10.0; }
     bool relax_allowed() const override { return false; }  // no bound target
 
-    // No nucleus here: an origin ball would misread as one. Instead the
-    // renderer composites the slab itself into the raymarch.
+    // No marker: an origin ball would misread as a nucleus; renderer draws the slab.
     int marker_count() const override { return 0; }
     bool barrier_slab(double& lo, double& hi) const override {
         lo = kTunnelXLo;
         hi = kTunnelXHi;
         return true;
     }
-    // Near side-on: the wall reads as a thin vertical pane with the packet
-    // approaching from the left; a slight angle keeps the 3D depth cue.
+    // Slight angle keeps the 3D depth cue on the wall.
     double default_camera_azimuth() const override { return 0.18; }
     double default_camera_elevation() const override { return 0.22; }
 
@@ -64,15 +49,12 @@ protected:
                     kTunnelXHi, p_right_, t_max_);
     }
 
-    // Live left/right populations on a reduced cadence (a full-field
-    // readback costs ~10 ms; every 3rd title tick ~ 0.5 s is plenty for
-    // dynamics that span ~100 au of sim time).
+    // Full-field readback ~10 ms: probe every 3rd title tick (~0.5 s).
     void after_step_batch() override {
         if (!gpu_title_due_ || ++probe_phase_ % 3 != 0) {
             return;
         }
-        // The readback consumes POST-step psi: host-wait the async batch
-        // (same-queue submission order carries no memory dependency).
+        // Host-wait: readback consumes POST-step psi (same-queue order carries no memory dependency).
         engine_.wait_async();
         if (!engine_.readback(readback_buf_)) {
             return;  // GPU readback failed: skip this probe (no stale/OOB read)

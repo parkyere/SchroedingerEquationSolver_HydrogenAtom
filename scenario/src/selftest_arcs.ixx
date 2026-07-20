@@ -10,19 +10,13 @@ export import ses.scenario.manifold_spec;
 import ses.scenario.kepler_seed;
 
 
-// Verification + selftest arcs: every --dump-frame* and --selftest-* arc,
-// registered against the live shell. Templated on the shell type so the
-// shell class stays private to main.cpp. Each arc waits for the startup
-// atlas build (run_when_manifold_ready) and then CHAINS scheduler timers, so
-// a slower GPU stretches the run instead of false-failing a wall-clock
-// verdict. The shell provides: sched() (Scheduler), request_exit(code),
-// has_arg(name), dump_frame_bmp(path), and the control/probe wrappers.
+// Templated on ShellT so the shell class stays private to main.cpp. Arcs
+// chain scheduler timers (never wall-clock): a slow GPU stretches the run
+// instead of false-failing.
 
 
 export namespace ses_shell {
 
-// Selftest helper: poll until the startup atlas build has produced the
-// channel table, then run the arc (slower GPUs just stretch the wait).
 template <typename ShellT, typename F>
 void run_when_manifold_ready(ShellT* shell, F fn) {
     if (shell->manifold_ready()) {
@@ -33,10 +27,6 @@ void run_when_manifold_ready(ShellT* shell, F fn) {
                          [shell, fn] { run_when_manifold_ready(shell, fn); });
 }
 
-// --selftest-scene helper: poll (500 ms) until the CURRENT scene's sim time
-// has advanced >= 0.2 au from its value at the first poll after the switch
-// settles; ~30 s of no progress is the failure verdict. Logs the observed
-// rate so a slow scene is diagnosable from the transcript.
 template <typename ShellT, typename Done>
 void selftest_scene_wait_running(ShellT* shell, const char* name, int polls,
                                  Done done, double t_start = -1.0) {
@@ -59,9 +49,6 @@ void selftest_scene_wait_running(ShellT* shell, const char* name, int polls,
     });
 }
 
-// Poll (1 s) until the CURRENT scene's sim time reaches t_target au; ~2 min
-// without arrival is the stall verdict. Used where the physics needs a
-// known span of SIMULATED time and the step cost is machine-dependent.
 template <typename ShellT, typename Done>
 void selftest_wait_sim_time(ShellT* shell, double t_target, int polls,
                             Done done) {
@@ -80,9 +67,7 @@ void selftest_wait_sim_time(ShellT* shell, double t_target, int polls,
 
 template <typename ShellT>
 void register_verification_arcs(ShellT* shell) {
-    // Render verification: read the finished scene image back to
-    // frame_dump.bmp and exit; the readback verifies the whole ses_vk path
-    // end to end. BMP is hand-rolled (no image library anywhere).
+    // Frame readback exercises the whole ses_vk path end to end.
     if (shell->has_arg("--dump-frame")) {
         run_when_manifold_ready(shell, [shell] {
             shell->sched().after(2000, [shell] {
@@ -95,9 +80,8 @@ void register_verification_arcs(ShellT* shell) {
             });
         });
     }
-    // Same, but AFTER real evolution: fast-forward to sim time 60 au at
-    // time scale 16 first (the interference scenes need the transit done
-    // before there is anything on the screen to look at).
+    // After real evolution: interference scenes need the transit done before
+    // anything is on screen.
     if (shell->has_arg("--dump-frame-late")) {
         run_when_manifold_ready(shell, [shell] {
             shell->set_time_scale(16);
@@ -114,8 +98,8 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Same, from INSIDE the box: the volume pass rasterizes the proxy's back
-    // faces (front-face culled), which only an interior eye exercises.
+    // From inside the box: the volume pass rasterizes the proxy back faces
+    // (front-face culled), which only an interior eye exercises.
     if (shell->has_arg("--dump-frame-near")) {
         run_when_manifold_ready(shell, [shell] {
             std::fprintf(stderr, "dump-frame-near: manifold ready, zooming in\n");
@@ -131,9 +115,7 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Surface-mode render verification: toggle to the GPU-extracted
-    // isosurface and dump the finished frame -- mc_prepare/extract + the
-    // indirect draw, end to end.
+    // Surface mode: exercises mc_prepare/extract + the indirect draw end to end.
     if (shell->has_arg("--dump-frame-surface")) {
         run_when_manifold_ready(shell, [shell] {
             shell->toggle_view_mode();
@@ -147,18 +129,16 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Cross-section render verification: enable the clip plane AND the slice
-    // sheet (z-normal, through the nucleus) and dump the frame -- exercises
-    // both the volume clip path and the slice pipeline end to end.
+    // Cross-section: exercises both the volume clip path and the slice pipeline.
     if (shell->has_arg("--dump-frame-slice")) {
         run_when_manifold_ready(shell, [shell] {
-            if (shell->hy() == nullptr) {  // arc needs the hydrogen manifold
+            if (shell->hy() == nullptr) {
                 std::fprintf(stderr, "dump-frame-slice: requires the hydrogen "
                                      "scene (--scene=hydrogen)  [FAIL]\n");
                 shell->request_exit(1);
                 return;
             }
-            shell->hy()->debug_prepare_state(k3DZ0);  // a lobed orbital (3d_z2)
+            shell->hy()->debug_prepare_state(k3DZ0);
             shell->enable_cross_section_demo();
             shell->sched().after(2500, [shell] {
                 const bool ok = shell->dump_frame_bmp("frame_dump_slice.bmp");
@@ -170,27 +150,23 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Live scene switching (the panel combo's path): hydrogen -> harmonic ->
-    // tunnel through the shell's deferred device-idle swap. Each hop must
-    // produce a RUNNING scene: poll until sim time has advanced >= 0.2 au
-    // (5 steps), chained not wall-clocked (repo lesson: fixed deadlines
-    // false-fail on slower GPUs). Registered without the manifold wait on
-    // purpose: switching away MID-atlas-build is part of the contract.
+    // Live scene switching (the panel combo's path). Each hop must produce a
+    // RUNNING scene. NOT manifold-gated on purpose: switching away mid-atlas-
+    // build is part of the contract.
     if (shell->has_arg("--selftest-scene")) {
         shell->sched().after(2000, [shell] {
             const bool hy_ok = shell->hy() != nullptr;
-            shell->request_scene(1);  // harmonic trap
+            shell->request_scene(1);
             selftest_scene_wait_running(shell, "harmonic", 0, [shell, hy_ok](
                                                                  bool harm_runs) {
                 const bool harm_ok =
                     shell->hy() == nullptr && shell->tn() == nullptr;
-                // Scene-generic Larmor readout: the oscillating coherent
-                // state must report a radiated power in the title.
+                // The oscillating coherent state must report radiated power (emit P).
                 const bool harm_emits =
                     shell->status_text().find("emit P") != std::string::npos;
                 std::fprintf(stderr, "selftest-scene: harmonic status: %s\n",
                              shell->status_text().c_str());
-                shell->request_scene(2);  // tunneling barrier
+                shell->request_scene(2);
                 selftest_scene_wait_running(
                     shell, "tunnel", 0,
                     [shell, hy_ok, harm_ok, harm_emits,
@@ -204,23 +180,22 @@ void register_verification_arcs(ShellT* shell) {
                             "(runs %d, emits %d), tunnel %d (runs %d)\n",
                             hy_ok, harm_ok, harm_runs, harm_emits, tn_ok,
                             tn_runs);
-                        // The 1D legs: GPU scene -> CPU-only scene (renderer
-                        // rebuild + overlay path), CPU -> CPU, and back to a
-                        // GPU scene -- the reinit-safety gauntlet.
-                        shell->request_scene(3);  // 1D harmonic ladder
+                        // The 1D legs: GPU -> CPU -> CPU -> GPU, the renderer
+                        // reinit-safety gauntlet.
+                        shell->request_scene(3);
                         selftest_scene_wait_running(shell, "harmonic1d", 0,
                                                     [shell, leg3d](
                                                         bool h1_runs) {
                             const bool h1_ok = shell->ln() != nullptr &&
                                                shell->hy() == nullptr;
-                            shell->request_scene(4);  // 1D tunneling
+                            shell->request_scene(4);
                             selftest_scene_wait_running(shell, "tunnel1d", 0,
                                                         [shell, leg3d, h1_ok,
                                                          h1_runs](
                                                             bool t1_runs) {
                                 const bool t1_ok = shell->tn() != nullptr &&
                                                    shell->ln() == nullptr;
-                                shell->request_scene(1);  // back to a GPU scene
+                                shell->request_scene(1);
                                 selftest_scene_wait_running(
                                     shell, "harmonic-return", 0,
                                     [shell, leg3d, h1_ok, h1_runs, t1_ok,
@@ -244,16 +219,14 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Renderer survival across a scene switch: swap to the harmonic trap
-    // (different grid -> full SceneRenderer rebuild) and dump the finished
-    // frame -- the windowed combo's renderer path, verified headless.
-    // CONDITION-POLLED, not wall-clocked: the swap defers the new scene's
-    // compute init to the loop's init block, which runs AFTER the scheduler
-    // poll -- a fixed-delay dump can fire before the first post-swap render
-    // and read a never-rendered target (latent race, found the hard way).
+    // Renderer survival across a scene switch (different grid -> full
+    // SceneRenderer rebuild), verified headless. Condition-polled, not
+    // wall-clocked: the swap defers compute init to the loop's init block,
+    // which runs AFTER the poll -- a fixed-delay dump could read a
+    // never-rendered target (latent race).
     if (shell->has_arg("--dump-frame-switch")) {
         shell->sched().after(2000, [shell] {
-            shell->request_scene(1);  // harmonic trap
+            shell->request_scene(1);
             selftest_scene_wait_running(shell, "switch-target", 0, [shell](
                                                                       bool runs) {
                 if (!runs) {
@@ -274,13 +247,11 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Trap Fock-ladder decay: prepare an eigenstate (Key 5 -> 1p_z), arm the
-    // Einstein-A jumps (Key D), and expect >= 1 photon inside the window --
-    // the QED half of the trap's complementarity demo (the license physics
-    // lives in tests/trap_ladder_test.cpp). tau_display ~ 8 au as the atom.
+    // >= 1 photon expected (tau_display ~ 8 au vs the window). Contract:
+    // tests/trap_ladder_test.cpp.
     if (shell->has_arg("--selftest-trapdecay")) {
         shell->sched().after(2000, [shell] {
-            shell->press('5');  // 1p_z: N = 1, one rung above ground
+            shell->press('5');  // 1p_z: one rung above ground
             shell->sched().after(1000, [shell] {
                 const long long baseline = shell->director().photon_count();
                 shell->press('D');  // arm: the window starts now
@@ -296,11 +267,9 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Decay arc: prepare 2p WITH DECAY OFF (relaxation auto-completes into
-    // real time, and an armed 2p would fire its one photon BEFORE the
-    // baseline -- the n<=6 seed converges fast enough to lose that race
-    // most runs), then arm decay exactly when the counting window opens.
-    // >= 1 jump expected: tau_display ~ 8 au vs a ~75 au window.
+    // Prepare 2p with decay OFF: an armed 2p would fire its one photon before
+    // the baseline (the n<=6 seed converges fast enough to lose that race), so
+    // arm exactly when the window opens. >= 1 jump (tau_display ~ 8 au vs ~75 au).
     if (shell->has_arg("--selftest-decay")) {
         run_when_manifold_ready(shell, [shell] {
             shell->hy()->toggle_decay();      // OFF: hold the prepared 2p
@@ -311,8 +280,7 @@ void register_verification_arcs(ShellT* shell) {
                 shell->hy()->toggle_decay();  // ON: the window starts NOW
                 shell->sched().after(30000, [shell, baseline] {
                     const long long fresh = shell->hy()->photon_count() - baseline;
-                    // The spectrometer must have recorded the 2p -> 1s
-                    // photon at the Lyman-alpha energy 10.20 eV.
+                    // Spectrometer must record the 2p->1s line at Lyman-alpha 10.20 eV.
                     const int nl = shell->hy()->spectro_count();
                     const double ev =
                         nl > 0 ? shell->hy()->spectro_ev(nl - 1) : 0.0;
@@ -329,14 +297,12 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Energy-measurement arc: relax to 1s (decay OFF so the state stays
-    // put); a projective energy measurement must report the 1s eigenstate.
+    // Relax to 1s; a projective energy measurement must report the 1s eigenstate.
     if (shell->has_arg("--selftest-energy")) {
         run_when_manifold_ready(shell, [shell] {
             shell->hy()->toggle_decay();  // OFF: keep the relaxed state stationary
             shell->hy()->set_relaxing();  // cool to 1s
-            // 20 s: the random n <= 6 seed carries only ~1% weight in 1s, so
-            // the ITP descent to ground needs a generous window to converge.
+            // 20 s: the random n<=6 seed has ~1% weight in 1s; ITP needs the margin.
             shell->sched().after(20000, [shell] {
                 shell->hy()->measure_energy_now();
                 shell->sched().after(1500, [shell] {
@@ -353,8 +319,8 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Static-E arc: relax to 1s (<z> ~ 0), switch on a sub-ionization +z
-    // field, require <z> to shift measurably (Stark polarization).
+    // Relax to 1s (<z>~0), switch on a sub-ionization +z field, require <z>
+    // to shift (Stark polarization).
     if (shell->has_arg("--selftest-efield")) {
         run_when_manifold_ready(shell, [shell] {
             shell->hy()->toggle_decay();  // OFF: keep the state put
@@ -375,9 +341,8 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Pump arc: relax to 1s, laser ON (Z), require peak P(2pz) >= 0.5; then
-    // decay ON and require >= 2 photons (a ground-start run without the
-    // pump emits zero, so 2 is unambiguous).
+    // Relax to 1s, laser ON (Z), require peak P(2pz) >= 0.5; then decay ON,
+    // require >= 2 photons (unpumped ground-start emits zero, so 2 is unambiguous).
     if (shell->has_arg("--selftest-rabi")) {
         run_when_manifold_ready(shell, [shell] {
             shell->hy()->toggle_decay();  // OFF: study the clean coherent flop
@@ -386,8 +351,8 @@ void register_verification_arcs(ShellT* shell) {
                 shell->set_real_time();
                 shell->set_time_scale(16);  // explicit dial (no hidden pump boost)
                 shell->hy()->toggle_laser();  // cached: instant
-                // GPU-bound 256^3 lands ~3 au/s regardless of the dial: the
-                // half-flop (pi/Omega ~ 79 au) needs most of this window.
+                // 256^3 lands ~3 au/s regardless of the dial; the half-flop
+                // (pi/Omega ~ 79 au) needs most of this window.
                 shell->sched().after(60000, [shell] {
                     const double peak = shell->hy()->peak_excited_population();
                     std::fprintf(stderr, "selftest-rabi: peak P(2pz) = %.3f  [%s]\n",
@@ -411,12 +376,9 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Cascade arc: excite 3d_z2 and require >= 2 photons -- 3d cannot reach
-    // 1s directly (dl = 2), so two photons prove 3d -> 2p -> 1s fired.
-    // EARLY-EXITS the moment 2 photons land (the count only grows); the 120 s
-    // window is just the worst-case FAIL bound, since step throughput is GPU-
-    // and policy-dependent. time_scale is maxed (16, the clamp ceiling) for
-    // the widest lifetime margin on the slowest GPU.
+    // Excite 3d_z2, require >= 2 photons: 3d cannot reach 1s directly (dl=2),
+    // so two photons prove 3d -> 2p -> 1s fired. Early-exits on the 2nd; the
+    // 120 s window is the worst-case FAIL bound (throughput is GPU-dependent).
     if (shell->has_arg("--selftest-cascade")) {
         run_when_manifold_ready(shell, [shell] {
             const long long baseline = shell->hy()->photon_count();
@@ -441,14 +403,9 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Magnetic arc: prepare 2p_x (decay off), B along z, require P(2p_y) to
-    // rise past 0.3 -- proving psi ITSELF precesses. Probed periodically so
-    // the sin^2 oscillation phase cannot alias the verdict.
-    // Kepler packet arc: the circular-state superposition ORBITS the
-    // nucleus CCW at the Kepler rate (correspondence principle). Polls
-    // <x>,<y>, accumulates the unwrapped azimuth, and gates the measured
-    // angular rate into a window around 1/n_bar^3 (the low-n tail and the
-    // grid radial overlaps skew the weighted mean, hence the width).
+    // Kepler packet arc: the circular-state superposition orbits CCW at the
+    // Kepler rate 1/n_bar^3 (correspondence principle). The band is wide because
+    // the low-n tail and grid radial overlaps skew the weighted-mean rate.
     if (shell->has_arg("--selftest-kepler")) {
         run_when_manifold_ready(shell, [shell] {
             shell->hy()->toggle_decay();  // pure orbital beat
@@ -505,14 +462,16 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
+    // Magnetic arc: 2p_x, B along z, require P(2p_y) > 0.3 -- psi ITSELF
+    // precesses. Probed periodically so the sin^2 phase cannot alias.
     if (shell->has_arg("--selftest-magnetic")) {
         run_when_manifold_ready(shell, [shell] {
             shell->hy()->toggle_decay();            // decay OFF: pure precession
-            shell->hy()->debug_prepare_state(kP2X);  // psi = 2p_x
-            // Modest field: a large B would diamagnetically deform the state
-            // and cap the overlap. Magnetic stepping is slow (~0.4 au/s), so
-            // the window is long.
-            shell->hy()->set_bfield_b(0.08);         // B along z (default axis)
+            shell->hy()->debug_prepare_state(kP2X);
+            // Modest field: large B diamagnetically deforms the state and caps
+            // the overlap. Magnetic stepping is slow (~0.4 au/s), hence the
+            // long window.
+            shell->hy()->set_bfield_b(0.08);
             auto max_py = std::make_shared<double>(0.0);
             const int probe = shell->sched().every(1500, [shell, max_py] {
                 *max_py = std::max(*max_py, shell->hy()->probe_population(kP2Y));
@@ -526,9 +485,8 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Manifold arc: deterministic channel-table checks (selection rule, 2p
-    // degeneracy, ordering, cascade, dl rule), then an X-pol pump from 1s --
-    // its photons can only flow through 2p_x, proving non-2p_z channels fire.
+    // Deterministic channel-table checks, then an X-pol pump from 1s: its
+    // photons can only flow through 2p_x, proving non-2p_z channels fire.
     if (shell->has_arg("--selftest-manifold")) {
         run_when_manifold_ready(shell, [shell] {
             const double a_pz = shell->hy()->channel_a(kP2Z, kS1);
@@ -544,8 +502,7 @@ void register_verification_arcs(ShellT* shell) {
             const bool ordering =
                 shell->hy()->state_energy(kS1) < shell->hy()->state_energy(kP2Z) &&
                 shell->hy()->state_energy(kS1) < shell->hy()->state_energy(kS2);
-            // The n = 3 shell: cascade paths open, Delta-l selection
-            // rules hold (3s -> 1s and 3d -> 1s are E1-forbidden).
+            // n=3 shell: cascade paths open; 3s->1s and 3d->1s are E1-forbidden.
             const double a_3s2p = shell->hy()->channel_a(k3S, kP2Z);
             const double a_3d2p = shell->hy()->channel_a(k3DZ0, kP2Z);
             const double a_3s1s = shell->hy()->channel_a(k3S, kS1);
@@ -574,9 +531,8 @@ void register_verification_arcs(ShellT* shell) {
                 shell->hy()->toggle_laser();  // Z (cached: no block)
                 shell->hy()->toggle_laser();  // -> X
                 const long long baseline = shell->hy()->photon_count();
-                // Two X-pol photons need ~170 au of sim time (~2 half-flops
-                // + accelerated lifetimes); 180 s gives real margin at the
-                // slowest throughput.
+                // Two X-pol photons need ~170 au (~2 half-flops + accelerated
+                // lifetimes); 180 s gives margin at the slowest throughput.
                 shell->sched().after(180000, [shell, baseline] {
                     const long long fresh = shell->hy()->photon_count() - baseline;
                     std::fprintf(stderr,
@@ -588,12 +544,10 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Partial-measurement arc: (2s+2p_z)/sqrt(2) is a DEGENERATE shell
-    // superposition -- a true n-shell measurement must return n=2 with BOTH
-    // populations intact (intra-shell coherence survives); a following l
-    // measurement picks one l and must leave a pure subspace. Then L_z on a
-    // prepared p_x: outcome +-1 with equal cos/sin populations (a ring),
-    // and an immediate repeat must agree (projective repeatability).
+    // (2s+2pz)/sqrt2 is a DEGENERATE shell superposition: an n-shell measurement
+    // must return n=2 with BOTH populations intact (intra-shell coherence
+    // survives); a following l measurement picks one l -> pure subspace; L_z on
+    // p_x gives +-1 with an equal cos/sin ring; an immediate repeat must agree.
     if (shell->has_arg("--selftest-partial")) {
         run_when_manifold_ready(shell, [shell] {
             shell->hy()->toggle_decay();  // OFF: jumps would race the assertions
@@ -656,15 +610,9 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // 1D ladder arc (main forces --scene=harmonic1d): the Fock chain through
-    // the Ladder1dApi seam. Two raises must land n = 2 with <H> = 2.5 w; two
-    // lowers return to ground; the third lower must be REFUSED by the
-    // operator itself (a|0> = 0) with the level untouched. Condition-polled
-    // (the CPU scene ticks immediately, but the poll keeps the boot-order
-    // contract explicit).
-    // Spin arc (main forces --scene=spin): Larmor quarter turn, resonant
-    // Rabi inversion under the RF drive, then the Hahn echo refocus.
-    // Grid-free scene -- the exact-rotation contracts live in spin_test.
+    // Spin arc: Larmor quarter turn, resonant Rabi inversion under the RF
+    // drive, then the Hahn echo refocus. Grid-free; exact-rotation contracts
+    // in spin_test.
     if (shell->has_arg("--selftest-spin")) {
         shell->sched().after(1000, [shell] {
             auto* sp = shell->sp();
@@ -683,8 +631,8 @@ void register_verification_arcs(ShellT* shell) {
                 const int probe = shell->sched().every(120, [shell, min_z] {
                     *min_z = std::min(*min_z, shell->sp()->bloch_z());
                 });
-                // One FULL nutation (2 pi / Omega_R = 126 au): the sense
-                // may swing +z first, and -1 only comes on the far side.
+                // One full nutation (2 pi / Omega_R = 126 au): -1 only comes
+                // on the far side.
                 const double t_mark = shell->director().sim_time();
                 selftest_wait_sim_time(
                     shell, t_mark + 130.0, 0,
@@ -719,9 +667,8 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Spin-lattice arc (main forces --scene=spins): damped J > 0 orders
-    // a random boot into a ferromagnet; damped J < 0 into Neel. The
-    // integrator contracts live in tests/spinlattice_test.cpp.
+    // Spin-lattice arc: damped J>0 orders a random boot into a ferromagnet,
+    // J<0 into Neel. Contracts: tests/spinlattice_test.cpp.
     if (shell->has_arg("--selftest-spins")) {
         shell->sched().after(1000, [shell] {
             auto* sn = shell->sn();
@@ -743,10 +690,9 @@ void register_verification_arcs(ShellT* shell) {
                         const double neel = shell->sn()->staggered();
                         const double m_res =
                             shell->sn()->magnetization();
-                        // Third leg: switch to the EXACT 2^16 engine and
-                        // let the Neel product entangle -- the mean arrow
-                        // length must SHRINK below unity (the mean-field
-                        // ansatz cannot do this).
+                        // Third leg: the EXACT 2^16 engine lets the Neel
+                        // product entangle -- the mean arrow length must
+                        // SHRINK below unity (mean-field cannot).
                         shell->sn()->set_exact(true);
                         shell->sn()->set_alpha(0.0);
                         shell->sn()->set_b(2, 0.1);
@@ -776,9 +722,8 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Bouncer arc (main forces --scene=bouncer1d): the boot relax lands
-    // in the soft-floor Airy window; a drop from height carries E ~ g h.
-    // The exact Airy SPACING is pinned by tests/bouncer1d_test.cpp.
+    // Bouncer arc: boot relax lands in the soft-floor Airy window; a drop
+    // carries E ~ g h. Airy spacing pinned by tests/bouncer1d_test.cpp.
     if (shell->has_arg("--selftest-bouncer")) {
         shell->sched().after(1000, [shell] {
             auto* bo = shell->bo();
@@ -787,7 +732,7 @@ void register_verification_arcs(ShellT* shell) {
                 shell->request_exit(1);
                 return;
             }
-            const double e_g = bo->energy();  // boot = relaxed ground
+            const double e_g = bo->energy();
             const double e1 = bo->airy_e1();
             bo->drop();
             const double e_d = bo->energy();
@@ -802,9 +747,8 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // QPC arc (main forces --scene=qpc2d): the staircase foot vs the
-    // first channel at scene scale. The full 4-point staircase is pinned
-    // by tests/qpc2d_test.cpp.
+    // QPC arc: the staircase foot vs the first channel at scene scale. Full
+    // 4-point staircase pinned by tests/qpc2d_test.cpp.
     if (shell->has_arg("--selftest-qpc2d")) {
         shell->sched().after(1000, [shell] {
             selftest_scene_wait_running(shell, "qpc2d", 0, [shell](
@@ -843,9 +787,8 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Carpet arc (main forces --scene=carpet1d): scrambled mid-carpet,
-    // full revival at T_rev = L^2/pi -- maxima tracked at row cadence by
-    // the director (frame polling would miss the ~2 au peak).
+    // Carpet arc: full revival at T_rev = L^2/pi. Maxima tracked at row cadence
+    // by the director (frame polling would miss the ~2 au peak).
     if (shell->has_arg("--selftest-carpet")) {
         shell->sched().after(1000, [shell] {
             selftest_scene_wait_running(shell, "carpet1d", 0, [shell](
@@ -864,10 +807,9 @@ void register_verification_arcs(ShellT* shell) {
                         auto* c2 = shell->cp();
                         const double mid = c2->mid_scramble_max();
                         const double best = c2->best_revival();
-                        // A few-mode ring packet has LARGE fractional
-                        // revivals (measured 0.63 mid-carpet): the honest
-                        // gate is that the full revival stands clear
-                        // above every mid recurrence, near unity.
+                        // A few-mode ring packet has large fractional revivals
+                        // (~0.63 mid-carpet): the honest gate is the full
+                        // revival standing clear above every mid one.
                         const bool pass = ok1 && best > 0.95 &&
                                           mid < 0.85 && best > mid + 0.2;
                         std::fprintf(stderr,
@@ -882,9 +824,8 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Cat + photon-loss arc (harmonic1d): the cat's <n> bleeds at kappa
-    // and photons actually click (jumps fire); the parity-flip contract
-    // itself is pinned grid-exactly in tests/mcwf1d_test.cpp.
+    // Cat + photon-loss arc: the cat's <n> bleeds at kappa and photons click
+    // (jumps fire). Parity-flip pinned in tests/mcwf1d_test.cpp.
     if (shell->has_arg("--selftest-cat")) {
         shell->sched().after(1000, [shell] {
             selftest_scene_wait_running(shell, "harmonic1d", 0, [shell](
@@ -921,6 +862,9 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
+    // 1D ladder arc: the Fock chain through the Ladder1dApi seam. Two raises
+    // land n=2 with <H> = 2.5 w; two lowers return to ground; the third lower
+    // is REFUSED by the operator (a|0> = 0), level untouched.
     if (shell->has_arg("--selftest-ladder1d")) {
         shell->sched().after(1000, [shell] {
             selftest_scene_wait_running(shell, "harmonic1d", 0, [shell](
@@ -939,25 +883,23 @@ void register_verification_arcs(ShellT* shell) {
                 const bool down_ok = ln->ladder(false) && ln->ladder(false) &&
                                      ln->level() == 0;
                 const bool refuse_ok = !ln->ladder(false) && ln->level() == 0;
-                // Superposition: Var(H) must classify it (level -1), and
-                // the ladder must act on it linearly (no refusal -- every
-                // component is reachable).
+                // Superposition: Var(H) classifies it (level -1); the ladder
+                // acts linearly (no refusal -- every component is reachable).
                 ln->random_superposition();
                 const bool mix_ok = ln->level() == -1 && ln->ladder(true) &&
                                     ln->level() == -1;
-                // Quench: stiffen the well under the kept psi, then reset
-                // must land in the NEW well's ground at E = w/2 = 0.25 Ha.
+                // Quench: stiffen the well under the kept psi; reset must land
+                // in the NEW well's ground E = w/2 = 0.25 Ha.
                 ln->set_omega(0.5);
                 shell->reset_simulation();
                 const bool quench_ok =
                     ln->omega() == 0.5 && ln->level() == 0 &&
                     std::abs(ln->level_energy() - 0.25) < 1e-3 &&
                     ln->max_level() > 10;  // stiffer well: higher clean cap
-                // Stable-rung round trip: 20 up + 20 down at w = 0.5 --
-                // far past the raw chain's cap (14), where the raw
-                // operators disintegrate into high-k garbage on descent
-                // (the observed ladder-down instability). Stable rungs
-                // must land exactly back on the ground.
+                // Stable-rung round trip: 20 up + 20 down at w=0.5, far past
+                // the raw chain's cap (14) where raw operators disintegrate
+                // into high-k garbage on descent. Stable rungs must land
+                // exactly back on the ground.
                 bool trip_ok = ln->level() == 0;
                 for (int i = 0; i < 20 && trip_ok; ++i) {
                     trip_ok = ln->ladder(true);
@@ -968,17 +910,15 @@ void register_verification_arcs(ShellT* shell) {
                 }
                 trip_ok = trip_ok && ln->level() == 0 &&
                           std::abs(ln->level_energy() - 0.25) < 1e-3;
-                // The quenched state is a superposition: it must ladder
-                // through the truncated Fock basis (exact coefficient
-                // action -- the raw spectral chain is useless at this
-                // grid's k_max) with the band as its cap.
+                // The quenched superposition ladders through the truncated Fock
+                // basis (exact coefficient action; the raw spectral chain is
+                // useless at this grid's k_max), with the band as its cap.
                 ln->set_omega(1.0);
                 const int cap_mix = ln->max_level();
                 const bool fock_ok =
                     ln->level() == -1 && cap_mix >= 50 && ln->ladder(true);
-                // Back on an eigenstate the cap is the representability
-                // ceiling of the widened box -- far above the old raw
-                // chain's teens.
+                // Back on an eigenstate the cap is the widened box's
+                // representability ceiling, far above the old raw chain's teens.
                 shell->press('2');
                 const int cap_eigen = ln->max_level();
                 const bool ceiling_ok = ln->level() == 0 && cap_eigen >= 100;
@@ -998,10 +938,9 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // 1D tunneling arc (main forces --scene=tunnel1d): same physics as the
-    // 3D arc on its textbook axis. CPU steps are cheap, so time_scale 8
-    // (~40 au/s) settles the transmitted lobe within seconds; assert a
-    // classically-forbidden T in a sane band.
+    // 1D tunneling arc: same physics as the 3D arc on its textbook axis. CPU
+    // steps are cheap (time_scale 8, ~40 au/s); assert a classically-forbidden
+    // T in a sane band.
     if (shell->has_arg("--selftest-tunnel1d")) {
         shell->sched().after(1000, [shell] {
             selftest_scene_wait_running(shell, "tunnel1d", 0, [shell](
@@ -1025,9 +964,8 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Double-well arc (main forces --scene=doublewell1d): psi_L must start
-    // left and, within ~1.5 transfer periods at time_scale 16, appear on
-    // the right with P_R > 0.8 -- the ammonia-inversion oscillation, live.
+    // Double-well arc: psi_L starts left and, within ~1.5 transfer periods,
+    // appears right with P_R > 0.8 -- the ammonia-inversion oscillation.
     if (shell->has_arg("--selftest-dw1d")) {
         shell->sched().after(1000, [shell] {
             selftest_scene_wait_running(shell, "doublewell1d", 0, [shell](
@@ -1070,11 +1008,9 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Reflectionless arc (main forces --scene=ptwell1d): the sech^2 well
-    // must show max R below 5e-3 after the transit; the equal square well
-    // (Key W) must reflect visibly. SIM-TIME polled, not wall-clocked: a
-    // 64k-point step costs real milliseconds, so the transit (~110 au)
-    // takes however long it takes (repo lesson: fixed deadlines lie).
+    // Reflectionless arc: the sech^2 well shows max R below 5e-3 after transit;
+    // the equal square well (Key W) reflects visibly. Sim-time polled: a
+    // 64k-point step costs real ms, so the ~110 au transit takes what it takes.
     if (shell->has_arg("--selftest-pt1d")) {
         shell->sched().after(1000, [shell] {
             selftest_scene_wait_running(shell, "ptwell1d", 0, [shell](
@@ -1107,9 +1043,8 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Morse arc (main forces --scene=morse1d): exactly 6 bound levels, the
-    // ladder climbs to the top and refuses past it, and the top gap is
-    // visibly smaller than the bottom gap (the anharmonic signature).
+    // Morse arc: exactly 6 bound levels; the ladder climbs to the top and
+    // refuses past it; the top gap < bottom gap (anharmonic signature).
     if (shell->has_arg("--selftest-morse1d")) {
         shell->sched().after(1000, [shell] {
             selftest_scene_wait_running(shell, "morse1d", 0, [shell](
@@ -1154,10 +1089,8 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // 2D double-slit + AB arc (main forces --scene=doubleslit2d): fly the
-    // packet through the pierced wall and let the screen integrate the
-    // arrivals, at Phi = 0 (bright axis) and Phi = pi (Chambers shift:
-    // dark axis, first-dark position turns bright). SIM-TIME polled.
+    // 2D double-slit + AB arc: the screen integrates arrivals at Phi=0 (bright
+    // axis) and Phi=pi (Chambers shift: dark axis, first-dark turns bright).
     if (shell->has_arg("--selftest-doubleslit2d")) {
         shell->sched().after(1000, [shell] {
             selftest_scene_wait_running(shell, "doubleslit2d", 0, [shell](
@@ -1171,10 +1104,9 @@ void register_verification_arcs(ShellT* shell) {
                     return;
                 }
                 const double pi = 3.14159265358979323846;
-                // First dark fringe: path difference lambda/2 at the
-                // screen, y = lambda L / (2 d). ONE electron per shot
-                // (user order): k0 = 1 long-wavelength packet, transit
-                // ~80 au + tail -- t_run covers a full shot.
+                // First dark fringe: path difference lambda/2, y = lambda L /
+                // (2 d). One electron per shot, k0 = 1 (long wavelength);
+                // transit ~80 au + tail.
                 const double lam = 2.0 * pi / 1.0;   // k0 = 1
                 const double ell = 45.0 - 0.75;      // wall mid -> screen
                 const double yd = lam * ell / (2.0 * sl->separation());
@@ -1184,8 +1116,8 @@ void register_verification_arcs(ShellT* shell) {
                                                          t_run](bool ok1) {
                     const double b0 = shell->sl()->screen_at(0.0);
                     const double d0 = shell->sl()->screen_at(yd);
-                    // Fire a SECOND electron: the screen must keep the
-                    // first shot's arrivals and roughly double on axis.
+                    // Second electron: the screen keeps the first shot and
+                    // roughly doubles on axis.
                     shell->sl()->refire();
                     selftest_wait_sim_time(shell, 2.0 * t_run, 0, [shell,
                                                                    yd, pi,
@@ -1224,8 +1156,7 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Landau arc (main forces --scene=landau2d): ride one cyclotron
-    // period -- antipode at T/2, home at T -- SIM-TIME polled.
+    // Landau arc: ride one cyclotron period -- antipode at T/2, home at T.
     if (shell->has_arg("--selftest-landau")) {
         shell->sched().after(1000, [shell] {
             selftest_scene_wait_running(shell, "landau2d", 0, [shell](
@@ -1241,10 +1172,8 @@ void register_verification_arcs(ShellT* shell) {
                 const double r = la->radius_pred();
                 const double period = 2.0 * pi / la->omega_c();
                 shell->set_time_scale(16);
-                // The DIRECTOR records the antipode/closure distances at
-                // the actual crossings (step-chunk granularity); the arc
-                // only has to wait PAST the period and read them --
-                // sim-time polls are far too coarse for orbital phase.
+                // The director records antipode/closure distances at the actual
+                // crossings; sim-time polls are far too coarse for orbital phase.
                 selftest_wait_sim_time(shell, 1.1 * period, 0, [shell,
                                                                 r](bool ok1) {
                     const double anti = shell->la()->antipode_dist();
@@ -1261,9 +1190,8 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Bloch arc (main forces --scene=bloch1d): one Bloch period under the
-    // tilt -- the packet must stay BOUNDED (no runaway) and come home,
-    // while a free particle would have fallen F T_B^2 / 2 away.
+    // Bloch arc: one Bloch period under the tilt -- the packet stays BOUNDED
+    // and comes home, while a free particle would fall F T_B^2 / 2 away.
     if (shell->has_arg("--selftest-bloch")) {
         shell->sched().after(1000, [shell] {
             selftest_scene_wait_running(shell, "bloch1d", 0, [shell](
@@ -1285,10 +1213,10 @@ void register_verification_arcs(ShellT* shell) {
                     const double dx =
                         std::abs(shell->bl()->mean_x() - x0);
                     const double exc = shell->bl()->excursion();
-                    const bool moved_ok = exc > 0.3;      // it DID slosh
+                    const bool moved_ok = exc > 0.3;
                     const bool bound_ok =
-                        exc < 0.15 * free_fall;           // never ran away
-                    const bool home_ok = dx < 2.0;        // and came home
+                        exc < 0.15 * free_fall;
+                    const bool home_ok = dx < 2.0;
                     const bool pass =
                         ok1 && moved_ok && bound_ok && home_ok;
                     std::fprintf(stderr,
@@ -1303,11 +1231,8 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Corral arc (main forces --scene=corral2d): the boot relax must
-    // capture the ground INSIDE the fence with the J0-mode energy scale.
-    // Anderson arc (main forces --scene=anderson1d): the conductance
-    // contract at scene scale -- the disordered wire insulates, the clean
-    // wire conducts. Mirrors anderson1d_test.
+    // Anderson arc: the disordered wire insulates, the clean wire conducts.
+    // Mirrors anderson1d_test.
     if (shell->has_arg("--selftest-anderson")) {
         shell->sched().after(1000, [shell] {
             selftest_scene_wait_running(shell, "anderson1d", 0, [shell](
@@ -1344,9 +1269,8 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Billiard arc (main forces --scene=billiard2d): the caustic contract
-    // at scene scale -- circle keeps the center dark (|L| conserved),
-    // the stadium fills it (chaos). Mirrors billiard2d_test.
+    // Billiard arc: circle keeps the center dark (|L| conserved), the stadium
+    // fills it (chaos). Mirrors billiard2d_test.
     if (shell->has_arg("--selftest-billiard")) {
         shell->sched().after(1000, [shell] {
             selftest_scene_wait_running(shell, "billiard2d", 0, [shell](
@@ -1384,6 +1308,8 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
+    // Corral arc: the boot relax must capture the ground INSIDE the fence
+    // with the J0-mode energy scale.
     if (shell->has_arg("--selftest-corral")) {
         shell->sched().after(1000, [shell] {
             auto* cr = shell->cr();
@@ -1394,8 +1320,8 @@ void register_verification_arcs(ShellT* shell) {
                 return;
             }
             // The corral BOOTS inside its relax (sim time frozen), so the
-            // generic sim-time running gate cannot apply: poll the capture
-            // directly, bounded (annealed 512^2 relax takes a while).
+            // generic sim-time gate cannot apply: poll the capture directly
+            // (bounded).
             shell->set_time_scale(16);
             auto poll = std::make_shared<int>(-1);
             auto tries = std::make_shared<int>(0);
@@ -1428,9 +1354,8 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Quantum-dot arc (main forces --scene=qdot2d): the relaxed ground at
-    // the boot (w0, B) must land on the Fock-Darwin Omega; then B = 0
-    // must land on w0 -- the field dependence verified end to end.
+    // Quantum-dot arc: the relaxed ground (w0, B) must land on the Fock-Darwin
+    // Omega; then B=0 must land on w0.
     if (shell->has_arg("--selftest-qdot")) {
         shell->sched().after(1000, [shell] {
             selftest_scene_wait_running(shell, "qdot2d", 0, [shell](
@@ -1478,10 +1403,9 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // H2+ arc (main forces --scene=h2plus): sigma_g then sigma_u at the
-    // equilibrium R, then the stretched geometry -- asserting the bond:
-    // E_total(R_eq) < E_total(R_far), and sigma_u above sigma_g. State
-    // preparation is ITP over frames: poll prepared(k), never wall-clock.
+    // H2+ arc: 1sigma_g then 1sigma_u* at fixed equilibrium R -- assert
+    // 1sigma_u* above 1sigma_g and E_total binds vs the H(1s)+p limit. State
+    // prep is ITP over frames: poll prepared(k), never wall-clock.
     if (shell->has_arg("--selftest-h2p")) {
         shell->sched().after(1000, [shell] {
             selftest_scene_wait_running(shell, "h2plus", 0, [shell](bool runs) {
@@ -1501,9 +1425,7 @@ void register_verification_arcs(ShellT* shell) {
                         return;
                     }
                     shell->sched().cancel(*poll);
-                    // R is fixed at equilibrium (no bond scan): check the
-                    // bonding/antibonding ordering AND that the total energy
-                    // binds vs the dissociation limit H(1s) + p = -0.5 Ha.
+                    // -0.5 Ha = the H(1s)+p dissociation limit.
                     const double e_g = m->energy(0);
                     const double e_u = m->energy(1);
                     const double et = e_g + m->nuclear_repulsion();
@@ -1528,10 +1450,8 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // H2+ known-orbitals arc (main forces --scene=h2plus): the deflated
-    // chain climbs to 1pi_u (state 2), and the three MO energies must order
-    // 1sigma_g < 1sigma_u* < 1pi_u. Then a random seed must STAY bound
-    // (P(r<8) high) -- an arbitrary normalized state that evolves, not junk.
+    // H2+ orbitals arc: the deflated chain climbs to 1pi_u (state 2); the MO
+    // energies must order 1sigma_g < 1sigma_u* < 1pi_u.
     if (shell->has_arg("--selftest-h2p-orbitals")) {
         shell->sched().after(1000, [shell] {
             selftest_scene_wait_running(shell, "h2plus", 0, [shell](bool runs) {
@@ -1573,11 +1493,9 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Stripped-benzene arc (main forces --scene=benzene): the first
-    // electron of C6H6^41+ over bare nuclei (the REAL uniform geometry;
-    // no counterfactual knobs). The three prepared states must form a
-    // DEEP quasi-degenerate carbon-core band (no ordering or gap claims:
-    // deflated ITP finds band members in arbitrary order).
+    // Benzene arc: C6H6^41+ first electron over bare nuclei. The three prepared
+    // states must form a DEEP quasi-degenerate carbon-core band (no ordering
+    // claims: deflated ITP finds members in arbitrary order).
     if (shell->has_arg("--selftest-benzene")) {
         shell->sched().after(1000, [shell] {
             selftest_scene_wait_running(shell, "benzene", 0, [shell](bool runs) {
@@ -1611,10 +1529,9 @@ void register_verification_arcs(ShellT* shell) {
                         shell->request_exit(1);
                         return;
                     }
-                    // Real-time containment: a prepared CORE state must
-                    // STAY on the ring under real-time stepping (the step
-                    // accuracy contract -- a dt too coarse for the Z=6
-                    // regularized well heats the state over the whole box).
+                    // Real-time containment: a prepared CORE state must STAY on
+                    // the ring under real-time stepping -- a dt too coarse for
+                    // the Z=6 regularized well heats the state over the box.
                     shell->set_real_time();
                     shell->set_time_scale(16);
                     const double t0 = shell->director().sim_time();
@@ -1642,10 +1559,8 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Rutherford arc (main forces --scene=rutherford3d): a packet fired
-    // head-on at the repulsive Coulomb center turns around near the classical
-    // closest approach r_min = 2Z/E (never reaching the core) and backscatters
-    // -- the barrier that revealed the nucleus. Poll the director's probes.
+    // Rutherford arc: head-on packet turns around near the classical closest
+    // approach r_min = 2Z/E (never reaching the core) and backscatters.
     if (shell->has_arg("--selftest-rutherford")) {
         run_when_manifold_ready(shell, [shell] {
             auto* rf = shell->director().rutherford();
@@ -1657,12 +1572,9 @@ void register_verification_arcs(ShellT* shell) {
             shell->set_time_scale(16);
             shell->sched().after(120000, [shell] {
                 auto* r = shell->director().rutherford();
-                const double rmin = r->turning_point();      // classical 2Z/E
+                const double rmin = r->turning_point();
                 const double closest = r->closest_approach();  // min <r> seen
                 const double back = r->backscattered_fraction();
-                // The packet turned around near r_min: it did NOT reach the
-                // core (closest > 0.5 r_min) and did approach (closest <
-                // launch distance), and a real fraction came back upstream.
                 const bool approached = closest > 0.4 * rmin && closest < 28.0;
                 const bool reflected = back > 0.1;
                 const bool pass = approached && reflected;
@@ -1675,10 +1587,9 @@ void register_verification_arcs(ShellT* shell) {
         });
     }
 
-    // Tunneling arc (main forces --scene=tunnel): the packet launched at
-    // x = -30 with v = 0.5 reaches the slab at ~60 au; the transmitted lobe
-    // is fully past it well before ~150 au (~2.5 min at ~1 au/s). Assert a
-    // classically-forbidden transmitted fraction in a sane band.
+    // Tunneling arc: packet at x=-30, v=0.5 reaches the slab at ~60 au; the
+    // transmitted lobe is past well before ~150 au. Assert a classically-
+    // forbidden transmitted fraction in a sane band.
     if (shell->has_arg("--selftest-tunnel")) {
         run_when_manifold_ready(shell, [shell] {
             shell->sched().after(180000, [shell] {

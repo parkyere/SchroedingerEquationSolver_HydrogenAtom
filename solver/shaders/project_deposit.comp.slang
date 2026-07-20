@@ -1,14 +1,8 @@
-// Orbital-free angular projection deposit. One workgroup per radial bin
-// gathers that bin's cells (primary + secondary interpolation partners, from
-// the counting-sort CSR index) and accumulates Y_lm-weighted psi into 36
-// components (l = 0..5), then folds each component with a WaveActiveSum + a
-// fixed-order combine of the per-wave partials, written to g_lm[c*nr+bin].
-// No atomics; the wave fold is order-agnostic within a wave but the per-wave
-// partials sum in a fixed order -> deterministic: the projection oracle
-// compares within tolerance, not bit-exact.
-//
-// Each wave's elected lane banks into a UNIQUE contiguous slot (0..numSg-1)
-// from WaveGetLaneCount() + SV_GroupIndex. Requires wave arithmetic support.
+// Orbital-free angular projection: one workgroup per radial bin.
+// Requires wave arithmetic (WaveActiveSum/WaveGetLaneCount).
+// 36 components = l=0..5 (sum of 2l+1 = 36).
+// Per-wave partials fold in fixed order -> deterministic but not bit-exact;
+// the projection oracle compares within tolerance.
 import complex;
 import ylm;
 import grid;
@@ -23,15 +17,14 @@ struct Params {
     int ny;
     int nr;
     float h_radial;
-    float4 box_min;  // .xyz
-    float4 cell_h;   // .xyz
+    float4 box_min;
+    float4 cell_h;
     float dv;
 };
 [[vk::binding(1, 0)]] ConstantBuffer<Params, Std140DataLayout> params;
 
-// Transposed, re/im-split accumulators: [c*128 + tid] puts consecutive
-// threads in consecutive 4 B banks. Per-wave partials for the cross-wave
-// combine: 128 threads / smallest supported wave (4) => at most 32 waves.
+// [c*128 + tid] keeps consecutive threads in consecutive banks (no conflict).
+// sg sized 32 = 128 threads / smallest wave (4).
 groupshared float acc_re[36 * 128];
 groupshared float acc_im[36 * 128];
 groupshared float sg_re[36 * 32];
@@ -66,7 +59,7 @@ void main(uint3 grp : SV_GroupID, uint tid : SV_GroupIndex) {
         float w;
         if (primary) {
             if (r < params.h_radial) {
-                w = 1.0 / params.h_radial;  // origin: constant u[0]/h (bin 0 only)
+                w = 1.0 / params.h_radial;  // origin: u[0]/h
             } else {
                 float t = r / params.h_radial - 1.0;
                 float frac = t - float(int(t));
@@ -74,7 +67,7 @@ void main(uint3 grp : SV_GroupID, uint tid : SV_GroupIndex) {
             }
         } else {
             if (r < params.h_radial) {
-                continue;  // origin has no secondary (i0+1) contribution
+                continue;  // no secondary partner at origin
             }
             float t = r / params.h_radial - 1.0;
             float frac = t - float(int(t));
@@ -91,10 +84,7 @@ void main(uint3 grp : SV_GroupID, uint tid : SV_GroupIndex) {
         }
     }
     GroupMemoryBarrierWithGroupSync();
-    // Each component: reduce the 128 partials with one WaveActiveSum per wave
-    // (the wave's first lane banks its sum in slot = tid/waveSize), then thread
-    // 0 folds the per-wave sums in a fixed order. All 128 lanes are active here
-    // (the bin guard returned uniformly), so the wave ops stay convergent.
+    // All 128 lanes active here (bin guard returned uniformly) => wave ops convergent.
     uint waveSize = WaveGetLaneCount();
     uint numSg = (128u + waveSize - 1u) / waveSize;
     uint sgId = tid / waveSize;

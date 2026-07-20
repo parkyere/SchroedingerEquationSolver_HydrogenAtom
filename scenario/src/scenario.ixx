@@ -18,22 +18,16 @@ export import ses.marching_cubes;
 export import ses.colormap;
 
 
-// The scenario seam: everything a demo IS, behind one framework-neutral
-// interface. The shell owns exactly one ScenarioDirector (chosen by --scene=)
-// and talks to it through this contract; scenario-specific keys go through
-// handle_key (plain ASCII -- the shell maps its own key codes down to this).
-// ses.vk.device's GMF set, textually pre-claimed: volk.h both supplies the
-// VK_* macros (macros never cross module boundaries) and inoculates the TU
-// against GMF/textual std redefinitions.
+// One framework-neutral interface per demo; the shell owns one ScenarioDirector
+// (--scene=) and drives it through this contract.
+// volk.h: VK_* macros (macros never cross module boundaries) + inoculates the TU
+// against ses.vk.device's GMF/textual std redefinitions.
 
 
 export namespace ses_shell {
 
-// Scenario-specific capability seams. The shell holds ONE ScenarioDirector
-// and never down-casts to a concrete type; a scene that supports these
-// controls returns a non-null pointer from the matching accessor, so the
-// panel and the selftest arcs reach the specialized surface through a stable
-// interface.
+// Capability seams: the shell never down-casts; a scene returning non-null from
+// the matching ScenarioDirector accessor exposes that control surface.
 struct HydrogenApi {
     virtual ~HydrogenApi() = default;
     virtual void set_relaxing() = 0;
@@ -58,18 +52,15 @@ struct HydrogenApi {
     virtual double channel_a(int from, int to) const = 0;
     virtual double state_energy(int idx) const = 0;
     virtual long long photon_count() const = 0;
-    // Spectrometer record: the energies (eV) of the photons emitted by
-    // quantum jumps since the last reset, in emission order. spectro_max_ev
-    // is the strip's full scale (the ionization limit) -- 0 hides the
-    // strip (0 defaults: hydrogen is the sole HydrogenApi implementer;
-    // emission rules are hydrogen-only).
+    // Jump-photon energies (eV) since reset, emission order. spectro_max_ev =
+    // strip full scale (ionization limit); 0 hides the strip.
     virtual int spectro_count() const { return 0; }
     virtual double spectro_ev(int /*i*/) const { return 0.0; }
     virtual double spectro_max_ev() const { return 0.0; }
     virtual int last_measured_index() const = 0;
     virtual void seed_kepler() = 0;  // circular-state Rydberg packet (K)
     virtual double mean_z() = 0;
-    virtual double mean_x() = 0;  // Kepler-orbit readout pair
+    virtual double mean_x() = 0;
     virtual double mean_y() = 0;
     virtual double peak_excited_population() const = 0;
     virtual void debug_prepare_state(int idx) = 0;
@@ -82,69 +73,60 @@ struct TunnelApi {
     virtual double transmitted_max() const = 0;
 };
 
-// 1D harmonic-oscillator ladder controls (the textbook 1D trap scene).
+// 1D harmonic-oscillator ladder (the 1D trap scene).
 struct Ladder1dApi {
     virtual ~Ladder1dApi() = default;
-    // Current Fock level n; -1 = the state is a superposition (classified
-    // honestly by Var(H), not bookkeeping).
+    // Fock level n; -1 = superposition (classified by Var(H)).
     virtual int level() const = 0;
     virtual double level_energy() const = 0;  // live <H> (Ha)
-    // Apply a-dag (up) / a (down); false = refused (a|0> = 0, or the
-    // spectral-band cap on the way up).
+    // a-dag (up) / a (down); false = refused (a|0> = 0, or spectral-band cap).
     virtual bool ladder(bool up) = 0;
-    // Well stiffness omega (width ~ 1/sqrt(w)). Setting it is a sudden
-    // QUENCH: psi is kept and breathes in the new well; the reset target
-    // becomes the new ground.
+    // Well stiffness omega (width ~ 1/sqrt(w)); setting it is a sudden QUENCH
+    // (psi kept, breathes in the new well; reset target becomes the new ground).
     virtual void set_omega(double w) = 0;
     virtual double omega() const = 0;
-    // Largest ladder level reachable cleanly from the CURRENT state: an
-    // eigenstate rungs via the stable oracle-rebuilt path (grid
-    // representability ceiling, ses.ladder ho_level_cap); a superposition
-    // rungs in the truncated Fock basis (ses.ladder ladder_fock band).
+    // Largest level reachable from the CURRENT state: eigenstate via the
+    // oracle-rebuilt path (ses.ladder ho_level_cap); superposition in the
+    // truncated Fock basis (ses.ladder ladder_fock band).
     virtual int max_level() const = 0;
-    // Prepare a random coherent superposition over the low Fock levels (a
-    // PURE state -- a density-matrix mixture is not representable in a
-    // wavefunction solver).
+    // Random coherent superposition over low Fock levels (PURE; a wavefunction
+    // solver cannot hold a density-matrix mixture).
     virtual void random_superposition() = 0;
-    // Schrodinger-cat decoherence lens: the two-lobe cat |a> + |-a> and
-    // the cavity photon-loss MCWF (each lost photon flips the parity).
+    // Schrodinger-cat lens: two-lobe cat |a> + |-a>, cavity photon-loss MCWF
+    // (each lost photon flips the parity).
     virtual void cat() = 0;
     virtual void toggle_loss() = 0;
     virtual bool loss_on() const = 0;
     virtual long long jump_count() const = 0;
-    // The linear-combination spectrum strip (0..100 eV): what the cloud
-    // IS made of. Weights only change on MUTATIONS (unitary evolution
-    // leaves |c_n|^2 alone), so implementations recompute lazily.
+    // Linear-combination spectrum strip (0..100 eV). Weights change only on
+    // mutations (unitary evolution preserves |c_n|^2), so recompute is lazy.
     virtual int spectrum_count() = 0;
     virtual double spectrum_ev(int i) = 0;
     virtual double spectrum_weight(int i) = 0;
 };
 
-// The double-well tunneling-oscillation scene.
 struct DoubleWellApi {
     virtual ~DoubleWellApi() = default;
     virtual double splitting() const = 0;  // dE = E1 - E0 (Ha)
     virtual double p_left() const = 0;
     virtual double p_right() const = 0;
-    // Re-prepare psi_L in a well with the new barrier (a preparation demo).
+    // Re-prepare psi_L in a well with the new barrier.
     virtual void set_barrier(double vb) = 0;
     virtual double barrier() const = 0;
 };
 
-// The reflectionless (Poschl-Teller) scattering scene.
+// Reflectionless Poschl-Teller scattering scene.
 struct ReflectApi {
     virtual ~ReflectApi() = default;
-    // Largest negative-momentum fraction seen while most of the norm was
-    // still in the box (the honest R; absorbed flux must not inflate it).
+    // Largest negative-momentum fraction while most norm still in box (honest
+    // R; absorbed flux must not inflate it).
     virtual double reflected_max() const = 0;
     virtual bool square_well() const = 0;
     virtual void toggle_well() = 0;  // sech^2 <-> equal square, relaunch
 };
 
-// One-electron fixed-nuclei molecules (Born-Oppenheimer): staged state
-// preparation (ITP ground, then the deflated excited chain) + geometry
-// control. prepare(k) is ASYNC (the relax runs over frames); the arcs and
-// the panel poll prepared(k).
+// One-electron fixed-nuclei molecules (Born-Oppenheimer): ITP ground then the
+// deflated excited chain. prepare(k) is ASYNC (relax over frames); poll prepared(k).
 struct MoleculeApi {
     virtual ~MoleculeApi() = default;
     virtual bool prepared(int k) const = 0;  // state k solved and cached
@@ -155,19 +137,18 @@ struct MoleculeApi {
     virtual int geometry() const = 0;
     virtual void set_parameter(double p) = 0;  // scene knob (R / delta)
     virtual double parameter() const = 0;
-    // P(|r| < radius): the real-time containment probe -- a prepared bound
-    // state must STAY on the nuclei (arc contract for the step accuracy).
+    // P(|r| < radius): containment probe (arc contract -- a bound state must
+    // STAY on the nuclei).
     virtual double containment(double radius) = 0;
-    // Known molecular orbitals: how many the scene exposes (prepare(k) for
-    // k in [0, state_count)), and each one's term-symbol label.
+    // Exposed orbitals: prepare(k) valid for k in [0, state_count); label is
+    // the term symbol.
     virtual int state_count() const = 0;
     virtual const char* orbital_label(int k) const = 0;
-    // Drop an arbitrary normalized wavefunction of random shape onto the
-    // scene and let it evolve (a superposition, not an eigenstate).
+    // Drop a random normalized wavefunction (a superposition, not an eigenstate).
     virtual void seed_random() = 0;
 };
 
-// The Morse anharmonic-ladder scene (eigenstate jumps, shrinking gaps).
+// Morse anharmonic ladder (shrinking gaps).
 struct MorseApi {
     virtual ~MorseApi() = default;
     virtual int level() const = 0;           // -1 = pair superposition
@@ -176,10 +157,8 @@ struct MorseApi {
     virtual int bound_count() const = 0;
 };
 
-// The 2D double-slit + Aharonov-Bohm scene: geometry sliders re-fire a
-// fresh electron through the pierced wall; flux is the solenoid buried
-// mid-wall between the slits (exact Peierls link phases, B = 0 on every
-// electron path).
+// 2D double-slit + Aharonov-Bohm: sliders re-fire a fresh electron; flux is the
+// solenoid buried mid-wall (exact Peierls link phases, B = 0 on every path).
 struct SlitApi {
     virtual ~SlitApi() = default;
     virtual void set_separation(double d) = 0;
@@ -190,8 +169,7 @@ struct SlitApi {
     virtual double flux() const = 0;
     virtual void refire() = 0;
     virtual double transmitted_fraction() const = 0;
-    // Accumulated screen density at the row nearest y (arcs probe the
-    // bright/dark fringes with this).
+    // Accumulated screen density at the row nearest y (arcs probe fringes).
     virtual double screen_at(double y) const = 0;
 };
 
@@ -208,13 +186,12 @@ struct LandauApi {
     virtual double orbit_x() const = 0;       // live <x>
     virtual double orbit_y() const = 0;       // live <y>
     virtual double mean_n() const = 0;        // <E>/B - 1/2 (Landau index)
-    // Recorded AT the crossings (step-chunk granularity; arcs poll far
-    // too coarsely to catch an orbital phase): distance from the T/2
-    // antipode and from the T = 2 pi / B start point. -1 until reached.
+    // Recorded AT the crossings (arcs poll too coarsely): distance from the T/2
+    // antipode and from the T = 2 pi / B start. -1 until reached.
     virtual double antipode_dist() const = 0;
     virtual double closure_dist() const = 0;
     // Landau-level ladder (ses.lattice2d landau_ladder): a-dag / a jump one
-    // cyclotron quantum; false = refused (a annihilated the lowest level).
+    // cyclotron quantum; false = refused (lowest level).
     virtual bool ladder(bool up) = 0;
 };
 
@@ -232,9 +209,8 @@ struct BlochApi {
     virtual double excursion() const = 0;     // max |<x> - x0| since fire
 };
 
-// The 1993 IBM quantum corral: adatoms on a ring, standing-wave states
-// relaxed inside the fence. States capture ASYNC over frames (poll
-// relaxing()); energies in Hartree.
+// 1993 IBM quantum corral: adatoms on a ring, standing waves inside the fence.
+// States capture ASYNC over frames (poll relaxing()); energies in Ha.
 struct CorralApi {
     virtual ~CorralApi() = default;
     virtual void set_radius(double r) = 0;
@@ -246,8 +222,7 @@ struct CorralApi {
     virtual double confinement() const = 0;  // probability inside the ring
     virtual bool relaxing() const = 0;
     virtual void fire_packet() = 0;  // scatter a packet off the fence
-    // The state the STM images: the standing wave AT the Fermi energy
-    // (k_F R ~ j0_10 => ~10 radial nodes), not the relaxed ground.
+    // Standing wave AT the Fermi energy (k_F R ~ j0_10, ~10 nodes), not the ground.
     virtual void fermi_wave() = 0;
 };
 
@@ -264,17 +239,15 @@ struct QdotApi {
     virtual double energy_meas() const = 0;
     virtual double energy_pred() const = 0;  // Omega = sqrt(w0^2 + B^2/4)
     virtual void fire_displaced() = 0;  // coherent orbit / rosette
-    // 2D-HO extensions: circular ladder (B = 0 only -- gauge), a random
-    // coherent packet, and the pick-and-gather grab (drag the surface;
-    // time stands still while held, resumes on release).
+    // 2D-HO extensions: circular ladder (B = 0 only -- gauge), a random coherent
+    // packet, and the pick-and-gather grab (time freezes while held).
     virtual bool ho_ladder(bool up) = 0;
     virtual void random_packet() = 0;
     virtual void begin_grab(double x, double y) = 0;
     virtual void update_grab(double strength) = 0;
     virtual void end_grab() = 0;
     virtual bool grabbing() const = 0;
-    // Fock-Darwin linear-combination spectrum (0..100 eV), lazy like the
-    // 1D trap's.
+    // Fock-Darwin linear-combination spectrum (0..100 eV), lazy.
     virtual int spectrum_count() = 0;
     virtual double spectrum_ev(int i) = 0;
     virtual double spectrum_weight(int i) = 0;
@@ -298,7 +271,7 @@ struct SpinApi {
     virtual int last_outcome() const = 0;
 };
 
-// 25 interacting spins: mean-field Heisenberg lattice of Bloch spheres.
+// Interacting spins: mean-field Heisenberg lattice of Bloch spheres.
 struct SpinsApi {
     virtual ~SpinsApi() = default;
     virtual void set_j(double j) = 0;  // exchange: >0 ferro, <0 Neel
@@ -312,9 +285,8 @@ struct SpinsApi {
     virtual void seed_neel() = 0;
     virtual double magnetization() = 0;
     virtual double staggered() = 0;
-    // Exact 2^16 Heisenberg <-> mean-field product switch. In exact mode
-    // entanglement is real, so the per-site arrows can SHRINK below unit
-    // length -- arrow_mean() reports the mean |<sigma_i>| (1 = product).
+    // Exact Heisenberg <-> mean-field product switch. In exact mode entanglement
+    // is real, so per-site arrows SHRINK below 1; arrow_mean() = mean |<sigma_i>|.
     virtual void set_exact(bool on) = 0;
     virtual bool exact_mode() const = 0;
     virtual double arrow_mean() = 0;
@@ -372,12 +344,10 @@ struct BilliardApi {
     virtual double avg_center_fraction() const = 0;  // caustic metric
 };
 
-// Rutherford scattering: a Gaussian packet fired head-on at a REPULSIVE
-// Coulomb center (the 3D Coulomb generator with flipped sign). Sliders set
-// the incident kinetic energy E and the target nuclear charge Z (defaults:
-// gold Z=79 vs the helium/alpha projectile, charge 2 -> V = +2Z/r). The
-// packet turns around near the classical closest approach r_min = 2Z/E and
-// backscatters -- the barrier that revealed the nucleus.
+// Rutherford scattering: Gaussian packet fired head-on at a REPULSIVE Coulomb
+// center (3D Coulomb generator, flipped sign). Sliders set incident KE E and
+// target charge Z (defaults: gold Z=79 vs alpha charge 2 -> V = +2Z/r);
+// classical closest approach r_min = 2Z/E.
 struct RutherfordApi {
     virtual ~RutherfordApi() = default;
     virtual void set_energy(double e) = 0;  // incident KE (Ha); refires
@@ -390,12 +360,9 @@ struct RutherfordApi {
     virtual double backscattered_fraction() const = 0;  // returned upstream
 };
 
-// A 1D-scene overlay primitive: packed (x, y, z) float triples drawn in
-// world space with a constant color -- a LINE_STRIP polyline, or with
-// `fill` a TRIANGLE_STRIP sheet (the faint xy reference plane). When
-// `rgba` is set (4 premultiplied floats per vertex) it REPLACES the
-// constant color -- the phase-hued density band. Both pointers stay valid
-// until the director's next run_frame().
+// A 1D-scene overlay primitive: packed (x, y, z) world-space triples; LINE_STRIP,
+// or with `fill` a TRIANGLE_STRIP sheet. `rgba` (premultiplied) REPLACES the
+// constant color. Both pointers stay valid until the next run_frame().
 struct OverlayCurve {
     const float* xyz = nullptr;
     int count = 0;
@@ -407,9 +374,8 @@ struct OverlayCurve {
     const float* rgba = nullptr;  // per-vertex premultiplied color
 };
 
-// A nucleus marker BALL (world space, symbolic radius): hydrogen's proton,
-// the molecules' CPK atoms. Shaded as a real sphere in both views -- the
-// mesh pipeline in Surface, the raymarcher in Cloud.
+// A nucleus marker BALL (world space, symbolic radius): proton / CPK atoms.
+// Shaded as a sphere both views (mesh in Surface, raymarch in Cloud).
 struct SceneMarker {
     float x = 0.0f;
     float y = 0.0f;
@@ -446,22 +412,18 @@ public:
     virtual SpinsApi* spins() { return nullptr; }
     virtual RutherfordApi* rutherford() { return nullptr; }
 
-    // 1D-scene overlay polylines (phasor curve + potential profile); the 3D
-    // scenes return 0 and the renderer draws nothing extra.
+    // 1D-scene overlay polylines (phasor curve + potential profile); 3D scenes
+    // return 0.
     virtual int overlay_curve_count() const { return 0; }
     virtual OverlayCurve overlay_curve(int /*i*/) const { return {}; }
 
-    // Photons emitted by quantum jumps, if the scene has any (generic so
-    // arcs can probe every jump-capable scene; hydrogen's override serves
-    // both this and HydrogenApi).
+    // Photons from quantum jumps (0 if none); generic so arcs can probe every
+    // jump-capable scene.
     virtual long long photon_count() const { return 0; }
 
-    // Scene-prop hints for the renderer (display only, physics never reads
-    // them): nucleus marker BALLS -- position, radius, color per ball (the
-    // default single warm origin sphere serves hydrogen and the trap; the
-    // molecules supply their CPK ball list; a barrier scene has NO point
-    // to suggest and returns 0) -- and a visualized potential slab
-    // [lo, hi) on x (the tunneling barrier).
+    // Scene-prop hints, display only (physics never reads them): nucleus marker
+    // BALLS (default single origin sphere; molecules supply a CPK list; barrier
+    // scenes return 0) and a potential slab [lo, hi) on x.
     virtual int marker_count() const { return 1; }
     virtual SceneMarker marker(int /*i*/) const {
         return {0.0f, 0.0f, 0.0f, 0.35f, 1.0f, 0.45f, 0.20f};
@@ -470,9 +432,8 @@ public:
         return false;
     }
 
-    // Scene-chosen boot camera (the shell owns it afterwards). The generic
-    // 3/4 view suits central scenes; the tunneling scene wants the slab
-    // edge-on (packet left, wall a thin stripe, transmission right).
+    // Scene-chosen boot camera (shell owns it afterwards); generic 3/4 view,
+    // tunneling wants the slab edge-on.
     virtual double default_camera_azimuth() const { return 0.6; }
     virtual double default_camera_elevation() const { return 0.4; }
 
@@ -489,9 +450,8 @@ public:
     virtual void tick() = 0;
 
     // ---- controls every scenario supports ----
-    // Real time = x1 pacing: every route back (key 1 / panel button) must
-    // also clear the visualized time scale, or a raised slider survives as
-    // a sticky speedup. NVI: scenes override do_set_real_time().
+    // Real time = x1: routing back must also clear the time scale, or a raised
+    // slider survives as a sticky speedup. NVI: scenes override do_set_real_time().
     void set_real_time() {
         do_set_real_time();
         set_time_scale(1);
@@ -510,36 +470,31 @@ public:
     // Camera start distance framing this scene's box (Bohr).
     virtual double default_camera_distance() const { return 150.0; }
 
-    // Visualized time scale: multiply the steps SUPPLIED per wall tick (and
-    // the per-frame consumption cap). dt is untouched -- more integrator
-    // steps per rendered frame, never larger ones -- so accuracy is
-    // preserved and the GPU saturating just lowers fps honestly.
+    // Visualized time scale: multiply the steps SUPPLIED per tick, not dt --
+    // more steps per frame, never larger ones, so accuracy is preserved (GPU
+    // saturation just lowers fps).
     virtual void set_time_scale(int scale) { (void)scale; }
     virtual int time_scale() const { return 1; }
 
-    // Total simulated time (au) and the integrator step (au) -- the shell's
-    // performance readout derives the achieved au/s from these.
+    // Total simulated time and integrator step (au); the perf readout derives
+    // au/s from these.
     virtual double sim_time() const { return 0.0; }
     virtual double sim_dt() const { return 0.0; }
-    // Integrator steps a x1 tick SUPPLIES: the readout's honest baseline is
-    // ticks/s x dt x THIS (a scene feeding 8 steps/tick showed "x8.0" at
-    // the x1 dial before this seam).
+    // Integrator steps a x1 tick SUPPLIES; the honest baseline is ticks/s x dt x THIS.
     virtual int steps_per_tick_x1() const { return 1; }
 
     // ---- display accessors (FrameInput assembly + title) ----
     virtual bool cloud() const = 0;
     virtual double peak() const = 0;
     virtual VkImageView psi_volume_view() = 0;
-    // Low-res fp32 Bohmian-velocity volume for the streaklines (null -> the
-    // renderer skips flow). Default null: only the GPU cloud scenes provide it.
+    // Low-res fp32 Bohmian-velocity volume for streaklines (null -> renderer
+    // skips flow; only GPU cloud scenes provide it).
     virtual VkImageView flow_velocity_view() { return VK_NULL_HANDLE; }
-    // GPU surface mesh (non-null when the scene extracts on-GPU): the
-    // renderer draws these directly and ignores mesh()/colors().
+    // GPU surface mesh (non-null when extracted on-GPU); renderer draws these
+    // and ignores mesh()/colors().
     virtual VkBuffer surface_vbuf() const { return VK_NULL_HANDLE; }
     virtual VkBuffer surface_indirect() const { return VK_NULL_HANDLE; }
-    // GPU-surface vertex capacity: generous for any tracked isosurface
-    // (transient while Surface is active); overflow clamps to a clean prefix
-    // (the engine warns once).
+    // GPU-surface vertex cap; overflow clamps to a clean prefix (engine warns once).
     static constexpr int kMcMaxTris = 1000000;
     virtual float next_flash_intensity() = 0;
     virtual bool take_volume_written() = 0;

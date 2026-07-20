@@ -1,7 +1,6 @@
-// Shared-memory radix-2 line FFT at N=8 (NHALF=4, LOG2N=3), the small size
-// used by the 3D fft3 check: run once per axis of an 8x8x8 cube. The line-
-// enumeration uniforms (mod_a/mul_b/mul_c/stride/n_lines) come from a std140
-// UBO and select the axis (x/y/z). See fft_line64.comp for the stage layout.
+// Radix-2 line FFT, N=8 (NHALF=4=numthreads, LOG2N=3=stages/bit_reverse shift) for
+// the 8x8x8 fft3 check: one workgroup per line; params select 3D axis x/y/z.
+// See fft_line64.comp for the stage layout.
 import complex;
 
 [[vk::binding(0, 0)]] RWStructuredBuffer<Complex, Std430DataLayout> data;

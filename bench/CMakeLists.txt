@@ -1,13 +1,11 @@
-# Manual micro-benchmark target (not registered with ctest; timing assertions
-# are flaky by nature -- correctness lives in tests/).
+# Not a ctest target: timing flaky.
 add_executable(sesolver_bench
     bench_main.cpp
 )
 target_link_libraries(sesolver_bench PRIVATE sesolver_core ses_warnings)
 target_compile_features(sesolver_bench PRIVATE cxx_std_20)
 
-# Offline code generator: bakes the exact prolate-spheroidal H2+ atlas into
-# core/src/h2plus_atlas_data.ixx. Run manually to regenerate; not a test.
+# Bakes atlas -> core/src/h2plus_atlas_data.ixx; run manually.
 add_executable(sesolver_genatlas
     gen_h2plus_atlas.cpp
 )

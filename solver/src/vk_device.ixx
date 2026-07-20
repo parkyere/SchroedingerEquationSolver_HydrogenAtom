@@ -17,30 +17,15 @@ module;
 export module ses.vk.device;
 
 
-// ses_vk: framework-free Vulkan bootstrap.
-//
-// A DeviceContext either OWNS a self-created VkInstance/VkDevice (headless
-// path -- checks, future cluster runs) or ADOPTS externally supplied handles
-// (a host framework's device; the SDL3 shell here uses the create path).
-// Framework-neutral -- volk + VMA only:
-//   - volk is the loader: it defines VK_NO_PROTOTYPES itself, dlopens
-//     vulkan-1, and declares canonically named global function pointers, so
-//     downstream code (and later VkFFT) compiles and links unmodified.
-//   - VMA owns device memory. Configured for dynamic function fetch so it
-//     rides volk's pointers (VMA_STATIC_VULKAN_FUNCTIONS=0).
-//
-// Validation: when create(want_validation=true) finds VK_LAYER_KHRONOS_
-// validation (vcpkg classic install or LunarG SDK; point VK_ADD_LAYER_PATH at
-// the layer dir), the layer + a debug-utils messenger are enabled and every
-// validation ERROR is counted in validation_errors -- harnesses fail on a
-// nonzero count, which makes hand-authored barriers actually testable.
+// ses_vk: framework-free Vulkan bootstrap (volk + VMA).
+// volk: VK_NO_PROTOTYPES loader -- downstream code + VkFFT link unmodified.
+// VMA: VMA_STATIC_VULKAN_FUNCTIONS=0, rides volk's dynamically fetched pointers.
 
 
 export namespace ses_vk {
 
-// Validation-error tally, bumped by the debug-utils callback. Checked by
-// harnesses after their GPU work: nonzero means a barrier/usage bug even if
-// the numbers happened to come out right on this driver.
+// Harnesses check nonzero after GPU work: catches a barrier/usage bug even when
+// the numbers came out right.
 inline std::atomic<int> g_validation_errors{0};
 
 inline VKAPI_ATTR VkBool32 VKAPI_CALL debug_utils_callback(
@@ -62,15 +47,12 @@ enum class Boot {
     error,      // present but broken -> harness FAIL
 };
 
-// A VkBuffer plus its VMA allocation (and the persistent map, when host
-// visible). Plain aggregate; DeviceContext::destroy_buffer releases it.
 struct Buffer {
     VkBuffer buf = VK_NULL_HANDLE;
     VmaAllocation alloc = VK_NULL_HANDLE;
     void* mapped = nullptr;  // non-null only for host-visible buffers
 };
 
-// Decode a VkResult to its name for diagnostics (submit/fence-wait outcomes).
 inline const char* vk_result_str(VkResult r) {
     switch (r) {
         case VK_SUCCESS: return "VK_SUCCESS";
@@ -92,30 +74,25 @@ struct DeviceContext {
     VkDevice device = VK_NULL_HANDLE;
     std::uint32_t queue_family = 0;
     VkQueue queue = VK_NULL_HANDLE;
-    // The engine's queue: a COMPUTE-only family when the hardware has one
-    // (async compute -- physics overlaps the graphics queue's rendering),
-    // else aliases the main queue/family (serial submission).
-    // ALL engine submissions go here so engine resources never cross queue
-    // families (EXCLUSIVE sharing stays legal); only the display volume is
-    // created CONCURRENT across the two families.
+    // Async-compute family when present (engine overlaps graphics), else aliases
+    // the main queue. ALL engine submits go here so engine buffers never cross
+    // families -- EXCLUSIVE sharing stays legal.
     std::uint32_t compute_family = 0;
     VkQueue compute_queue = VK_NULL_HANDLE;
     VmaAllocator allocator = VK_NULL_HANDLE;
     bool validation_active = false;
-    // Set true the first time ANY engine submit or fence fails (VK_ERROR_DEVICE_LOST
-    // or a 10 s hang). The device is then unusable: further submits are skipped
-    // (no spam, no repeated 10 s stalls) and the director drops to the CPU path.
+    // Set on first engine submit/fence failure; further submits skip and the
+    // director falls back to the CPU path.
     bool device_lost = false;
-    // Feature negotiation results: create_device probes phys_dev and enables
-    // ONLY the supported subset; downstream fast paths gate on these. adopt()
-    // leaves them false (the owner enabled its own features).
+    // create_device enables ONLY the supported subset; fast paths gate on these.
+    // adopt() leaves them false (owner enabled its own).
     bool feat_timeline_semaphore = false;
     bool feat_synchronization2 = false;
     bool feat_dynamic_rendering = false;
     bool feat_host_query_reset = false;
     bool feat_storage16 = false;
     bool feat_demote_to_helper = false;
-    float timestamp_period = 1.0f;  // ns per timestamp tick (limits)
+    float timestamp_period = 1.0f;  // ns per timestamp tick
     std::uint32_t timestamp_valid_bits = 0;  // compute-queue width; 0 = no HW timestamps
     char device_name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE] = {};
 
@@ -124,13 +101,9 @@ struct DeviceContext {
     DeviceContext& operator=(const DeviceContext&) = delete;
     ~DeviceContext() { destroy(); }
 
-    // ADOPT externally supplied handles (a host framework's device, for a
-    // shell that owns Vulkan itself; the SDL3 shell instead uses create_*):
-    // the core code stays framework-free -- these are Khronos-standard
-    // handles, dependency-injected. The context creates its OWN VmaAllocator
-    // on the shared device (never touch the owner's) and destroys only what it
-    // made. One device per process on this path (volkLoadDevice's global
-    // table); a multi-device build would switch to volkLoadDeviceTable.
+    // Creates its OWN VmaAllocator on the shared device, destroys only what it
+    // made. One device per process (volkLoadDevice global table; multi-device
+    // would need volkLoadDeviceTable).
     Boot adopt(VkInstance inst, VkPhysicalDevice pd, VkDevice dev,
                std::uint32_t family, VkQueue q) {
         if (volkInitialize() != VK_SUCCESS) {
@@ -164,23 +137,19 @@ struct DeviceContext {
         return Boot::ok;
     }
 
-    // Self-create the whole chain (headless path).
     Boot create(bool want_validation) {
         const Boot inst = create_instance(want_validation, {});
         return inst == Boot::ok ? create_device(VK_NULL_HANDLE) : inst;
     }
 
-    // Instance half of the owning path. `extra_exts` carries the window
-    // system's surface extensions (SDL_Vulkan_GetInstanceExtensions) -- the
-    // GUI shell creates its VkSurfaceKHR between this and create_device().
+    // `extra_exts` = window-system surface extensions; the GUI shell creates its
+    // VkSurfaceKHR between this and create_device().
     Boot create_instance(bool want_validation,
                          const std::vector<const char*>& extra_exts) {
         if (volkInitialize() != VK_SUCCESS) {
-            return Boot::no_driver;  // no vulkan-1 runtime on this machine
+            return Boot::no_driver;
         }
 
-        // Validation layer + debug-utils only when asked AND the layer is
-        // actually discoverable (else proceed without, with a note).
         const char* kValidationLayer = "VK_LAYER_KHRONOS_validation";
         std::vector<const char*> layers;
         std::vector<const char*> exts{extra_exts};
@@ -209,11 +178,9 @@ struct DeviceContext {
         VkApplicationInfo ai{};
         ai.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
         ai.pApplicationName = "sesolver";
-        // Vulkan 1.3, NOT 1.4: at apiVersion 1.4 the GPU hangs (device lost)
-        // on some NVIDIA drivers -- the spec lets a driver steer behavior on
-        // the apiVersion integer, and 1.4 selects a broken path. No
-        // 1.4-exclusive feature is used, so 1.3 loses nothing. VMA/ImGui use
-        // the device's REAL apiVersion (aci.vulkanApiVersion), never this.
+        // Vulkan 1.3 not 1.4: apiVersion 1.4 hangs the GPU (device lost) on some
+        // NVIDIA drivers and no 1.4 feature is used. VMA/ImGui use the device's
+        // REAL apiVersion (aci.vulkanApiVersion), not this.
         ai.apiVersion = VK_API_VERSION_1_3;
         VkInstanceCreateInfo ici{};
         ici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -246,12 +213,10 @@ struct DeviceContext {
         return Boot::ok;
     }
 
-    // Device half of the owning path. A non-null `present_surface` makes
-    // this a PRESENTING device: the queue family must support presenting to
-    // it and VK_KHR_swapchain is enabled (the headless checks pass null).
+    // Non-null `present_surface` => presenting device: the queue family must
+    // support present and VK_KHR_swapchain is enabled (headless passes null).
     Boot create_device(VkSurfaceKHR present_surface) {
-        // Physical device: prefer the first discrete GPU, else the first
-        // anything.
+        // Prefer a discrete GPU, else the first.
         std::uint32_t dev_count = 0;
         vkEnumeratePhysicalDevices(instance, &dev_count, nullptr);
         if (dev_count == 0) {
@@ -272,11 +237,9 @@ struct DeviceContext {
         vkGetPhysicalDeviceProperties(phys_dev, &props);
         std::memcpy(device_name, props.deviceName, sizeof(device_name));
 
-        // Queue family: first with compute, preferring one that also has
-        // graphics (the engine's image barriers use fragment stages) and --
-        // when presenting -- one that can present to the surface. On desktop
-        // hardware the combined graphics family presents, so the preferences
-        // coincide.
+        // First compute family, preferring one that also has graphics (image
+        // barriers use fragment stages) and can present. Desktop's combined
+        // family does all.
         std::uint32_t qf_count = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(phys_dev, &qf_count, nullptr);
         std::vector<VkQueueFamilyProperties> qf(qf_count);
@@ -298,16 +261,15 @@ struct DeviceContext {
             queue_family = i;
             found = true;
             if ((flags & VK_QUEUE_GRAPHICS_BIT) != 0) {
-                break;  // combined family preferred
+                break;
             }
         }
         if (!found) {
             return Boot::error;
         }
 
-        // Async-compute family: COMPUTE without GRAPHICS (NVIDIA exposes
-        // one) so engine batches can overlap the graphics queue's rendering.
-        // Absent one, the engine queue aliases the main queue (serial).
+        // Async-compute family: COMPUTE without GRAPHICS (overlaps rendering);
+        // absent one, the engine queue aliases the main queue.
         compute_family = queue_family;
         for (std::uint32_t i = 0; i < qf_count; ++i) {
             const VkQueueFlags flags = qf[i].queueFlags;
@@ -338,9 +300,9 @@ struct DeviceContext {
             dci.ppEnabledExtensionNames = &kSwapchainExt;
         }
 
-        // Feature negotiation: PROBE what phys_dev supports, then ENABLE only
-        // that subset. pEnabledFeatures stays null; features ride the pNext
-        // chain of core VkPhysicalDeviceVulkan1{1,2,3}Features.
+        // PROBE phys_dev support, then ENABLE only that subset. pEnabledFeatures
+        // stays null; features ride the pNext chain of
+        // VkPhysicalDeviceVulkan1{1,2,3}Features.
         VkPhysicalDeviceVulkan13Features probe13{};
         probe13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
         VkPhysicalDeviceVulkan12Features probe12{};
@@ -358,9 +320,8 @@ struct DeviceContext {
         feat_synchronization2 = probe13.synchronization2 == VK_TRUE;
         feat_dynamic_rendering = probe13.dynamicRendering == VK_TRUE;
         feat_storage16 = probe11.storageBuffer16BitAccess == VK_TRUE;
-        // SPIR-V 1.6 (vulkan1.4 shader target) lowers `discard` to
-        // OpDemoteToHelperInvocation (slice/volume frag) -- declaring the
-        // DemoteToHelperInvocation capability needs this feature enabled.
+        // SPIR-V 1.6 lowers `discard` to OpDemoteToHelperInvocation (slice/volume
+        // frag); declaring that capability needs this feature enabled.
         feat_demote_to_helper =
             probe13.shaderDemoteToHelperInvocation == VK_TRUE;
         timestamp_period = props.limits.timestampPeriod;
@@ -394,7 +355,6 @@ struct DeviceContext {
             compute_queue = queue;
         }
 
-        // VMA rides volk's dynamically fetched entry points.
         VmaVulkanFunctions fns{};
         fns.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
         fns.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
@@ -410,8 +370,8 @@ struct DeviceContext {
         return Boot::ok;
     }
 
-    // Device-local buffer (storage + transfer both ways); `extra` adds
-    // consumer-specific usage (vertex / indirect for the GPU mesh path).
+    // Device-local storage buffer; `extra` adds usage (vertex/indirect for the
+    // GPU mesh path).
     bool create_device_buffer(VkDeviceSize size, Buffer* out,
                               VkBufferUsageFlags extra = 0,
                               bool share_across_queues = false) {
@@ -421,11 +381,9 @@ struct DeviceContext {
         bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
                     VK_BUFFER_USAGE_TRANSFER_DST_BIT | extra;
-        // Written by the engine's compute queue, read on the graphics queue
-        // (marching-cubes vertex/indirect buffers): CONCURRENT skips the
-        // queue-family ownership transfer -- host fences already order the
-        // accesses. EXCLUSIVE when the families coincide (no dedicated
-        // compute queue) or the buffer never crosses.
+        // Cross-queue (compute writes, graphics reads): CONCURRENT skips the
+        // ownership transfer -- host fences already order the accesses.
+        // EXCLUSIVE otherwise.
         const std::uint32_t families[2] = {queue_family, compute_family};
         if (share_across_queues && compute_family != queue_family) {
             bci.sharingMode = VK_SHARING_MODE_CONCURRENT;
@@ -440,7 +398,6 @@ struct DeviceContext {
                                nullptr) == VK_SUCCESS;
     }
 
-    // Host-visible persistently mapped buffer (staging or UBO).
     bool create_host_buffer(VkDeviceSize size, VkBufferUsageFlags usage,
                             Buffer* out) {
         VkBufferCreateInfo bci{};
@@ -470,8 +427,7 @@ struct DeviceContext {
         }
     }
 
-    // A 3D storage image (+ its view). STORAGE for the compute bridge,
-    // SAMPLED so the renderer can sample the same image.
+    // 3D image + view: STORAGE (compute writes) + SAMPLED (renderer samples same image).
     struct Image {
         VkImage img = VK_NULL_HANDLE;
         VkImageView view = VK_NULL_HANDLE;
@@ -493,9 +449,8 @@ struct DeviceContext {
         ici.tiling = VK_IMAGE_TILING_OPTIMAL;
         ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
         ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        // Written by the engine's compute queue, sampled by the graphics
-        // queue: CONCURRENT skips ownership-transfer barriers (host fences
-        // already order the accesses).
+        // Cross-queue (compute writes, graphics samples): CONCURRENT skips
+        // ownership barriers -- host fences already order the accesses.
         const std::uint32_t families[2] = {queue_family, compute_family};
         if (share_across_queues && compute_family != queue_family) {
             ici.sharingMode = VK_SHARING_MODE_CONCURRENT;
@@ -583,10 +538,9 @@ struct DeviceContext {
         }
     }
 
-    // The OneShot scratch sets (ses.vk.compute): one persistent transient
-    // pool + primary cb + fence per queue, reset per submission. The main
-    // set serves the renderer/presenter (graphics queue); the compute set
-    // serves the engine (compute queue -- pools are per-family).
+    // OneShot scratch (ses.vk.compute): transient pool + cb + fence per queue,
+    // reset per submission. Main = graphics queue, compute = engine (pools are
+    // per-family).
     VkCommandPool oneshot_pool = VK_NULL_HANDLE;
     VkCommandBuffer oneshot_cb = VK_NULL_HANDLE;
     VkFence oneshot_fence = VK_NULL_HANDLE;

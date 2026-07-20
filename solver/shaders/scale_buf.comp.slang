@@ -1,7 +1,4 @@
-// psi <- renorm[0] * psi. Identical to scale.comp except the factor is
-// GPU-computed by norm_finalize in the same submit (fused relax renorm) and
-// read from an SSBO, not a host-set UBO -- so the whole renorm records into
-// one command buffer.
+// factor from SSBO (norm_finalize), not the host UBO scale.comp uses -- fused relax renorm records in one command buffer.
 import complex;
 
 [[vk::binding(0, 0)]] RWStructuredBuffer<Complex, Std430DataLayout> data;

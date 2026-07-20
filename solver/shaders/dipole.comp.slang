@@ -1,7 +1,4 @@
-// Dipole matrix element <to| r |from> = sum conj(to)*from * (x,y,z): three
-// complex reductions (one per axis) folded in parallel and written as 6 floats
-// per workgroup. Bindings: to(0) / from(3) readonly, partials(2) writeonly,
-// std140 UBO(1) with vec4-padded grid geometry.
+// dipole <to|r|from> = sum conj(to)*from*(x,y,z); packs 6 floats (re,im x3)/workgroup
 import complex;
 import grid;
 
@@ -14,7 +11,7 @@ struct Params {
     int nx;
     int ny;
     int pad0;
-    float4 box_min;  // .xyz
+    float4 box_min;  // std140 vec4 pad; .xyz used
     float4 cell_h;   // .xyz
 };
 [[vk::binding(1, 0)]] ConstantBuffer<Params, Std140DataLayout> params;
@@ -33,7 +30,7 @@ void main(uint3 gid : SV_DispatchThreadID,
     Complex ay = Complex(0.0, 0.0);
     Complex az = Complex(0.0, 0.0);
     for (uint idx = gid.x; idx < params.n; idx += stride) {
-        Complex c = mul_conj(fto[idx], ffrom[idx]);  // conj(to)*from
+        Complex c = mul_conj(fto[idx], ffrom[idx]);
         int3 ijk = unflatten_moddiv(idx, params.nx, params.ny);
         float3 r = cell_pos(ijk, params.box_min.xyz, params.cell_h.xyz);
         ax = ax + c * r.x;

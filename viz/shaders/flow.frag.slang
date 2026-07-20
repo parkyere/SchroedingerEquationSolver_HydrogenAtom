@@ -1,6 +1,4 @@
-// Streakline fragment: the vertex already carries premultiplied white
-// (rgb = alpha), so just pass it through -- the premultiplied-alpha blend
-// composites the fading white line over the HDR scene.
+// Premultiplied-alpha output; consume with premultiplied blend.
 struct FSIn {
     float4 pos : SV_Position;
     [[vk::location(0)]] float4 v_color : TEXCOORD0;

@@ -1,25 +1,15 @@
-# 3.28: first release where FILE_SET CXX_MODULES is stable non-experimental
-# (the whole core ships as C++20 named modules); Ninja >= 1.11 required.
+# 3.28: first non-experimental FILE_SET CXX_MODULES; Ninja >= 1.11.
 cmake_minimum_required(VERSION 3.28)
 
-# ---------------------------------------------------------------------------
-# Optional: pick the newest installed clang++ / g++ BEFORE the compiler is
-# locked, so a Linux "just press F5" run gets a recent LLVM/GCC without picking
-# a kit by hand. Opt-in with -DSES_AUTODETECT_COMPILER=ON (the `linux-native`
-# preset sets it); skipped if you already pinned CMAKE_CXX_COMPILER or set $CXX;
-# falls through safely to CMake's default if nothing on the list is found.
-# ---------------------------------------------------------------------------
-# NOTE: UNIX/WIN32 are only set after project(); use CMAKE_HOST_UNIX (available
-# from startup) since this is about the build host's compilers.
+# CMAKE_HOST_UNIX not UNIX: UNIX/WIN32 are unset until project().
 if(CMAKE_HOST_UNIX AND SES_AUTODETECT_COMPILER
    AND NOT DEFINED CMAKE_CXX_COMPILER AND "$ENV{CXX}" STREQUAL "")
-    # Newest first (LLVM ahead of GCC). Extend the top as toolchains land.
+    # Newest first (LLVM ahead of GCC); first match wins, so extend the top.
     foreach(_cxx IN ITEMS
             clang++-25 clang++-24 clang++-23 clang++-22 clang++-21 clang++-20
             clang++-19 clang++-18 clang++-17 clang++-16
             g++-16 g++-15 g++-14 g++-13 g++-12 clang++ g++)
-        # unset(CACHE) each iteration: find_program caches its result, so a
-        # reused var would keep the first (possibly NOTFOUND) answer forever.
+        # unset(CACHE): find_program caches, else a reused var keeps the first answer.
         unset(_ses_cxx_path CACHE)
         find_program(_ses_cxx_path NAMES ${_cxx})
         if(_ses_cxx_path)
@@ -42,30 +32,21 @@ project(ShoeridingerEquationSolver
     DESCRIPTION "From-scratch FDM/TDSE single-electron Schrodinger solver with framework-free Vulkan compute and rendering in an SDL3 window shell"
     LANGUAGES CXX)
 
-# ---------------------------------------------------------------------------
-# Language standard
-# ---------------------------------------------------------------------------
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# C++20 named modules: scan every C++20 TU for `import` so consumers (which
-# only import, not provide) resolve modules the core provides. The 3.28
-# baseline sets CMP0155 NEW (scan on for C++20 targets); keep the explicit ON
-# so kit presets that override policies cannot silently turn it off.
+# CMP0155 NEW is the 3.28 default; keep explicit ON so kit presets can't
+# silently disable module scanning.
 set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 
-# Single-config generators: default to Debug for the TDD loop.
+# Default to Debug for the TDD loop.
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
 endif()
 
-# compile_commands.json for clangd / tooling.
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# ---------------------------------------------------------------------------
-# Options
-# ---------------------------------------------------------------------------
 option(SES_BUILD_TESTS        "Build unit tests"                          ON)
 option(SES_BUILD_APP          "Build the SDL3/Vulkan app (requires SDL3)" ON)
 option(SES_BUILD_GPU          "Build the GPU layers solver/viz/scenario + vkcheck (requires vcpkg Vulkan packages)" ON)
@@ -75,11 +56,8 @@ option(SES_NATIVE             "Tune for the build host CPU (-march=native)" OFF)
 option(SES_AUTODETECT_COMPILER "Pre-project: use the newest clang++/g++ on PATH" OFF)
 option(SES_WARNINGS_AS_ERRORS "Treat compiler warnings as errors"         OFF)
 
-# ---------------------------------------------------------------------------
-# Shared warning flags (INTERFACE target).
-# NOTE: never enable -ffast-math / /fp:fast - it breaks NaN handling and
-# bitwise reproducibility, which are load-bearing for numerical correctness.
-# ---------------------------------------------------------------------------
+# NOTE: never add -ffast-math / /fp:fast -- breaks NaN handling and bitwise
+# reproducibility (load-bearing for numerics).
 add_library(ses_warnings INTERFACE)
 if(MSVC)
     target_compile_options(ses_warnings INTERFACE /W4 /permissive- /EHsc)
@@ -93,28 +71,15 @@ else()
     endif()
 endif()
 
-# ---------------------------------------------------------------------------
-# CPU architecture flags (INTERFACE target, linked PUBLIC by the core so the
-# module BMIs and every importing TU compile with identical codegen flags --
-# a BMI/importer flag mismatch is an ODR trap).
-#
-# NOTE -ffp-contract=off: with bare -mavx2 -mfma the compiler may contract
-# a + b*c into fma(b, c, a), changing rounding and breaking the exact-value
-# FP oracles the tests pin (e.g. symmetric-grid coord(50) == 0.0). Contraction
-# off keeps scalar semantics BITWISE identical to the SSE2 build -- we take
-# only the 4-wide double vectorization.
-# ---------------------------------------------------------------------------
+# Linked PUBLIC by the core so module BMIs and every importing TU share codegen
+# -- a flag mismatch is an ODR trap.
+# -ffp-contract=off: -mavx2 -mfma may contract a+b*c into fma(), changing
+# rounding and breaking exact-value FP oracles (coord(50) == 0.0).
 add_library(ses_arch INTERFACE)
 if(NOT MSVC)
-    # ses::Complex is std::complex: compile complex * and / to the naive
-    # formulas (no C99 Annex G NaN/inf fixups, no __muldc3 branches in the
-    # FFT hot loop) -- bitwise identical to the arithmetic the exact-value
-    # test oracles were pinned against. (MSVC never emits Annex G fixups.)
-    # GCC spells the flag -fcx-limited-range; Clang 18+ spells it
-    # -fcomplex-arithmetic=basic; older Clang has neither, which is SAFE to
-    # omit: __mulsc3 computes the same naive formula for finite values and
-    # only patches NaN/inf afterward, so the oracles still hold -- the flag
-    # only removes the libcall from the hot loop.
+    # Disable C99 Annex G NaN/inf fixups on std::complex * and / -- keeps the
+    # naive formulas bitwise identical to the oracles. Older Clang lacks the flag;
+    # safe to omit (same formula for finite values). MSVC never emits the fixups.
     include(CheckCXXCompilerFlag)
     check_cxx_compiler_flag("-fcx-limited-range" SES_HAS_FCX_LIMITED_RANGE)
     if(SES_HAS_FCX_LIMITED_RANGE)
@@ -130,23 +95,14 @@ if(NOT MSVC)
         endif()
     endif()
 endif()
-# SES_NATIVE (host-CPU tuning) takes precedence over the portable AVX2 flags.
-# It keeps -ffp-contract=off AND pins the vector width to 256 (see below), so
-# even on an AVX-512 host the auto-vectorized reductions match the AVX2 build
-# bitwise -- the exact-value test oracles stay valid, and SES_NATIVE is safe for
-# the app AND the suite. (If some toolchain still trips an oracle, build the
-# suite with SES_NATIVE=OFF, the plain `linux` preset.)
 if(MSVC)
     if(SES_ENABLE_AVX2 OR SES_NATIVE)
         target_compile_options(ses_arch INTERFACE /arch:AVX2)
         message(STATUS "AVX2 enabled (MSVC /arch:AVX2).")
     endif()
 elseif(SES_NATIVE)
-    # -march=native for host tuning, but PIN the vector width to 256 (4-wide
-    # double = the AVX2 build) so auto-vectorized reductions keep the same
-    # summation order/rounding on an AVX-512 host. On Zen4/znver4 this is also
-    # the arch default (its AVX-512 is 256-bit double-pumped). -ffp-contract=off
-    # keeps FMA fusion out, exactly as the AVX2 path does.
+    # Pin vector width to 256 (4-wide double) so AVX-512 hosts keep the same
+    # reduction order/rounding as the AVX2 build (oracles stay valid).
     target_compile_options(ses_arch INTERFACE
         -march=native -mprefer-vector-width=256 -ffp-contract=off)
     message(STATUS "Native CPU tuning (-march=native, 256-bit vectors).")
@@ -155,10 +111,6 @@ elseif(SES_ENABLE_AVX2)
     message(STATUS "AVX2 enabled (SES_ENABLE_AVX2=ON).")
 endif()
 
-# ---------------------------------------------------------------------------
-# Targets
-# ---------------------------------------------------------------------------
-# Pure, dependency-free numerical core. Always built.
 add_subdirectory(core)
 
 # Testing must be enabled BEFORE the solver directory registers VkCheck.
@@ -166,13 +118,9 @@ if(SES_BUILD_TESTS)
     enable_testing()
 endif()
 
-# The layered GPU libraries. All windowing-free: the Schrodinger GPGPU
-# solver (with its headless vkcheck harness), the raw-Vulkan viz, and the
-# physics scenario orchestration. Gated so the documented core-only TDD
-# loop (-DSES_BUILD_GPU=OFF, no vcpkg) still configures -- solver/
+# Gated so the core-only TDD loop configures without vcpkg -- solver
 # hard-REQUIREs the vcpkg Vulkan packages.
 if(SES_BUILD_GPU)
-    # Shared build machinery for the GPU layers (slangc AOT bake, VkFFT probe).
     include(tools/cmake/ses_slang.cmake)
     include(tools/cmake/ses_vkfft.cmake)
     add_subdirectory(solver)
@@ -190,8 +138,6 @@ if(SES_BUILD_BENCH)
     add_subdirectory(bench)
 endif()
 
-# GUI shell. Auto-skipped (with a warning) when SDL3 is not installed, so the
-# core library and the TDD test loop never depend on a windowing toolkit.
 if(SES_BUILD_APP AND SES_BUILD_GPU)
     find_package(SDL3 CONFIG QUIET)
     if(SDL3_FOUND)

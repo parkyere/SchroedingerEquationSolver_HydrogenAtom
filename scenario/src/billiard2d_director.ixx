@@ -15,22 +15,13 @@ import ses.propagator;
 import ses.parallel;
 
 
-// Quantum billiard: one hard 2D table, two geometries. The CIRCLE is
-// integrable -- a tangential packet conserves |L|, so its orbit never
-// enters the caustic disk and the TIME-AVERAGED density keeps a dark
-// hole. The Bunimovich STADIUM (same table with the caps pulled apart by
-// a straight section) is fully chaotic -- the flat walls break L, orbits
-// visit everywhere, and the average fills the center; along short
-// periodic orbits the average keeps faint SCARS. Spectral split-operator
-// on (512, 512, 1) (smooth quadratic wall, B = 0); the average view is
-// the scar lens. CONTRACT: tests/billiard2d_test.cpp.
+// Quantum billiard: circle (integrable) vs Bunimovich stadium (chaotic).
+// Spectral split-operator, B = 0. CONTRACT: tests/billiard2d_test.cpp.
 
 
 export namespace ses_shell {
 
-// Signed distance to the stadium boundary: the stadium is every point
-// within `r` of the segment y = 0, |x| <= half_len (half_len = 0 is the
-// circle). Negative inside.
+// Signed distance to stadium (half_len = 0 -> circle); negative inside.
 inline double stadium_sdf(double x, double y, double half_len, double r) {
     const double cx = std::clamp(x, -half_len, half_len);
     return std::hypot(x - cx, y) - r;
@@ -42,12 +33,12 @@ constexpr int kBl2dNz = 4;
 constexpr double kBl2dZHalf = 2.0;
 constexpr double kBl2dDt = 0.01;     // wall phase V0 dt = 0.24 rad/step
 constexpr double kBl2dR = 13.0;
-constexpr double kBl2dHalfLen = 6.5; // stadium straight half-length
+constexpr double kBl2dHalfLen = 6.5;
 constexpr double kBl2dWallV0 = 24.0; // E = k0^2/2 = 2 Ha: near-total wall
-constexpr double kBl2dWallW = 2.0;   // quadratic onset width
+constexpr double kBl2dWallW = 2.0;
 constexpr double kBl2dK0 = 2.0;
 constexpr double kBl2dSigma = 1.5;
-constexpr double kBl2dLaunchY = 6.5; // (0, R/2), +x: tangential-family
+constexpr double kBl2dLaunchY = 6.5; // (0, R/2): tangential family
 constexpr int kBl2dStepsPerTick = 16;
 constexpr double kBl2dSurfH = 6.0;
 constexpr int kBl2dMeshStride = 1;
@@ -97,8 +88,7 @@ public:
         title_dirty_ = true;
     }
     bool avg_view() const override { return avg_view_; }
-    // Caustic metric (the billiard2d_test contract at scene scale):
-    // mean time-averaged density near the center over the deep interior.
+    // center/interior time-avg density ratio. CONTRACT: billiard2d_test.
     double avg_center_fraction() const override {
         if (avg_steps_ == 0) {
             return -1.0;
@@ -151,7 +141,7 @@ public:
     double sim_dt() const override { return kBl2dDt; }
     int steps_per_tick() const override { return kBl2dStepsPerTick; }
 
-    // ---- STM-style surface display (the corral rule) ----
+    // ---- surface display (corral rule) ----
     bool cloud() const override { return false; }
     const ses::Mesh& mesh() const override { return hf_.mesh; }
     const std::vector<ses::Rgb>& colors() const override {
@@ -164,7 +154,6 @@ public:
     double default_camera_elevation() const override { return 0.95; }
     double default_camera_distance() const override { return 110.0; }
 
-    // Boundary outline (white, translucent): caps + flats, closed.
     int overlay_curve_count() const override { return 1; }
     OverlayCurve overlay_curve(int /*i*/) const override {
         return {outline_.data(), static_cast<int>(outline_.size() / 3),
@@ -184,8 +173,7 @@ public:
 protected:
     void rebuild_display() override {
         if (avg_view_ && avg_steps_ > 0) {
-            // Scar lens: height = the time-averaged density (real field,
-            // uniform hue -- the average has no phase).
+            // real field -> uniform phasor hue
             ses::parallel_for(kBl2dN, [&](int j) {
                 for (int i = 0; i < kBl2dN; ++i) {
                     scar_(i, j, 0) = std::sqrt(
@@ -270,13 +258,13 @@ private:
             outline_.push_back(static_cast<float>(kBl2dR * std::sin(th)));
             outline_.push_back(0.0f);
         };
-        for (int t = 0; t <= 24; ++t) {  // right cap, -90 -> +90
+        for (int t = 0; t <= 24; ++t) {  // right cap
             put(-0.5 * pi + pi * t / 24.0, hl);
         }
-        for (int t = 0; t <= 24; ++t) {  // left cap, +90 -> +270
+        for (int t = 0; t <= 24; ++t) {  // left cap
             put(0.5 * pi + pi * t / 24.0, -hl);
         }
-        put(-0.5 * pi, hl);  // close along the bottom flat
+        put(-0.5 * pi, hl);  // close bottom flat
     }
 
     std::vector<double> v_;

@@ -1,9 +1,4 @@
-// Volumetric self-shadow: per voxel of a coarse (64^3) volume, march from
-// the voxel toward a fixed key light accumulating optical depth through
-// |psi|^2, store the transmittance T = exp(-tau). The raymarcher multiplies
-// its emission by (ambient + (1-ambient) T): the cloud shades ITSELF, and
-// lobes/nodal structure gain real 3D depth. Rebuilt only when the volume
-// (or the absorbance dial) changes.
+// shadow_img holds transmittance T; consumed downstream as ambient + (1-ambient)*T.
 [[vk::binding(0, 0)]] [[vk::image_format("r32f")]] RWTexture3D<float4> shadow_img;
 
 struct Ubo {
@@ -20,7 +15,7 @@ struct Ubo {
 };
 [[vk::binding(1, 0)]] ConstantBuffer<Ubo, Std140DataLayout> ubo;
 
-[[vk::binding(2, 0)]] Sampler3D<float4> psi_tex;  // combined image sampler
+[[vk::binding(2, 0)]] Sampler3D<float4> psi_tex;
 
 [shader("compute")]
 [numthreads(4, 4, 4)]
@@ -32,11 +27,10 @@ void main(uint3 gid : SV_DispatchThreadID) {
     if (any(c >= size)) {
         return;
     }
-    float3 kLightDir = normalize(float3(0.45, 0.80, 0.35));  // world-fixed key
+    float3 kLightDir = normalize(float3(0.45, 0.80, 0.35));
     float3 ext = ubo.box_max.xyz - ubo.box_min.xyz;
     float3 p = ubo.box_min.xyz + (float3(c) + 0.5) / float3(size) * ext;
 
-    // Distance to the box exit along the light direction.
     float3 inv = 1.0 / kLightDir;
     float3 t1 = (ubo.box_min.xyz - p) * inv;
     float3 t2 = (ubo.box_max.xyz - p) * inv;

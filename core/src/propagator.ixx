@@ -13,11 +13,7 @@ export import ses.field;
 import ses.parallel;
 
 
-// Split-operator (Fourier) propagator for the TDSE in atomic units. One
-// Strang step of exp(-i H dt), H = -1/2 laplacian + V:
-//     psi <- e^{-i V dt/2} . IFFT . e^{-i k^2 dt/2} . FFT . e^{-i V dt/2} psi
-// Unitary by construction (pure phases), O(dt^2) splitting error.
-// Phase tables are precomputed once per (grid, potential, dt).
+// Split-operator (Fourier) TDSE propagator, atomic units.
 
 
 export namespace ses {
@@ -65,16 +61,14 @@ private:
     }
 
     double dt_;
-    std::vector<std::complex<double>> half_v_;   // e^{-i V dt/2} per grid point
-    std::vector<std::complex<double>> kinetic_;  // e^{-i k^2 dt/2} per FFT bin
+    std::vector<std::complex<double>> half_v_;
+    std::vector<std::complex<double>> kinetic_;
 };
 
-// 3D split-operator: identical structure, kinetic phase over the 3D k-grid.
 class SplitOperator3D {
 public:
-    // mass: kinetic phase exp(-i k^2/(2 mass) dt) -- the Cu(111) surface
-    // state (corral) runs m* != 1; the default 1.0 keeps every existing
-    // caller's tables bitwise identical (pinned by MassParameter tests).
+    // mass: effective m* (corral Cu(111) runs m* != 1). Default 1.0 keeps
+    // existing caller tables bitwise identical (MassParameter tests).
     SplitOperator3D(const Grid3D& g, const std::vector<double>& potential, double dt,
                     double mass = 1.0)
         : dt_(dt) {
@@ -108,8 +102,8 @@ public:
 
     double dt() const noexcept { return dt_; }
 
-    // Read access for CPU driven_step (ses.drive) and the table-pinning
-    // tests; the GPU engine derives phases in-shader from V + k^2 tables.
+    // Read access for CPU driven_step (ses.drive) and table-pinning tests;
+    // the GPU engine derives phases in-shader.
     const std::vector<std::complex<double>>& half_potential_phase() const noexcept { return half_v_; }
     const std::vector<std::complex<double>>& kinetic_phase() const noexcept { return kinetic_; }
 

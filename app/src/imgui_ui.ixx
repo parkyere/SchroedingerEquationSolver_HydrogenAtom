@@ -7,22 +7,14 @@ module;
 #include <string>
 #include <utility>
 export module app.imgui_ui;
-export import ses.scenario;  // HydrogenApi (the hydrogen panel's control seam)
-
-
-// The discoverable-controls panel, in Dear ImGui: a clickable mirror of the
-// hotkeys. Buttons mirror the hotkeys (which stay live: the shell only
-// routes keys here when ImGui wants capture); the two field sliders drive the
-// proper Hamiltonian terms; the director's status_text() readout renders as a
-// wrapped status block. Templated on the shell type so main() stays a shell.
+export import ses.scenario;
 
 
 export namespace app {
 
-// Shared UI state the sliders edit between frames (owned by the shell).
 struct UiState {
-    float efield = 0.0f;    // au; 0 = off (max 0.1)
-    float bfield = 0.0f;    // au; 0 = off (max 0.2)
+    float efield = 0.0f;    // au; 0 = off
+    float bfield = 0.0f;    // au; 0 = off
     int time_scale = 1;     // steps-per-frame multiplier (dt untouched)
     // Cross-section planes (Cloud view). axis 0/1/2 = x/y/z normal.
     bool clip_on = false;
@@ -33,34 +25,27 @@ struct UiState {
     int slice_axis = 2;
     float slice_offset = 0.0f;
     int slice_map = 0;       // 0 density, 1 Re(psi), 2 phase
-    // 1D harmonic scene: live well stiffness (matches kHo1dOmega at boot;
-    // UiState resets on scene switch, so the slider and director agree).
+    // matches kHo1dOmega at boot (UiState resets per scene -> slider agrees).
     float ho_omega = 0.25f;
-    // 1D double well: live barrier height (matches kDw1dBarrier at boot).
+    // matches kDw1dBarrier at boot.
     float dw_barrier = 0.12f;
-    // H2+ bond length knob (snapped to the grid by the director).
+    // snapped to the grid by the director.
     float h2p_r = 2.0f;
-    // 2D double slit: separation / width / solenoid AB phase (units of
-    // pi); boot values match the director's.
+    // boot values match the director's.
     float ds_sep = 8.0f;
     float ds_width = 2.0f;
     float ds_flux_pi = 0.0f;
-    // Landau scene: field strength and launch momentum.
     float la_b = 0.4f;
     float la_k0 = 1.5f;
-    // Corral ring radius; quantum-dot stiffness and field.
     float cr_r = 10.0f;
     float qd_w0 = 0.5f;
     float qd_b = 0.6f;
-    // Bloch lattice: well depth and tilt force.
     float bl_v0 = 1.5f;
     float bl_f = 0.05f;
-    // Rutherford scattering: incident energy (Ha) and target charge Z.
     float ru_e = 25.0f;
     float ru_z = 79.0f;
 };
 
-// The x/y/z axis-cycle button shared by the cross-section controls.
 inline void draw_axis_cycle(const char* id, int& axis) {
     const char* name = axis == 0 ? "x" : (axis == 1 ? "y" : "z");
     ImGui::PushID(id);
@@ -70,12 +55,10 @@ inline void draw_axis_cycle(const char* id, int& axis) {
     ImGui::PopID();
 }
 
-// The cross-section section (Cloud view only): a clip plane that cuts the
-// cloud open and a slice sheet that paints psi on the plane.
 template <typename ShellT>
 void draw_cross_section(ShellT& shell, UiState& ui) {
     (void)shell;
-    const double box = 80.0;  // Bohr half-extent (matches the +-80 grid)
+    const double box = 80.0;  // Bohr half-extent (+-80 grid)
     ImGui::Checkbox("Clip plane", &ui.clip_on);
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Cut the cloud open along a plane through the "
@@ -113,10 +96,6 @@ void draw_cross_section(ShellT& shell, UiState& ui) {
     }
 }
 
-// Scene picker, shared by every scenario panel: the three demos, switchable
-// live -- the shell swaps the director with the device idle and re-runs the
-// deferred compute init (the same path boot uses), so the window never
-// blocks. Switching to Hydrogen replays its startup atlas build.
 template <typename ShellT>
 void draw_scene_picker(ShellT& shell) {
     int cur = shell.scene_index();
@@ -144,10 +123,6 @@ void draw_scene_picker(ShellT& shell) {
     ImGui::Separator();
 }
 
-// Performance readout, shared by every scenario panel: rendering fps (ImGui's
-// rolling average) and the ACHIEVED simulated-time rate with its multiple of
-// the 1x baseline -- the honest counterpart of the time-scale slider (the
-// multiple saturates below the slider once the GPU runs out of headroom).
 template <typename ShellT>
 void draw_perf_readout(ShellT& shell) {
     const double rate = shell.sim_rate();
@@ -161,13 +136,9 @@ void draw_perf_readout(ShellT& shell) {
     ImGui::Separator();
 }
 
-// The visualized-time slider, shared by every scenario panel: multiplies the
-// integrator steps per rendered frame (dt and accuracy untouched); past the
-// GPU's headroom the fps drops honestly instead of skipping physics.
 template <typename ShellT>
 void draw_time_scale(ShellT& shell, UiState& ui) {
-    // Read back director truth first: the slider must never lie after a
-    // programmatic change (e.g. Real time resets the scale to x1).
+    // Read back director truth: a programmatic change (Real time -> x1) must not leave the slider stale.
     ui.time_scale = shell.time_scale();
     if (ImGui::SliderInt("Time scale", &ui.time_scale, 1, 16, "x%d")) {
         shell.set_time_scale(ui.time_scale);
@@ -179,13 +150,7 @@ void draw_time_scale(ShellT& shell, UiState& ui) {
     }
 }
 
-// The emission spectrometer: a vertical strip on the RIGHT, energy rising
-// bottom to top over the full un-ionized range [0, 13.6 eV]. The rainbow
-// is an ENERGY SCALE decoration (red low, violet high) -- deliberately
-// NOT physical color: most hydrogen lines are UV/IR and a "real-color"
-// strip would show nothing. Every quantum-jump photon since the last
-// reset appears as a thin bright line with its energy labeled in eV
-// (repeat lines brighten instead of stacking labels).
+// Rainbow is an ENERGY-SCALE decoration, not physical color (most H lines are UV/IR).
 inline void draw_spectrometer(ses_shell::HydrogenApi& hy) {
     const double emax = hy.spectro_max_ev();
     if (emax <= 0.0) {
@@ -221,7 +186,6 @@ inline void draw_spectrometer(ses_shell::HydrogenApi& hy) {
     }
     dl->AddRect(ImVec2(bx - 1, by - 1), ImVec2(bx + bw + 1, by + bh + 1),
                 IM_COL32(200, 200, 210, 160));
-    // Scale ticks.
     char buf[32];
     for (int t = 0; t <= 4; ++t) {
         const double ev = emax * t / 4.0;
@@ -278,8 +242,6 @@ void draw_hydrogen_panel(ShellT& shell, UiState& ui, ses_shell::HydrogenApi& hy)
 
     if (ImGui::Button("Measure (M)")) shell.measure_now();
     ImGui::SameLine();
-    // Honest label: sampling a SINGLE eigenstate is the maximal (n,l,m)
-    // measurement, not a bare energy measurement (2s vs 2p are degenerate).
     if (ImGui::Button("Measure nlm (E)")) hy.measure_energy_now();
     ImGui::SameLine();
     if (ImGui::Button("Reset (R)")) shell.reset_simulation();
@@ -288,8 +250,6 @@ void draw_hydrogen_panel(ShellT& shell, UiState& ui, ses_shell::HydrogenApi& hy)
     ImGui::SameLine();
     if (ImGui::Button("Face z (Z)")) shell.snap_camera_z();
 
-    // Partial projective measurements: one quantum number, one degenerate
-    // subspace -- superpositions inside it survive the collapse.
     if (ImGui::Button("Measure n")) hy.measure_n_shell_now();
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("True energy measurement: project onto one n "
@@ -333,8 +293,6 @@ void draw_hydrogen_panel(ShellT& shell, UiState& ui, ses_shell::HydrogenApi& hy)
     ImGui::SameLine();
     if (ImGui::Button("Cloud/Surface (Tab)")) shell.toggle_view_mode();
 
-    // Static E-field (+z): 0 = off, 0.1 au full scale (Stark; field-ionizes
-    // above ~0.03 au from the ground state).
     if (ImGui::SliderFloat("E-field +z (au)", &ui.efield, 0.0f, 0.1f, "%.3f")) {
         hy.set_efield_e0(static_cast<double>(ui.efield));
     }
@@ -348,16 +306,13 @@ void draw_hydrogen_panel(ShellT& shell, UiState& ui, ses_shell::HydrogenApi& hy)
         ImGui::Text("%.1e V/m", ui.efield * 5.14220674e11);
     }
 
-    // Magnetic field: axis cycle (z -> x -> y) + strength; psi evolves under
-    // the proper minimal-coupling Hamiltonian and precesses at omega = B/2.
     const int axis = hy.bfield_axis();
     const char* axis_name = axis == 2 ? "z" : (axis == 0 ? "x" : "y");
     if (ImGui::Button(axis_name)) {
         hy.toggle_bfield_axis();
     }
     ImGui::SameLine();
-    // Director truth first (the time-scale pattern): R / Laser zero B in the
-    // director, and the slider must follow, not keep its dragged value.
+    // Director truth first: R / Laser zero B, so the slider must follow (cf. time scale).
     ui.bfield = static_cast<float>(hy.bfield_b());
     if (ImGui::SliderFloat("B-field (au)", &ui.bfield, 0.0f, 0.2f, "%.3f")) {
         hy.set_bfield_b(static_cast<double>(ui.bfield));
@@ -371,8 +326,6 @@ void draw_hydrogen_panel(ShellT& shell, UiState& ui, ses_shell::HydrogenApi& hy)
 
     draw_time_scale(shell, ui);
 
-    // MCWF no-jump damping: superpositions visibly emit between jumps
-    // (H_eff amplitude decay); pure eigenstates are unaffected either way.
     bool mcwf = hy.mcwf_damping();
     if (ImGui::Checkbox("MCWF damping", &mcwf)) {
         hy.set_mcwf_damping(mcwf);
@@ -387,7 +340,6 @@ void draw_hydrogen_panel(ShellT& shell, UiState& ui, ses_shell::HydrogenApi& hy)
     }
 
     ImGui::Separator();
-    // Cross-section planes: only meaningful over the volume cloud.
     if (shell.cloud_view()) {
         draw_cross_section(shell, ui);
         ImGui::Separator();
@@ -430,9 +382,7 @@ void draw_generic_panel(ShellT& shell, UiState& ui,
     ImGui::End();
 }
 
-// 0..100 eV linear-combination spectrum strip: one vertical line per
-// eigenstate the cloud is MADE of, brightness = weight (sqrt-compressed
-// so faint components still read). The lines slide as the well retunes.
+// brightness = sqrt(weight): faint components still read.
 template <typename ApiT>
 void draw_ho_spectrum_strip(ApiT& api) {
     ImGui::TextUnformatted("State spectrum 0-100 eV (linear combination)");
@@ -468,9 +418,6 @@ void draw_ho_spectrum_strip(ApiT& api) {
     ImGui::Dummy(ImVec2(w, h + 4.0f));
 }
 
-// The 1D harmonic-ladder panel: ladder/superposition controls + the live
-// well-stiffness slider (a sudden quench -- psi is kept; the director
-// re-derives the spectral-band ladder cap).
 template <typename ShellT>
 void draw_ladder1d_panel(ShellT& shell, UiState& ui, ses_shell::Ladder1dApi& ld) {
     ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_FirstUseEver);
@@ -520,9 +467,8 @@ void draw_ladder1d_panel(ShellT& shell, UiState& ui, ses_shell::Ladder1dApi& ld)
                           "straight-on view\n(x right, y up; the phasor "
                           "twist goes into the screen).");
     }
-    // Applied on RELEASE, not per drag frame: each new omega re-measures
-    // the representability ceiling by sweeping the whole Hermite chain
-    // (up to ~19000 levels at the stiff stop) -- fine once, not at 60 Hz.
+    // Apply on release, not per drag frame: each omega re-sweeps the whole
+    // Hermite chain (~19000 levels at the stiff stop) -- too costly at 60 Hz.
     ImGui::SliderFloat("Well omega (au)", &ui.ho_omega, 0.05f, 4.0f, "%.2f");
     if (ImGui::IsItemDeactivatedAfterEdit()) {
         ld.set_omega(static_cast<double>(ui.ho_omega));
@@ -545,8 +491,6 @@ void draw_ladder1d_panel(ShellT& shell, UiState& ui, ses_shell::Ladder1dApi& ld)
     ImGui::End();
 }
 
-// The double-well panel: the barrier slider (splitting dE is EXPONENTIAL in
-// the barrier, so the tunneling oscillation crawls or races) + readouts.
 template <typename ShellT>
 void draw_doublewell_panel(ShellT& shell, UiState& ui,
                            ses_shell::DoubleWellApi& dw) {
@@ -579,8 +523,6 @@ void draw_doublewell_panel(ShellT& shell, UiState& ui,
     ImGui::End();
 }
 
-// H2+ panel: state preparation + the bond-length scan (E_total(R) has its
-// minimum near R = 2 -- the chemical bond, found by dragging).
 template <typename ShellT>
 void draw_h2plus_panel(ShellT& shell, UiState& ui, ses_shell::MoleculeApi& ml) {
     ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_FirstUseEver);
@@ -588,10 +530,6 @@ void draw_h2plus_panel(ShellT& shell, UiState& ui, ses_shell::MoleculeApi& ml) {
     ImGui::Begin("Controls", nullptr, ImGuiWindowFlags_NoCollapse);
     draw_scene_picker(shell);
     draw_perf_readout(shell);
-    // Known molecular orbitals: one button per exposed MO (keys 2..), each
-    // labeled by its term symbol; the chain relaxes up to the requested one.
-    // Known molecular orbitals: a scrollable list (the analytic atlas can be
-    // dozens). Click a row to synthesize that orbital instantly.
     const int nmo = ml.state_count();
     ImGui::TextUnformatted("Known orbitals (exact prolate-spheroidal atlas):");
     if (ImGui::BeginListBox("##h2p_orbitals", ImVec2(-1.0f, 160.0f))) {
@@ -621,8 +559,8 @@ void draw_h2plus_panel(ShellT& shell, UiState& ui, ses_shell::MoleculeApi& ml) {
     if (ImGui::Button("Pause (Space)")) shell.toggle_pause();
     ImGui::SameLine();
     if (ImGui::Button("Face z (Z)")) shell.snap_camera_z();
-    // No bond-length slider: R is the fixed physical equilibrium (~2.0 bohr,
-    // rigid Born-Oppenheimer nuclei) -- a free knob would misrepresent it.
+    // No bond-length slider: R fixed at the physical equilibrium (~2.0 bohr,
+    // rigid Born-Oppenheimer) -- a free knob would misrepresent it.
     if (ml.prepared(0)) {
         ImGui::Text("R fixed at equilibrium; E_total(1sigma_g) = %.4f Ha",
                     ml.energy(0) + ml.nuclear_repulsion());
@@ -635,8 +573,6 @@ void draw_h2plus_panel(ShellT& shell, UiState& ui, ses_shell::MoleculeApi& ml) {
     ImGui::End();
 }
 
-// Stripped-benzene panel: the state-preparation chain over the REAL
-// (uniform) geometry -- no counterfactual knobs.
 template <typename ShellT>
 void draw_benzene_panel(ShellT& shell, UiState& ui, ses_shell::MoleculeApi& ml) {
     ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_FirstUseEver);
@@ -673,8 +609,6 @@ void draw_benzene_panel(ShellT& shell, UiState& ui, ses_shell::MoleculeApi& ml) 
     ImGui::End();
 }
 
-// 2D double-slit + Aharonov-Bohm panel: geometry sliders re-fire a fresh
-// electron; the flux slider is the solenoid buried in the wall (Chambers).
 template <typename ShellT>
 void draw_doubleslit_panel(ShellT& shell, UiState& ui,
                            ses_shell::SlitApi& sl) {
@@ -727,7 +661,6 @@ void draw_doubleslit_panel(ShellT& shell, UiState& ui,
     ImGui::End();
 }
 
-// Landau / cyclotron panel: field and launch-momentum knobs.
 template <typename ShellT>
 void draw_landau_panel(ShellT& shell, UiState& ui, ses_shell::LandauApi& la) {
     ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_FirstUseEver);
@@ -776,7 +709,6 @@ void draw_landau_panel(ShellT& shell, UiState& ui, ses_shell::LandauApi& la) {
     ImGui::End();
 }
 
-// Bloch lattice panel: well depth and tilt-force knobs.
 template <typename ShellT>
 void draw_bloch_panel(ShellT& shell, UiState& ui, ses_shell::BlochApi& bl) {
     ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_FirstUseEver);
@@ -824,7 +756,6 @@ void draw_bloch_panel(ShellT& shell, UiState& ui, ses_shell::BlochApi& bl) {
     ImGui::End();
 }
 
-// Quantum corral panel: ring radius + state chain + packet scattering.
 template <typename ShellT>
 void draw_corral_panel(ShellT& shell, UiState& ui, ses_shell::CorralApi& cr) {
     ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_FirstUseEver);
@@ -867,7 +798,6 @@ void draw_corral_panel(ShellT& shell, UiState& ui, ses_shell::CorralApi& cr) {
     ImGui::End();
 }
 
-// Spin panel: B/E axis sliders + NMR pulse deck + Born measurement.
 template <typename ShellT>
 void draw_spin_panel(ShellT& shell, UiState& ui, ses_shell::SpinApi& sp) {
     ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_FirstUseEver);
@@ -930,7 +860,6 @@ void draw_spin_panel(ShellT& shell, UiState& ui, ses_shell::SpinApi& sp) {
     ImGui::End();
 }
 
-// Spin-lattice panel: exchange/damping/field knobs + order readouts.
 template <typename ShellT>
 void draw_spins_panel(ShellT& shell, UiState& ui, ses_shell::SpinsApi& sn) {
     ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_FirstUseEver);
@@ -1001,7 +930,6 @@ void draw_spins_panel(ShellT& shell, UiState& ui, ses_shell::SpinsApi& sn) {
     ImGui::End();
 }
 
-// Anderson panel: disorder strength + landscape reroll + conductance.
 template <typename ShellT>
 void draw_anderson_panel(ShellT& shell, UiState& ui,
                          ses_shell::AndersonApi& an) {
@@ -1035,7 +963,6 @@ void draw_anderson_panel(ShellT& shell, UiState& ui,
     ImGui::End();
 }
 
-// QPC panel: gap slider + the conductance-staircase readout.
 template <typename ShellT>
 void draw_qpc_panel(ShellT& shell, UiState& ui, ses_shell::QpcApi& qp) {
     ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_FirstUseEver);
@@ -1066,8 +993,6 @@ void draw_qpc_panel(ShellT& shell, UiState& ui, ses_shell::QpcApi& qp) {
     ImGui::End();
 }
 
-// Rutherford scattering panel: incident-energy + target-Z sliders, the
-// classical closest-approach readout, and refire.
 template <typename ShellT>
 void draw_rutherford_panel(ShellT& shell, UiState& ui,
                            ses_shell::RutherfordApi& rf) {
@@ -1108,7 +1033,6 @@ void draw_rutherford_panel(ShellT& shell, UiState& ui,
     ImGui::End();
 }
 
-// Quantum-billiard panel: shape toggle + the scar (time-average) lens.
 template <typename ShellT>
 void draw_billiard_panel(ShellT& shell, UiState& ui,
                          ses_shell::BilliardApi& bl) {
@@ -1147,7 +1071,6 @@ void draw_billiard_panel(ShellT& shell, UiState& ui,
     ImGui::End();
 }
 
-// Quantum-dot panel: stiffness and field knobs, Fock-Darwin readout.
 template <typename ShellT>
 void draw_qdot_panel(ShellT& shell, UiState& ui, ses_shell::QdotApi& qd) {
     ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_FirstUseEver);

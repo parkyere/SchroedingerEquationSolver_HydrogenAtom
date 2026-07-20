@@ -1,5 +1,4 @@
-// Headlight shading of the proton marker + axes gizmo. Shares the vertex
-// stage's std140 UBO (binding 0) for eye.
+// Same UBO as the vertex stage; only eye used here.
 struct FSIn {
     float4 pos : SV_Position;
     [[vk::location(0)]] float3 v_normal : TEXCOORD0;
@@ -9,7 +8,7 @@ struct FSIn {
 
 struct Ubo {
     float4x4 mvp;
-    float4 eye;  // .xyz
+    float4 eye;
 };
 [[vk::binding(0, 0)]] ConstantBuffer<Ubo, Std140DataLayout> ubo;
 

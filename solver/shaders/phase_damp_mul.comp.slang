@@ -1,7 +1,5 @@
-// Fused potential kick + absorber mask: psi[i] *= exp(i * coef * V[i]) * m[i].
-// coef = -dt (batch-interior full kick: two adjacent half kicks merged) or
-// -dt/2 (the batch-trailing half kick). Diagonal factors commute exactly, so
-// the operator equals kick-then-mask; one psi round-trip instead of two.
+// Fused kick+absorber: diagonal factors commute -> exact single pass.
+// coef = -dt full kick (merged half kicks) or -dt/2 trailing half kick.
 import complex;
 
 [[vk::binding(0, 0)]] RWStructuredBuffer<Complex, Std430DataLayout> psi;

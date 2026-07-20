@@ -14,28 +14,17 @@ import ses.projection;
 import ses.measurement;
 
 
-// The 3D isotropic harmonic trap scenario. Two complementary demos in one
-// scene (the project's first physics ruling, live):
-//  - CLASSICAL: a coherent state (the ground Gaussian displaced by x0)
-//    oscillates rigidly at omega and radiates the continuous Larmor power
-//    the title shows (Key 2 relaxes to the ground state; R re-displaces).
-//  - QED: the trap is a CENTRAL potential, so the atom's tracked-manifold
-//    machinery applies verbatim (license: tests/trap_ladder_test.cpp) --
-//    Key 5 prepares a Fock-ladder eigenstate (static, Larmor ~0), Key D
-//    arms Einstein-A quantum jumps that cascade N -> N-1, every photon at
-//    exactly omega (r is a ladder operator).
+// 3D isotropic harmonic trap. Central potential -> tracked-manifold applies
+// (license: tests/trap_ladder_test.cpp).
 
 
 export namespace ses_shell {
 
-constexpr double kTrapOmega = 0.25;      // au; period 2 pi / w ~ 25 au
-constexpr double kTrapBox = 20.0;        // Bohr half-extent (h = 0.15625)
-constexpr double kCoherentOffset = 8.0;  // Bohr; classical turning point
+constexpr double kTrapOmega = 0.25;      // au
+constexpr double kTrapBox = 20.0;        // Bohr half-extent
+constexpr double kCoherentOffset = 8.0;  // Bohr
 
-// Tracked ladder manifold: N = 2k + l <= 3 -- 20 tesseral states over 6
-// radial levels, named by N (E = (N + 3/2) w). Follows the spec convention
-// (ground at 0, p_z at kP2Z, second s at 4) so AtomModel's ground/laser
-// index conventions carry.
+// Ladder N = 2k+l <= 3, E = (N + 3/2) w; state order = AtomModel index convention.
 inline constexpr int kNumTrapLevels = 6;
 inline constexpr RadialLevelSpec kTrapLevels[kNumTrapLevels] = {
     {0, 0}, {1, 0}, {0, 1}, {2, 0}, {1, 1}, {3, 0},
@@ -53,8 +42,7 @@ inline constexpr StateSpec kTrapStates[kNumTrapStates] = {
     {5, 3, 3, "3f_+3"},
 };
 
-// Display decay rate target (tau_display ~ 8 au, as the atom) and the
-// post-collapse flush budgets (contracts: eigenstate_flush_test).
+// Display decay + post-collapse flush budgets (contract: eigenstate_flush_test).
 constexpr double kTrapGammaDisplay = 0.125;
 constexpr int kTrapFlushSteps = 6;
 constexpr int kTrapFlushStepsGround = 24;  // 0s is the ITP fixed point
@@ -117,7 +105,7 @@ protected:
         return s;
     }
 
-    // Key E is deferred here (run_frame, psi quiescent, before stepping).
+    // Key E deferred to run_frame: psi must be quiescent before stepping.
     void service_requests() override {
         if (!pending_measure_) {
             return;
@@ -138,18 +126,14 @@ protected:
             last_measure_ = strf("%s (E = %.3f Ha)", kTrapStates[n].name,
                                  atom_.state_energy(n));
         } else {
-            // The deficit is the UNTRACKED bound ladder (N > 3), not a
-            // continuum: collapse onto that complement by projecting the
-            // tracked manifold out (a big coherent state, <N> ~ 8, lands
-            // here most of the time -- honestly reported).
+            // Deficit = untracked bound ladder (N > 3), not continuum.
             project_manifold_out();
             last_measure_ = "outside tracked ladder (N > 3)";
         }
         title_dirty_ = true;
     }
 
-    // Decay trials ride the real-time batch at title cadence, exactly the
-    // atom's memoryless accumulated-dt scheme.
+    // Decay trials ride the batch at title cadence (memoryless accumulated-dt).
     void after_step_batch() override {
         if (!decay_on_ || atom_.channels().empty()) {
             return;
@@ -188,8 +172,7 @@ protected:
     }
 
 private:
-    // Coherent state: sigma = 1/sqrt(2 w) (ground |psi|^2 width) -- no
-    // breathing; the same width harmonic_dynamics_test pins (kSigmaGs).
+    // Coherent state at ground width (no breathing); harmonic_dynamics_test pins kSigmaGs.
     static ses::WavepacketSimulation make() {
         const ses::Grid1D axis{-kTrapBox, kTrapBox, 256};
         const ses::Grid3D grid{axis, axis, axis};
@@ -199,14 +182,12 @@ private:
             ses::harmonic_potential(grid, kTrapOmega, ses::Vec3d{}),
             ses::Vec3d{kCoherentOffset, 0.0, 0.0},
             ses::Vec3d{sigma, sigma, sigma},
-            ses::Vec3d{},  // released at rest: x(t) = x0 cos(w t)
+            ses::Vec3d{},  // initial velocity: at rest
             0.04,          // dt
         }};
     }
 
-    // Lazy manifold: radial solve (1D, instant) + channel table (factorized,
-    // microseconds) + one norm-capturing synthesis pass per state + the
-    // projection index -- first D/E only; the plain scene never pays.
+    // Lazy: built on first D/E only; plain scene never pays.
     bool ensure_manifold() {
         if (!use_gpu_path()) {
             return false;
@@ -227,7 +208,7 @@ private:
                 ses::build_radial_bin_index(sim_.grid(), atom_.radial_grid());
             proj_ready_ = engine_.set_projection_index(
                 bin_idx.sorted_cell, bin_idx.bin_off, atom_.radial_grid().n,
-                atom_.radial_grid().h(), 3);  // l <= 3 in the N <= 3 ladder
+                atom_.radial_grid().h(), 3);  // l_max = 3 (N <= 3 ladder)
             if (!proj_ready_) {
                 std::fprintf(stderr, "trap: projection index setup failed -- "
                                      "measurement/decay disabled\n");
@@ -242,10 +223,10 @@ private:
             if (!ensure_manifold()) {
                 return;
             }
-            decay_accum_dt_ = 0.0;  // no hazard accrues while decay is off
+            decay_accum_dt_ = 0.0;  // no hazard accrues while off
         }
         decay_on_ = !decay_on_;
-        // Flush residency ends with decay (mirrors the atom's policy).
+        // Flush-table residency ends with decay (atom policy).
         if (!decay_on_ && stepping_ == BaseStepping::RealTime) {
             engine_.release_relax_tables();
         }
@@ -259,8 +240,6 @@ private:
         stepping_ = BaseStepping::RealTime;
     }
 
-    // Key 5: cycle prepared ladder eigenstates (static under the trap; the
-    // Larmor readout drops to ~0, and D makes them cascade by QED jumps).
     void excite_next() {
         if (!ensure_manifold()) {
             return;
@@ -275,9 +254,7 @@ private:
         title_dirty_ = true;
     }
 
-    // Post-collapse eigenstate-error flush (same contracts as the atom:
-    // fixed budget, ground gets the deep burst, tables resident while decay
-    // is armed). No laser exists here, so no drive gating.
+    // Post-collapse eigenstate-error flush (fixed budget; mirrors atom policy).
     void flush_collapse_error(int target) {
         if (!ensure_relax_tables()) {
             return;
@@ -289,8 +266,7 @@ private:
         }
     }
 
-    // Collapse onto the untracked-ladder complement: subtract every tracked
-    // amplitude, renormalize (the atom's continuum-verdict seam, N > 3 here).
+    // Collapse onto untracked-ladder complement (N > 3).
     void project_manifold_out() {
         std::array<std::complex<double>, kNumTrapStates> amp{};
         double bound = 0.0;
@@ -301,7 +277,7 @@ private:
         }
         const double residual = engine_.norm_and_peak().sum - bound;
         if (residual <= 1e-4) {
-            return;  // fp32 noise: nothing real to collapse onto
+            return;  // fp32 noise floor
         }
         for (int s = 0; s < kNumTrapStates; ++s) {
             const std::complex<double> c = amp[static_cast<std::size_t>(s)];
@@ -322,11 +298,10 @@ private:
         write_display_texture();
     }
 
-    // Tracked ladder: radial solve, synthesis bookkeeping, channel table.
     ses_shell::AtomModel atom_;
-    bool proj_ready_ = false;   // static projection index uploaded
+    bool proj_ready_ = false;
     bool decay_on_ = false;
-    bool pending_measure_ = false;  // Key E: serviced in run_frame
+    bool pending_measure_ = false;
     double decay_accum_dt_ = 0.0;
     long long photon_count_ = 0;
     int excite_cycle_ = 0;

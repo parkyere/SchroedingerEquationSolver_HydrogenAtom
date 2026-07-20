@@ -1,7 +1,4 @@
-// Copy the psi SSBO into the 3D volume texture the renderer samples, one
-// texel per grid cell. The volume is RG16F (re, im): display-only fp16 --
-// physics stays in the fp32 SSBO; the store converts (round-to-nearest).
-// psi in (binding 0), image3D out (binding 1), grid dims UBO (binding 2).
+// rg16f is display-only; physics stays fp32.
 import complex;
 import grid;
 

@@ -1,16 +1,9 @@
-# ---------------------------------------------------------------------------
-# VkFFT: header-only FFT + its runtime shader compiler (glslang). Optional --
-# when absent the engine compiles without SES_HAVE_VKFFT and stays on the
-# hand-rolled line FFT. VkFFT includes the bare 'glslang_c_interface.h';
-# vcpkg installs it under glslang/Include/, so that directory must be on the
-# include path. NOTE: every ses_vk target lives in the volk world
-# (VK_NO_PROTOTYPES + PFN globals) -- NEVER link the vulkan-1 IMPORT library
-# into one: its code thunks collide with volk's identically named function-
-# pointer variables and volkInitialize crashes on startup.
-# The SES_HAVE_VKFFT define gates Engine MEMBERS, so it must be applied
-# consistently to the module lib AND every TU with its own #ifdef blocks
-# (single-BMI rule: divergent defines would bake divergent engines).
-# ---------------------------------------------------------------------------
+# VkFFT is header-only + compiles shaders via glslang at runtime -> find/link glslang.
+# vcpkg buries the C header under glslang/Include -> PATH_SUFFIXES below.
+# FOOTGUN: never add the vulkan-1 import lib -- thunks collide with volk PFN
+# globals -> volkInitialize crash.
+# SES_HAVE_VKFFT gates Engine members -- apply to lib AND every TU (single-BMI
+# rule: divergent defines bake divergent engines).
 find_package(glslang CONFIG QUIET)
 find_path(SES_GLSLANG_C_INCLUDE_DIR glslang_c_interface.h
           PATH_SUFFIXES glslang/Include)

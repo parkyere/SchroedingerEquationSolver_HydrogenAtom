@@ -12,32 +12,19 @@ import ses.fft;
 import ses.spectral;
 
 
-// 1D periodic-lattice (solid-state) support for V(x) = V0 sin^2(kL x) --
-// SMOOTH on purpose: Kronig-Penney's kinks would Gibbs-ring in the FFT
-// plane-wave basis, sin^2 keeps spectral accuracy (and is exactly the
-// optical-lattice / Mathieu problem). Lattice constant a = pi / kL,
-// reciprocal vector G = 2 kL.
-//
-// Central equation for sin^2 (single harmonic): symmetric TRIDIAGONAL over
-// {q + m G}, diag (q + m G)^2/2 + V0/2, off-diag -V0/4. lattice_bands:
-// Sturm bisection (deterministic, no iteration-order noise).
-//
-// Bloch driving: -F x breaks the periodic box, so comoving gauge A(t) = -F t.
-// Kinetic phase e^{-i (k - A)^2 dt / 2} rebuilt each step at the MIDPOINT A
-// (exact for linear A: free-particle limit = uniform acceleration to round-off).
+// 1D periodic lattice V(x) = V0 sin^2(kL x). sin^2 (not Kronig-Penney kinks) keeps
+// the FFT plane-wave basis spectral (optical-lattice / Mathieu). Central equation:
+// symmetric tridiagonal over {q + m G} (G = 2 kL): diag (q+mG)^2/2 + V0/2, off-diag
+// -V0/4. Comoving gauge A(t) = -F t; -F x would break the periodic box.
 
 
 export namespace ses {
 
 namespace bloch_detail {
 
-// Eigenvalues of the symmetric tridiagonal T (diag d, off-diagonal o)
-// strictly below lambda, via the RATIO form of the Sturm sequence
-// (q_i = (d_i - lambda) - o_{i-1}^2 / q_{i-1}; count the negatives).
-// The product form dies when a bisection midpoint hits an eigenvalue of
-// a leading minor exactly (the sequence goes 0 and stays 0 -- with the
-// dyadic midpoints of an integer bracket this HAPPENS); the ratio form
-// just nudges a zero negative and carries on (LAPACK dlaebz style).
+// Count eigenvalues below lambda. RATIO-form Sturm (not product): the product
+// form sticks at 0 when a dyadic midpoint hits a leading-minor eigenvalue
+// exactly; the ratio nudges past it (LAPACK dlaebz style).
 inline int sturm_count(const std::vector<double>& d,
                        const std::vector<double>& o, double lambda) {
     int count = 0;
@@ -57,12 +44,9 @@ inline int sturm_count(const std::vector<double>& d,
 
 }  // namespace bloch_detail
 
-// The lowest n_bands energies E_n(q) of V(x) = v0 sin^2(kl x) at
-// quasimomentum q, by exact diagonalization of the (tridiagonal) central
-// equation over plane waves q + m G, m = -M..M.
 inline std::vector<double> lattice_bands(double v0, double kl, double q,
                                          int n_bands) {
-    const double g2 = 2.0 * kl;  // reciprocal vector
+    const double g2 = 2.0 * kl;
     const int m_max = std::max(8, n_bands + 6);
     const int n = 2 * m_max + 1;
     std::vector<double> d(static_cast<std::size_t>(n));
@@ -71,7 +55,7 @@ inline std::vector<double> lattice_bands(double v0, double kl, double q,
         const double k = q + m * g2;
         d[static_cast<std::size_t>(m + m_max)] = 0.5 * k * k + 0.5 * v0;
     }
-    // Sturm bisection per band index (bracket: Gershgorin bounds).
+    // Sturm bisection per band (Gershgorin bracket).
     double lo = d[0];
     double hi = d[0];
     for (std::size_t i = 0; i < d.size(); ++i) {
@@ -98,9 +82,8 @@ inline std::vector<double> lattice_bands(double v0, double kl, double q,
     return bands;
 }
 
-// Split-operator with the comoving-gauge tilt A(t) = -F t: the SAME
-// Strang structure as SplitOperator1D, but the kinetic phase table is
-// rebuilt every step with the midpoint drift.
+// Comoving-gauge tilt A(t) = -F t: kinetic phase rebuilt each step at midpoint A
+// (exact for linear A), unlike the fixed table in SplitOperator1D.
 class TiltedSplitOperator1D {
 public:
     TiltedSplitOperator1D(const Grid1D& g, const std::vector<double>& potential,
@@ -116,8 +99,7 @@ public:
     }
 
     double dt() const noexcept { return dt_; }
-    // Accumulated quasimomentum shift F*t (= -A(t)); the scene's
-    // Brillouin-zone marker reads it.
+    // quasimomentum drift F*t = -A(t)
     double drift() const noexcept { return force_ * t_; }
     void reset_time() noexcept { t_ = 0.0; }
 

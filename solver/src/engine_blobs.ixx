@@ -37,17 +37,14 @@ export module ses.vk.engine_blobs;
 export import ses.vk.engine;
 
 
-// The solver library's embedded SPIR-V blobs: every compute kernel the
-// ses_vk engine runs, baked offline from solver/shaders/ -- the engine has
-// no resource system, so callers hand it this table. The line-FFT kernel is
-// baked at concrete sizes; pick the one matching the transform axes (the
-// cubic side, or the shared x/y side of an n x n x 1 planar grid).
+// SPIR-V kernels baked offline from solver/shaders/; the engine has no resource
+// system, so callers supply this table. n = transform-axis length (cubic side,
+// or shared x-y side of an n x n x 1 grid).
 
 
 export namespace ses_vk {
 
-// Blobs for transform axes of length n; fft is null (engine init fails
-// cleanly) if no fft_line kernel was baked at that size.
+// fft left null for unbaked n -> engine init fails cleanly.
 inline EngineKernels engine_blobs(int n) {
     EngineKernels b;
     b.mul = k_phase_multiply_spv;

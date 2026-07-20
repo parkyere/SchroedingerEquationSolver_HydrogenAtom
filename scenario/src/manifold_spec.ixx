@@ -1,30 +1,27 @@
 export module ses.scenario.manifold_spec;
 
 
-// Tracked n<=6 eigenstate-manifold spec: state/level index tables (pure data).
-// The full m-resolved n <= 6 shell (kNumStates entries); n = 6 is
-// box-critical on the +-80 Bohr grid. First five indices frozen (selftests).
+// n = 6 box-critical on the +-80 Bohr grid; first five indices frozen (selftests).
 
 
-// Global-namespace data by design (pure tables); exported as a block.
 export {
 
 enum StateIndex : int {
     kS1 = 0, kP2X = 1, kP2Y = 2, kP2Z = 3, kS2 = 4,
     k3S = 5, k3PX = 6, k3PY = 7, k3PZ = 8,
     k3DXY = 9, k3DYZ = 10, k3DZ0 = 11, k3DZX = 12, k3DX2Y2 = 13,
-    k4S = 14, k4F0 = 26,  // named entries the shell refers to
-    k5S = 30,             // first n = 5 state (box-critical, h-audited)
-    k6S = 55,             // first n = 6 state (box-critical, h-audited)
+    k4S = 14, k4F0 = 26,
+    k5S = 30,
+    k6S = 55,
 };
 inline constexpr int kNumStates = 91;
 
-// Radial levels backing the manifold (l, nodes k); n = l + 1 + k.
+// l, radial nodes k; n = l + k + 1.
 struct RadialLevelSpec {
     int l;
     int k;
 };
-inline constexpr int kNumLevels = 21;  // n<=5 (15) + 6s 6p 6d 6f 6g 6h
+inline constexpr int kNumLevels = 21;
 inline constexpr RadialLevelSpec kLevelSpec[kNumLevels] = {
     {0, 0}, {0, 1}, {1, 0}, {0, 2}, {1, 1}, {2, 0},
     {0, 3}, {1, 2}, {2, 1}, {3, 0},
@@ -79,7 +76,6 @@ inline constexpr StateSpec kStateSpec[kNumStates] = {
     {20, 5, 4, "6h_+4"}, {20, 5, 5, "6h_+5"},
 };
 
-// Principal quantum number of a tracked state: n = l + k + 1.
 inline constexpr int state_n(int idx) {
     return kLevelSpec[kStateSpec[idx].level].l +
            kLevelSpec[kStateSpec[idx].level].k + 1;
@@ -88,7 +84,7 @@ inline constexpr int state_n(int idx) {
 struct ShellChannel {
     int from;
     int to;
-    double a_true;         // Einstein A from our wavefunctions (au)
+    double a_true;         // Einstein A (au)
     double gamma_display;  // uniformly accelerated display rate
 };
 

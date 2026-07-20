@@ -10,19 +10,16 @@ export import ses.scenario.line1d_director;
 import ses.spectrum1d;
 
 
-// Double-well tunneling (ammonia inversion): psi_L = (psi_0+psi_1)/sqrt(2),
-// transfer T = pi/dE, dE exponential in barrier -- so the panel slider makes
-// the oscillation crawl or race. Doublet from ses.spectrum1d (radial FD
-// solver); splitting-drives-full-transfer contract through the real
-// split-step propagator: tests/solvable_wells_test.cpp.
+// Double-well tunneling (ammonia inversion). Splitting drives full transfer;
+// contract: tests/solvable_wells_test.cpp.
 
 
 export namespace ses_shell {
 
-constexpr double kDw1dBox = 40.0;      // Bohr half-extent
+constexpr double kDw1dBox = 40.0;      // Bohr
 constexpr int kDw1dPoints = 65536;
 constexpr double kDw1dA = 6.0;         // well minima at +-a
-constexpr double kDw1dBarrier = 0.12;  // boot barrier height (Ha)
+constexpr double kDw1dBarrier = 0.12;  // Ha
 constexpr double kDw1dBarrierMin = 0.04;
 constexpr double kDw1dBarrierMax = 0.30;
 constexpr double kDw1dDt = 0.04;
@@ -43,7 +40,6 @@ public:
 
     DoubleWellApi* doublewell() override { return this; }
 
-    // ---- DoubleWellApi ----
     double splitting() const override { return de_; }
     double p_left() const override { return p_left_; }
     double p_right() const override { return p_right_; }
@@ -51,7 +47,7 @@ public:
     void set_barrier(double vb) override {
         vb_ = std::clamp(vb, kDw1dBarrierMin, kDw1dBarrierMax);
         set_potential(ses::double_well_potential(grid1d_, vb_, kDw1dA));
-        prepare_left();  // a preparation demo: re-launch psi_L
+        prepare_left();
     }
 
     double default_camera_azimuth() const override { return 0.3; }
@@ -78,9 +74,8 @@ protected:
     void after_reset() override { after_batch(); }
 
 private:
-    // Solve the doublet and prepare the left-well state (psi_0 + psi_1)/
-    // sqrt(2) -- both positive near xmin by the solver's sign convention,
-    // so the sum concentrates LEFT.
+    // Both eigenstates positive near xmin (solver sign convention) -> sum
+    // concentrates LEFT.
     void prepare_left() {
         const std::vector<ses::Bound1D> s =
             ses::bound_states_1d(grid1d_, potential_, 2);

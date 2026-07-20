@@ -1,7 +1,4 @@
-// psi <- src, a per-cell copy of an auxiliary state buffer into psi. Plain
-// assignment is bitwise-exact (no arithmetic touches the values). Used by the
-// quantum-jump collapse path. Bindings: psi(0) write, src(3) read,
-// std140 UBO n(1).
+// psi <- src, quantum-jump collapse. Plain assignment is bitwise-exact (no arithmetic touches the values).
 import complex;
 
 [[vk::binding(0, 0)]] RWStructuredBuffer<Complex, Std430DataLayout> psi;

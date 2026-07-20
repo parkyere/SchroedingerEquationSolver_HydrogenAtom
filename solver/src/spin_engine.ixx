@@ -24,15 +24,9 @@ export import ses.spinexact;
 // volk/VMA textually first: VK_*/VMA macros never cross module boundaries.
 
 
-// GPU accelerator for the EXACT 2^N Heisenberg spin evolution: the full
-// fp32 wavefunction lives resident in an SSBO, and each Strang step is
-// recorded as the 80 aliasing gate dispatches (16 half-field + 24 forward
-// bonds + 24 reversed + 16 half-field) with a compute-to-compute barrier
-// between each. The heavy unitary evolution runs on the GPU; the light
-// per-site Bloch reduction and the rare measurement stay CPU-side off the
-// per-step readback. Gate coefficients come from ses.spinexact's shared
-// site_gate_matrix / bond_gate_params, so the GPU is bit-faithful to the
-// CPU oracle up to fp32 (vkcheck check_spin_step).
+// GPU exact 2^N Heisenberg; fp32 bit-faithful to CPU oracle
+// (ses.spinexact gates; vkcheck check_spin_step).
+// Gates alias the state SSBO in place -> compute-to-compute barrier between dispatches is mandatory.
 
 
 export namespace ses_vk {
@@ -44,8 +38,7 @@ public:
     SpinEngine& operator=(const SpinEngine&) = delete;
     ~SpinEngine() { destroy(); }
 
-    // Build the resident state SSBO, the two gate kernels, and the 40
-    // descriptor sets (16 site + 24 bond). false => caller stays on CPU.
+    // false => caller stays on CPU.
     bool initialize(DeviceContext& ctx) {
         ctx_ = &ctx;
         dim_ = ses::kExactDim;
@@ -136,8 +129,7 @@ public:
     bool ready() const { return ready_; }
     std::size_t dim() const { return dim_; }
 
-    // Recompute the per-dispatch gate UBOs for the current H (does no GPU
-    // work -- host UBO writes only). Call on any B/J/dt change.
+    // Host UBO writes only, no GPU dispatch.
     void set_params(double bx, double by, double bz, double j, double dt) {
         const double bmag = std::sqrt(bx * bx + by * by + bz * bz);
         has_field_ = bmag > 0.0;
@@ -170,7 +162,6 @@ public:
         }
     }
 
-    // Push a fresh host state (complex<double>) to the resident SSBO.
     void upload(const std::vector<std::complex<double>>& c) {
         float* dst = static_cast<float*>(staging_.mapped);
         for (std::size_t m = 0; m < dim_; ++m) {
@@ -189,7 +180,6 @@ public:
         shot.submit_and_wait(*ctx_);
     }
 
-    // Evolve n Strang steps, then read the state back into staging_.
     void step(int n) {
         OneShot shot;
         if (!shot.begin_compute(*ctx_)) {
@@ -219,7 +209,6 @@ public:
                 }
             }
         }
-        // Readback: state -> staging, fenced for the host reduction.
         barrier_compute_to_transfer(cb);
         const VkDeviceSize bytes = dim_ * 2 * sizeof(float);
         const VkBufferCopy r{0, 0, bytes};

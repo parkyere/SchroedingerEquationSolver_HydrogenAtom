@@ -15,21 +15,12 @@ import ses.wavepacket;
 import ses.parallel;
 
 
-// Quantum carpet: a free packet on a PERIODIC RING (the FFT box itself --
-// no walls, no wall artifacts) weaves the temporal Talbot carpet. With
-// k_n = 2 pi n / L and E_n = k_n^2 / 2, every phase realigns at
-// T_rev = L^2 / pi (EXACT on the spectral grid): the packet fully
-// revives; at T/2 it reappears displaced by L/2 (the half-Talbot clone);
-// rational fractions of T weave the fractional-revival lattice. The
-// display stacks |psi(x)|^2 rows into an (x, t) height carpet, one full
-// revival per carpet height -- after the first pass the wrap lands on
-// the SAME pattern and the carpet stands still.
-// CONTRACT: tests/carpet1d_test.cpp + --selftest-carpet.
+// Quantum carpet: free packet on a periodic ring, T_rev = L^2/pi (full
+// spectral revival). CONTRACT: tests/carpet1d_test.cpp + --selftest-carpet.
 
 
 export namespace ses_shell {
 
-// Full revival time of the ring of circumference L.
 inline double carpet_revival_time(double l) {
     return l * l / 3.14159265358979323846;
 }
@@ -41,10 +32,10 @@ constexpr double kCp1dZHalf = 2.0;
 constexpr double kCp1dDt = 0.05;     // V = 0: the split step is EXACT
 constexpr double kCp1dX0 = -5.0;
 constexpr double kCp1dSigma = 2.0;
-constexpr double kCp1dK0 = 1.0;      // drift tilts the weave
+constexpr double kCp1dK0 = 1.0;
 constexpr int kCp1dStepsPerTick = 64;
 constexpr double kCp1dSurfH = 6.0;
-constexpr int kCp1dMeshStride = 2;   // 1024^2 carpet -> 512^2 mesh
+constexpr int kCp1dMeshStride = 2;
 
 class Carpet1DDirector final : public Lattice2DDirectorBase,
                                public CarpetApi {
@@ -135,9 +126,6 @@ protected:
         }
     }
 
-    // Evolve the ring; every row_steps_ steps stamp |psi(x)|^2 (with its
-    // phase) into the next carpet row -- the wrap after one revival lands
-    // on the SAME weave, so the standing carpet is itself the proof.
     void do_steps(int n) override {
         for (int s = 0; s < n; ++s) {
             prop_.step(psi1d_, 1);
@@ -147,7 +135,7 @@ protected:
                     psi_(i, row_, 0) = psi1d_[i];
                 }
                 row_ = (row_ + 1) % kCp1dN;
-                // Row-cadence revival tracking (the arc's oracle).
+                // mid_max_/best_: the arc's revival oracle.
                 const double t_rev = revival_time();
                 const double frac = sim_time_ / t_rev;
                 const double ov = revival_overlap();

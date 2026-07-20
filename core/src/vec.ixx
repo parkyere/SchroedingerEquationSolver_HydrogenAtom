@@ -3,9 +3,6 @@ module;
 export module ses.vec;
 
 
-// 3-component double vector with the operations the renderer math needs.
-
-
 export namespace ses {
 
 struct Vec3d {
@@ -20,7 +17,7 @@ constexpr Vec3d operator*(double s, Vec3d v) noexcept { return {s * v.x, s * v.y
 
 constexpr double dot(Vec3d a, Vec3d b) noexcept { return a.x * b.x + a.y * b.y + a.z * b.z; }
 
-// Right-handed: cross(x_hat, y_hat) = +z_hat.
+// Right-handed convention: cross(x_hat, y_hat) = +z_hat.
 constexpr Vec3d cross(Vec3d a, Vec3d b) noexcept {
     return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
 }

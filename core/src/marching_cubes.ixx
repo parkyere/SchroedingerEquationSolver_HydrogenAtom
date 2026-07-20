@@ -9,11 +9,7 @@ export import ses.grid;
 export import ses.vec;
 
 
-// Marching cubes: extract the isosurface of a real scalar field sampled on a
-// Grid3D. The surface encloses the region where field > isovalue (the inside
-// of a density cloud); normals are unit length and point OUTWARD, i.e. down
-// the gradient. Output is an unindexed triangle soup (3 vertices + 3 normals
-// per triangle).
+// Inside = field > isovalue; output = unindexed triangle soup.
 
 
 export namespace ses {
@@ -25,8 +21,6 @@ struct Mesh {
 
 namespace mc_detail {
 
-// Central-difference gradient of the field at a grid point, one-sided at the
-// domain boundary (indices clamped).
 inline Vec3d gradient(const std::vector<double>& f, const Grid3D& g, int i, int j, int k) noexcept {
     auto at = [&](int ii, int jj, int kk) {
         ii = ii < 0 ? 0 : (ii >= g.x.n ? g.x.n - 1 : ii);
@@ -113,8 +107,7 @@ inline Mesh marching_cubes(const std::vector<double>& field, const Grid3D& g, do
     return mesh;
 }
 
-// Isovalue as a fraction of the current field peak -- keeps an animated
-// (dispersing) cloud visible as its maximum density decays.
+// Fraction of the running peak, so a dispersing cloud stays visible as density decays.
 inline Mesh marching_cubes_at_fraction(const std::vector<double>& field, const Grid3D& g,
                                        double fraction) {
     if (field.empty()) {

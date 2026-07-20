@@ -1,7 +1,5 @@
-// psi <- psi - c*phi (complex c). With c = <phi|psi> this projects phi out of
-// psi -- the deflation step of relax_deflated. Bindings: psi(0) read-write,
-// phi(3) readonly; std140 UBO (binding 1) carries n and the complex
-// coefficient c. std140 places the vec2 c at offset 8 (uint n + 4 bytes pad).
+// c = <phi|psi>: deflation projection (relax_deflated step).
+// std140: vec2 c at offset 8 (uint n + 4B pad).
 import complex;
 
 [[vk::binding(0, 0)]] RWStructuredBuffer<Complex, Std430DataLayout> psi;

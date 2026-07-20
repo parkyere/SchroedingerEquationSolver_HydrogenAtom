@@ -35,22 +35,12 @@ export import ses.colormap;
 export import ses.volume;
 
 
-// ses_vk::SceneRenderer: the whole scene -- isosurface mesh, proton marker,
-// axes gizmo, billboarded z label, and the front-to-back |psi|^2 volume
-// raymarch -- rendered by raw Vulkan into an OFFSCREEN color image the
-// presentation shell samples. The GLSL sources are baked offline to SPIR-V,
-// the camera's GL clip conventions are corrected to Vulkan by a fixed matrix
-// (store_corrected_mvp), and every frame ends with the composite image handed
-// over in SHADER_READ_ONLY.
-//
-// The presentation contract (what any shell must do): give render() the
-// per-frame camera/staging inputs, then draw
-// color_image()/color_view() as one textured quad. That is the ENTIRE
-// remaining rendering responsibility of the framework.
-// ses.vk GMF set, textually pre-claimed: volk.h supplies the VK_* macros
-// (macros never cross module boundaries); vk_mem_alloc.h (same config as the
-// module GMFs) keeps direct vma* calls compiling; both inoculate the TU
-// against GMF/textual redefinitions.
+// SceneRenderer draws the whole scene with raw Vulkan into an offscreen color
+// image. Presentation contract: feed render() the per-frame inputs, then draw
+// color_image()/color_view() as one textured quad -- the shell's ENTIRE
+// rendering responsibility.
+// GMF pre-claim: volk.h + vk_mem_alloc.h included textually (macros never cross
+// module boundaries) so vk*/vma* calls bind to the module GMFs.
 
 
 export namespace ses_vk {
@@ -63,7 +53,7 @@ struct RenderKernels {
     std::size_t mesh_vert_size = 0;
     const unsigned char* mesh_frag = nullptr;
     std::size_t mesh_frag_size = 0;
-    const unsigned char* marker_frag = nullptr;  // glassy fresnel balls
+    const unsigned char* marker_frag = nullptr;
     std::size_t marker_frag_size = 0;
     const unsigned char* volume_vert = nullptr;
     std::size_t volume_vert_size = 0;
@@ -73,7 +63,7 @@ struct RenderKernels {
     std::size_t slice_vert_size = 0;
     const unsigned char* slice_frag = nullptr;
     std::size_t slice_frag_size = 0;
-    const unsigned char* accum = nullptr;  // temporal accumulation
+    const unsigned char* accum = nullptr;
     std::size_t accum_size = 0;
     const unsigned char* bloom_down = nullptr;
     std::size_t bloom_down_size = 0;
@@ -101,15 +91,12 @@ struct RenderKernels {
 
 class SceneRenderer {
 public:
-    // A 1D-scene overlay primitive: packed (x, y, z) float triples drawn in
-    // world space with a constant color -- a LINE_STRIP polyline (the white
-    // phasor curve, the red potential profile) or, with `fill`, a
-    // TRIANGLE_STRIP sheet (the faint xy reference plane). A non-null
-    // `rgba` (4 premultiplied floats per vertex) REPLACES the constant
-    // color: the phase-hued density band.
+    // A 1D-scene overlay primitive drawn in world space: a LINE_STRIP, or a
+    // TRIANGLE_STRIP with `fill`. A non-null `rgba` (per-vertex, premultiplied)
+    // overrides the constant r/g/b/a color.
     struct OverlayCurve {
         const float* xyz = nullptr;  // 3 * count floats, valid through render()
-        int count = 0;               // vertices
+        int count = 0;
         float r = 1.0f;
         float g = 1.0f;
         float b = 1.0f;
@@ -119,9 +106,8 @@ public:
     };
     static constexpr int kMaxOverlayCurves = 6;
 
-    // A nucleus marker ball (world space): hydrogen's proton, the
-    // molecules' CPK atoms. Shaded as a real sphere in both views -- the
-    // mesh pipeline in Surface, the raymarcher in Cloud.
+    // A nucleus marker ball (world space), drawn in both views: the mesh
+    // pipeline in Surface, the raymarcher in Cloud.
     struct Marker {
         float x = 0.0f;
         float y = 0.0f;
@@ -148,10 +134,8 @@ public:
         bool flow = false;          // draw the probability-flow particles
         bool flow_animate = false;  // advance the advection (false = paused)
         bool volume_changed = false;  // psi/absorbance changed: rebuild aux
-        // Scene props: nucleus marker balls (hydrogen's proton, the trap's
-        // center, the molecules' CPK atoms) and a visualized potential
-        // slab [lo, hi) on x (the tunneling barrier), raymarch-composited
-        // with the cloud.
+        // Nucleus marker balls, and a potential slab [lo, hi) on x (the
+        // barrier) raymarch-composited with the cloud.
         Marker markers[kMaxMarkers]{};
         int marker_count = 0;
         bool barrier_on = false;
@@ -162,8 +146,8 @@ public:
         const ses::Mesh* mesh = nullptr;          // non-null: upload isosurface
         const std::vector<ses::Rgb>* mesh_colors = nullptr;
         const std::vector<float>* volume_staging = nullptr;  // RG staging
-        // GPU-extracted isosurface (engine marching cubes): drawn indirect,
-        // same interleaved pos3/normal3/color3 layout as the host mesh.
+        // GPU-extracted isosurface: drawn indirect, same pos3/normal3/color3
+        // layout as the host mesh.
         VkBuffer gpu_mesh_vbuf = VK_NULL_HANDLE;
         VkBuffer gpu_mesh_indirect = VK_NULL_HANDLE;
         // Cross-section planes (Cloud view). clip cuts away a half-space;
@@ -176,7 +160,7 @@ public:
         int slice_axis = 2;
         float slice_offset = 0.0f;
         int slice_map = 0;      // 0 density, 1 Re, 2 phase
-        // 1D-scene overlay polylines; count 0 = none (the 3D scenes).
+        // 1D-scene overlay polylines; count 0 = none.
         OverlayCurve overlay[kMaxOverlayCurves]{};
         int overlay_count = 0;
     };
@@ -244,8 +228,8 @@ public:
 
     std::uint32_t width() const { return width_; }
     std::uint32_t height() const { return height_; }
-    // What the presentation shell samples: the tonemapped RGBA8 composite
-    // (handed over in SHADER_READ_ONLY after every frame).
+    // What the shell samples: the tonemapped RGBA8 composite, handed over in
+    // SHADER_READ_ONLY after every frame.
     VkImage color_image() const { return present_.img; }
     VkImageView color_view() const { return present_.view; }
 
@@ -255,10 +239,9 @@ public:
         if (color_.view == VK_NULL_HANDLE) {
             return false;
         }
-        // Converged early-out: once the temporal accumulation saturates
-        // (accum.comp caps the running mean at kAccumCap samples) a static
-        // scene's composed output cannot change -- skip the whole submission
-        // and let the blit keep sampling the finished present image.
+        // Converged early-out: once accumulation saturates (accum.comp caps the
+        // mean at kAccumCap) a static scene's output cannot change -- skip the
+        // submission; the blit keeps sampling the finished present image.
         if (in.accumulate) {
             if (accum_frames_ >= kAccumCap && in.volume_staging == nullptr &&
                 in.mesh == nullptr) {
@@ -291,9 +274,8 @@ public:
         }
         VkCommandBuffer cb = shot.cb();
 
-        // Rebuild the occupancy + shadow volumes when the displayed field
-        // (or absorbance) changed; the pass's fragment reads then see them
-        // through the compute-to-fragment edge below.
+        // Rebuild occupancy + shadow volumes on field/absorbance change; the
+        // fragment reads see them through the compute-to-fragment barrier below.
         if (in.cloud && (in.volume_changed || !aux_valid_) &&
             volume_bound_view_ != VK_NULL_HANDLE) {
             occ_k_.bind(cb, occ_set_);
@@ -311,11 +293,10 @@ public:
             aux_valid_ = true;
         }
 
-        // Advect the streaklines BEFORE the pass (their trail SSBO is
-        // vertex-pulled by the line draw inside it). Dispatch only on the
-        // enable-edge (one reset that collapses every trail to a fresh seed,
-        // so the streaks grow from nothing) and on animated frames; a paused
-        // frame leaves the frozen trail as-is.
+        // Advect streaklines BEFORE the pass (their trail SSBO is vertex-pulled
+        // by the line draw inside it). Dispatch only on the enable-edge (a reset
+        // that collapses every trail to a fresh seed) and on animated frames; a
+        // paused frame leaves the frozen trail as-is.
         const bool flow_active = in.flow && in.cloud;
         if (flow_active) {
             const bool enabling = !flow_was_on_;
@@ -333,7 +314,7 @@ public:
                 fp.box_max[0] = static_cast<float>(grid_.x.xmax);
                 fp.box_max[1] = static_cast<float>(grid_.y.xmax);
                 fp.box_max[2] = static_cast<float>(grid_.z.xmax);
-                fp.dt = 0.18f;  // slow crawl: readable streaks from the start
+                fp.dt = 0.18f;  // slow crawl: readable streaks
                 fp.inv_peak =
                     static_cast<float>(in.peak > 0.0 ? 1.0 / in.peak : 0.0);
                 fp.lifetime = 600.0f;
@@ -357,10 +338,9 @@ public:
         flow_was_on_ = flow_active;
 
         const float w = in.flash;
-        // Dynamic rendering: transition the attachments explicitly (no render
-        // pass to do it). loadOp=CLEAR discards the old color, so UNDEFINED
-        // old-layout is fine, but the previous frame's readers (present sample
-        // + post-chain compute imageLoads, which left it in GENERAL) must
+        // Dynamic rendering: transition attachments explicitly (no render pass).
+        // loadOp=CLEAR discards the old color, so UNDEFINED old-layout is fine,
+        // but last frame's readers (present sample + post-chain imageLoads) must
         // finish first. Depth uses its own barrier (the helper is color-only).
         ses_vk::image_layout_barrier(
             cb, color_.img, VK_IMAGE_LAYOUT_UNDEFINED,
@@ -426,9 +406,8 @@ public:
                 vkCmdBindVertexBuffers(cb, 0, 1, &cube_vbuf_.buf, &zero_off);
                 vkCmdDraw(cb, 36, 1, 0, 0);
             }
-            // Cross-section sheet over the (possibly clipped) fog: reuses the
-            // volume descriptor set (UBO + psi + phase LUT), 6 procedural
-            // verts. Drawn after the volume so it composites on top.
+            // Cross-section sheet: reuses the volume descriptor set, 6
+            // procedural verts, drawn after the volume so it composites on top.
             if (in.slice_on && volume_bound_view_ != VK_NULL_HANDLE) {
                 vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                   slice_pipe_);
@@ -452,11 +431,10 @@ public:
             vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, mesh_pipe_);
             vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     mesh_pl_, 0, 1, &scene_set_, 0, nullptr);
-            // (Markers moved to the GLASSY pass after the overlays.)
             if (in.gpu_mesh_vbuf != VK_NULL_HANDLE &&
                 in.gpu_mesh_indirect != VK_NULL_HANDLE) {
-                // GPU-extracted mesh: the vertex count lives on the GPU
-                // (indirect command written by the scan pass).
+                // GPU-extracted mesh: vertex count lives on the GPU (indirect
+                // command written by the scan pass).
                 vkCmdBindVertexBuffers(cb, 0, 1, &in.gpu_mesh_vbuf,
                                        &zero_off);
                 vkCmdDrawIndirect(cb, in.gpu_mesh_indirect, 0, 1,
@@ -469,13 +447,11 @@ public:
             }
         }
 
-        // 1D-scene overlay polylines (phasor curve + potential profile +
-        // phase-hued density band) on top of either view: one LINE_STRIP /
-        // TRIANGLE_STRIP per curve out of the shared packed SSBO. Push
-        // constants carry the constant premultiplied color plus the
-        // per-vertex-color switch (params.x) and color-region offset
-        // (params.y, float-index; may be negative after folding out the
-        // position base).
+        // 1D-scene overlay polylines on top of either view: one LINE_STRIP /
+        // TRIANGLE_STRIP per curve from the shared packed SSBO. Push constants
+        // carry the constant premultiplied color, the per-vertex-color switch
+        // (params.x), and the color-region offset (params.y, float-index; may
+        // be negative after folding out the position base).
         if (in.overlay_count > 0 && overlay_pipe_ != VK_NULL_HANDLE) {
             vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     overlay_pl_, 0, 1, &overlay_set_, 0,
@@ -489,8 +465,8 @@ public:
                 vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                   cv.fill ? overlay_fill_pipe_
                                           : overlay_pipe_);
-                // upload_overlay saw the same FrameInput this render(): a
-                // non-null rgba means overlay_col_off_[c] holds its base.
+                // upload_overlay saw this same FrameInput: a non-null rgba means
+                // overlay_col_off_[c] holds its base.
                 const bool per_vertex = cv.rgba != nullptr;
                 const float push[8] = {
                     cv.r * cv.a,
@@ -511,9 +487,8 @@ public:
             }
         }
 
-        // GLASSY marker balls: fresnel-translucent, depth-test on but
-        // depth-write off, drawn AFTER the overlays so the arrows and
-        // rings inside stay readable through the glass.
+        // Glassy marker balls: depth-test on, depth-write off, drawn after the
+        // overlays so the arrows and rings inside stay readable through them.
         if (in.marker_count > 0 && marker_vertex_count_ > 0 &&
             marker_pipe_ != VK_NULL_HANDLE) {
             vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -526,10 +501,9 @@ public:
                       1, 0, 0);
         }
 
-        // XYZ gizmo in the bottom-left corner, over both views. The corner
-        // viewport maps to depth range [0, 0.01]: always in front of the
-        // scene, self-occlusion within the gizmo intact. Coordinates convert
-        // from the GL-style bottom-left origin to Vulkan's top-left.
+        // XYZ gizmo, bottom-left corner, over both views. Its viewport depth
+        // range [0, 0.01] keeps it in front of the scene with self-occlusion
+        // intact. y converts from GL bottom-left to Vulkan top-left origin.
         if (gizmo_vertex_count_ > 0) {
             const int side = std::clamp(
                 static_cast<int>(std::min(width_, height_)) / 6, 96, 180);
@@ -556,10 +530,9 @@ public:
             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
 
         // Per-frame post parameters, then the post chain in the same cb.
-        // Interactive (non-accumulating) frames SKIP the accumulation pass --
-        // it degenerates to a full-res copy -- and feed the bloom + composite
-        // from the scene color directly; accum_ goes stale, so the FIRST
-        // accumulating frame runs the pass in reset mode to re-seed it
+        // Interactive frames SKIP the accumulation pass (it degenerates to a
+        // copy) and feed bloom + composite from the scene color; accum_ goes
+        // stale, so the first accumulating frame runs the pass in reset mode
         // (accum_frames_ was already incremented above: ==1 on that frame).
         const bool use_accum = in.accumulate && !force_accum_reset_;
         if (!use_accum) {
@@ -657,11 +630,10 @@ public:
         ctx_->destroy_buffer(&zlabel_vbuf_);
         ctx_->destroy_buffer(&mesh_vbuf_);
         ctx_->destroy_buffer(&staging_);
-        // Reset every cached memo alongside its destroyed resource, so a
-        // re-initialize (live scene switch) starts clean: a stale
-        // staging_bytes_ would skip the staging create and memcpy into a
-        // null map; a stale bound-view handle could ALIAS a recycled handle
-        // value and silently skip the re-bind.
+        // Reset every cached memo with its destroyed resource so a re-initialize
+        // (live scene switch) starts clean: a stale staging_bytes_ would skip
+        // the staging create and memcpy into a null map; a stale bound-view
+        // handle could alias a recycled handle and skip the re-bind.
         staging_bytes_ = 0;
         mesh_vbuf_bytes_ = 0;
         mesh_vertex_count_ = 0;
@@ -712,9 +684,8 @@ private:
         float eye[4];
         float box_min[4];
         float box_max[4];
-        // Legacy layout slots (the shorter Ubo the vert/slice/shadow/
-        // occupancy stages declare includes them as prefix padding); the
-        // raymarched markers moved to the arrays appended at the end.
+        // Prefix padding: keeps the shorter vert/slice/shadow/occupancy Ubo
+        // std140 layout-compatible.
         float proton_center[4];
         float proton_color[4];
         float inv_peak = 0.0f;
@@ -723,11 +694,10 @@ private:
         float jitter_frame = 0.0f;  // temporal raymarch jitter rotation
         float clip[4] = {0, 2, 1, 0};   // enable, axis, sign, offset
         float slice[4] = {0, 2, 0, 0};  // enable, axis, offset, map mode
-        // Appended LAST: the shorter Ubo the vert/slice stages declare stays
-        // layout-compatible (std140 offsets of earlier fields unchanged).
+        // Appended last so earlier std140 offsets stay layout-compatible.
         float barrier[4] = {0, 0, 0, 0};  // enable, x_lo, x_hi, fog density
-        // Nucleus marker balls (volume.frag only): xyz + radius / rgb per
-        // ball, count in marker_meta[0]. float4-aligned = std140 clean.
+        // Marker balls (volume.frag): xyz+radius / rgb per ball, count in
+        // marker_meta[0]; float4-aligned for std140.
         float marker_cr[kMaxMarkers][4] = {};
         float marker_col[kMaxMarkers][4] = {};
         float marker_meta[4] = {0, 0, 0, 0};  // count
@@ -803,9 +773,9 @@ private:
                VK_SUCCESS;
     }
 
-    // Fixed-size auxiliary volumes (grid-independent normalized coords):
-    // occupancy 32^3 (build + dilated) and the 64^3 shadow transmittance,
-    // rebuilt only when the displayed volume (or absorbance) changes.
+    // Fixed-size aux volumes in grid-independent normalized coords: occupancy
+    // (build + dilated) + shadow transmittance, rebuilt on field/absorbance
+    // change.
     bool create_volume_aux(const RenderKernels& blobs) {
         const auto simg = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         const auto cis = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -918,9 +888,8 @@ private:
 
 
     bool create_target() {
-        // COLOR_ATTACHMENT (scene draw) + STORAGE (compute post chain) +
-        // SAMPLED (bloom-down samples it with a linear filter, and the shell
-        // blit samples the finished image).
+        // COLOR_ATTACHMENT (scene draw) + STORAGE (post chain) + SAMPLED
+        // (bloom-down and the shell blit sample it).
         if (!create_attachment(VK_FORMAT_R16G16B16A16_SFLOAT,
                                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                                    VK_IMAGE_USAGE_STORAGE_BIT |
@@ -977,9 +946,8 @@ private:
         ctx_->destroy_image(&present_);
     }
 
-    // The post-processing chain images (all storage, kept in GENERAL except
-    // the present image, which round-trips to SHADER_READ_ONLY for the
-    // shell) + their descriptor sets, rebuilt with the target on resize.
+    // Post-chain images (all kept in GENERAL except present, which round-trips
+    // to SHADER_READ_ONLY for the shell) + their sets, rebuilt on resize.
     bool create_post_chain() {
         const std::uint32_t hw = std::max(1u, width_ / 2);
         const std::uint32_t hh = std::max(1u, height_ / 2);
@@ -1009,7 +977,6 @@ private:
         bloom_size_[1] = {qw, qh};
         bloom_size_[2] = {ew, eh};
 
-        // One transition pass: everything to GENERAL.
         OneShot shot;
         if (!shot.begin(*ctx_)) {
             return false;
@@ -1040,8 +1007,8 @@ private:
                 up_set_[i] = arena_.allocate(*ctx_, up_k_.set_layout());
             }
             compose_set_ = arena_.allocate(*ctx_, compose_k_.set_layout());
-            // Interactive-frame variants: bloom + composite read the scene
-            // color directly (the accumulation pass is skipped then).
+            // Interactive-frame variants: bloom + composite read the scene color
+            // directly (accumulation skipped).
             down0_color_set_ = arena_.allocate(*ctx_, down_k_.set_layout());
             compose_color_set_ = arena_.allocate(*ctx_, compose_k_.set_layout());
             if (accum_set_ == VK_NULL_HANDLE ||
@@ -1058,8 +1025,8 @@ private:
         arena_.write_image(*ctx_, accum_set_, 0, color_.view);
         arena_.write_image(*ctx_, accum_set_, 1, accum_.view);
         arena_.write_buffer(*ctx_, accum_set_, 2, ubo, accum_ubo_.buf, 16);
-        // Downsample chain: accum -> half (bright pass), half -> quarter,
-        // quarter -> eighth. Sampled reads run in GENERAL.
+        // Down pyramid: accum -> half (bright pass) -> quarter -> eighth;
+        // sampled reads run in GENERAL.
         const VkImageView down_src[3] = {accum_.view, bloom_[0].view,
                                          bloom_[1].view};
         for (int i = 0; i < 3; ++i) {
@@ -1082,8 +1049,6 @@ private:
                              VK_IMAGE_LAYOUT_GENERAL);
         arena_.write_image(*ctx_, compose_set_, 2, present_.view);
         arena_.write_buffer(*ctx_, compose_set_, 3, ubo, compose_ubo_.buf, 16);
-        // The interactive variants read the scene color where the accum-fed
-        // sets read accum_ (same params UBOs).
         arena_.write_sampled(*ctx_, down0_color_set_, 0, color_.view, samp_3d_,
                              VK_IMAGE_LAYOUT_GENERAL);
         arena_.write_image(*ctx_, down0_color_set_, 1, bloom_[0].view);
@@ -1102,7 +1067,7 @@ private:
             float threshold;
             float p0, p1;
         };
-        const DownParams d0{1, 0.6f, 0, 0};  // bright pass off the accum
+        const DownParams d0{1, 0.6f, 0, 0};
         const DownParams dn{0, 0.0f, 0, 0};
         std::memcpy(down_ubo_[0].mapped, &d0, sizeof(d0));
         std::memcpy(down_ubo_[1].mapped, &dn, sizeof(dn));
@@ -1125,7 +1090,6 @@ private:
     }
 
     bool create_pipelines(const RenderKernels& blobs) {
-        // Set layouts. Mesh: UBO 0 (vert+frag). Volume: UBO 0 + samplers 1/2.
         const VkShaderStageFlags vf =
             VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         {
@@ -1177,9 +1141,6 @@ private:
             return false;
         }
 
-        // Mesh pipeline: interleaved pos3/normal3/color3, depth on, no cull,
-        // no blend. Volume: pos3 cube proxy, cull FRONT, no depth,
-        // premultiplied One/OneMinusSrcAlpha. Viewport+scissor dynamic.
         const VkVertexInputBindingDescription mesh_bind{
             0, 9 * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX};
         const VkVertexInputAttributeDescription mesh_attrs[3] = {
@@ -1202,15 +1163,11 @@ private:
             blobs.volume_frag_size, vol_pl_, &cube_bind, &cube_attr, 1,
             /*depth=*/false, VK_CULL_MODE_FRONT_BIT, kBlendPremultiplied,
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
-        // Cross-section sheet: procedural quad (no vertex input), same UBO +
-        // psi/phase samplers as the volume, drawn double-sided over the fog.
         slice_pipe_ = build_pipeline(
             blobs.slice_vert, blobs.slice_vert_size, blobs.slice_frag,
             blobs.slice_frag_size, vol_pl_, nullptr, nullptr, 0,
             /*depth=*/false, VK_CULL_MODE_NONE, kBlendPremultiplied,
             VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
-        // Glassy markers: mesh vertex stage + the fresnel fragment,
-        // premultiplied blend, depth-test WITHOUT depth-write.
         marker_pipe_ = build_pipeline(
             blobs.mesh_vert, blobs.mesh_vert_size, blobs.marker_frag,
             blobs.marker_frag_size, mesh_pl_, &mesh_bind, mesh_attrs, 3,
@@ -1299,7 +1256,7 @@ private:
             ba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
             ba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
             ba.alphaBlendOp = VK_BLEND_OP_ADD;
-        } else if (blend == kBlendAdditive) {  // glow sprites
+        } else if (blend == kBlendAdditive) {
             ba.blendEnable = VK_TRUE;
             ba.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
             ba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
@@ -1320,8 +1277,8 @@ private:
         dynst.dynamicStateCount = 2;
         dynst.pDynamicStates = dyn;
 
-        // Dynamic rendering: the pipeline declares attachment FORMATS instead
-        // of referencing a render pass. Must match create_target's images.
+        // Dynamic rendering: pipeline declares attachment formats (no render
+        // pass). Must match create_target's images.
         const VkFormat color_fmt = VK_FORMAT_R16G16B16A16_SFLOAT;
         VkPipelineRenderingCreateInfo prci{};
         prci.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
@@ -1368,7 +1325,6 @@ private:
                                {{0, simg}, {1, cis}, {2, simg}, {3, ubo}})) {
             return false;
         }
-        // Tiny per-pass parameter blocks (host-mapped).
         const std::uint32_t zero16[4] = {0, 0, 0, 0};
         if (!write_host(&accum_ubo_, zero16, 16,
                         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT) ||
@@ -1413,8 +1369,8 @@ private:
                 return false;
             }
         }
-        // Push constant: the trail length, so flow.vert can index
-        // trail[instance*trail_len + vertex] and fade along the streak.
+        // Push constant trail_len: flow.vert indexes
+        // trail[instance*trail_len + vertex] and fades along the streak.
         const VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT, 0,
                                       sizeof(std::int32_t)};
         VkPipelineLayoutCreateInfo plci{};
@@ -1427,8 +1383,6 @@ private:
             VK_SUCCESS) {
             return false;
         }
-        // Streaklines: instanced LINE_STRIP (one strip per streak), premultiplied
-        // white with a tail-to-head alpha fade (weather-map Lagrangian flux).
         flow_pipe_ = build_pipeline(
             blobs.flow_vert, blobs.flow_vert_size, blobs.flow_frag,
             blobs.flow_frag_size, flow_pl_, nullptr, nullptr, 0,
@@ -1438,9 +1392,8 @@ private:
             return false;
         }
 
-        // Seed the trail buffer: each streak's trail_len slots collapsed to one
-        // born-dead position (age 1e9) in the inner half of the box; the first
-        // frame's rejection respawn spreads them onto |psi|^2.
+        // Seed the trail buffer: every slot collapsed to one born-dead position
+        // in the inner half; the first frame respawns them onto |psi|^2.
         std::vector<float> seed(4 * kFlowStreaks * kFlowTrail);
         std::uint32_t rng = 0x9e3779b9u;
         auto rnd = [&rng]() {
@@ -1465,7 +1418,7 @@ private:
                 seed[o + 0] = px;
                 seed[o + 1] = py;
                 seed[o + 2] = pz;
-                seed[o + 3] = 1e9f;  // born dead: respawn onto |psi|^2
+                seed[o + 3] = 1e9f;  // born dead
             }
         }
         const VkDeviceSize bytes = seed.size() * sizeof(float);
@@ -1516,8 +1469,8 @@ private:
         arena_.write_buffer(*ctx_, flow_set_, 1, ubo, volume_ubuf_.buf,
                             sizeof(VolumeUbo));
         arena_.write_sampled(*ctx_, flow_set_, 3, phase_tex_.view, samp_1d_);
-        // Binding 2 (psi) of both sets is pointed per frame alongside the
-        // volume set; seed with the LUT so they are never invalid.
+        // Binding 2 (psi) pointed per frame; seed with the LUT so the sets are
+        // never invalid.
         arena_.write_sampled(*ctx_, particles_set_, 2, phase_tex_.view,
                              samp_3d_);
         arena_.write_sampled(*ctx_, flow_set_, 2, phase_tex_.view, samp_3d_);
@@ -1527,13 +1480,10 @@ private:
         return true;
     }
 
-    // 1D-scene overlay polylines: a LINE_STRIP pipeline vertex-pulling one
-    // packed host-visible SSBO laid out [positions 3f...][colors 4f...];
-    // constant color per draw via push constant, or -- when the curve
-    // carries per-vertex rgba (the phase-hued density band) -- pulled from
-    // the color region at a pushed float offset. The mvp comes from the
-    // shared scene MeshUbo (the shader declares the layout-compatible
-    // prefix).
+    // 1D-scene overlay polylines: LINE_STRIP pipeline vertex-pulling one packed
+    // SSBO laid out [positions 3f...][colors 4f...]. Color is per-draw constant
+    // via push constant, or per-vertex from the color region at a pushed float
+    // offset. mvp comes from the shared scene MeshUbo (layout-compatible prefix).
     bool create_overlay(const RenderKernels& blobs) {
         const auto sbuf = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         const auto ubo = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -1572,8 +1522,6 @@ private:
         if (overlay_pipe_ == VK_NULL_HANDLE) {
             return false;
         }
-        // Filled variant (same shaders/layout, strip topology): the faint
-        // xy reference sheet of the 1D scenes.
         overlay_fill_pipe_ = build_pipeline(
             blobs.overlay_vert, blobs.overlay_vert_size, blobs.overlay_frag,
             blobs.overlay_frag_size, overlay_pl_, nullptr, nullptr, 0,
@@ -1582,8 +1530,8 @@ private:
         if (overlay_fill_pipe_ == VK_NULL_HANDLE) {
             return false;
         }
-        // Seed a minimal SSBO so the set is never invalid before the first
-        // real upload grows it.
+        // Seed a minimal SSBO so the set is valid before the first upload
+        // grows it.
         const float zeros[12] = {};
         if (!write_host(&overlay_buf_, zeros, sizeof(zeros),
                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)) {
@@ -1600,11 +1548,10 @@ private:
         return true;
     }
 
-    // Pack the frame's overlay curves back to back into the host-visible
-    // SSBO (grow-only, descriptor re-pointed on regrow): all positions
-    // first, then the color arrays of the rgba curves. Remember each
-    // curve's first vertex for its draw's firstVertex, and each rgba
-    // curve's color base for the push-constant offset.
+    // Pack the frame's overlay curves into the grow-only SSBO (descriptor
+    // re-pointed on regrow): positions first, then the rgba curves' colors.
+    // Records each curve's first vertex (firstVertex) and each rgba curve's
+    // color base (push-constant offset).
     bool upload_overlay(const FrameInput& in) {
         const int nc = std::min(in.overlay_count, kMaxOverlayCurves);
         std::size_t total = 0;
@@ -1652,9 +1599,9 @@ private:
                 std::memcpy(dst + col, cv.rgba,
                             static_cast<std::size_t>(cv.count) * 4 *
                                 sizeof(float));
-                // Shader color address = 4 * gl_VertexIndex + offset, with
-                // gl_VertexIndex including firstVertex -- fold the position
-                // base out here (may go negative; the shader uses ints).
+                // Shader color address = 4*gl_VertexIndex + offset; gl_VertexIndex
+                // includes firstVertex, so fold the position base out (may go
+                // negative; shader uses ints).
                 overlay_col_off_[c] = static_cast<int>(col) - 4 * first;
                 col += static_cast<std::size_t>(cv.count) * 4;
             }
@@ -1665,11 +1612,9 @@ private:
         return true;
     }
 
-    // Record the post chain into the frame's command buffer: accumulation
-    // (only while accumulating -- interactive frames feed the bloom and the
-    // composite from the scene color directly), the dual-filter bloom
-    // pyramid, and the tonemapped composite into the present image (handed
-    // to SHADER_READ_ONLY for the shell).
+    // Record the post chain: accumulation (skipped on interactive frames),
+    // the dual-filter bloom pyramid, and the tonemapped composite into the
+    // present image (handed to SHADER_READ_ONLY for the shell).
     void record_post(VkCommandBuffer cb, bool use_accum) {
         auto dispatch_2d = [cb](const Kernel& k, VkDescriptorSet set,
                                 std::uint32_t w, std::uint32_t h) {
@@ -1677,7 +1622,6 @@ private:
             vkCmdDispatch(cb, (w + 15) / 16, (h + 15) / 16, 1);
         };
         if (use_accum) {
-            // Scene (GENERAL after the pass) -> accumulation buffer.
             dispatch_2d(accum_k_, accum_set_, width_, height_);
             barrier_compute_to_compute(cb);
         }
@@ -1807,13 +1751,9 @@ private:
         return true;
     }
 
-    // Nucleus marker balls for the Surface (mesh) view: one combined
-    // triangle soup of shaded UV-spheres, one per marker, each baked at its
-    // world position with its own radius and solid color -- no pipeline or
-    // shader change, just vertices. Rebuilt only when the marker list
-    // actually changes (scene switch, bond-length scan); a rebuild waits
-    // the device idle exactly like an overlay regrow, which is fine at
-    // that rarity.
+    // Marker balls for the Surface view: one combined triangle soup of
+    // UV-spheres (no pipeline change, just vertices). Rebuilt only when the
+    // marker list changes; the device-idle wait is fine at that rarity.
     bool ensure_marker_vbuf(const FrameInput& in) {
         const int n = std::min(in.marker_count, kMaxMarkers);
         bool same = n == marker_cached_count_;
@@ -1907,8 +1847,8 @@ private:
 
     // The cyclic phase colormap as a repeating 1D RGBA8 texture.
     bool create_phase_lut() {
-        // RGBA8 not a float format: a colormap's 1/255 steps are invisible, and
-        // 8-bit texels filter at full rate on the raymarch's hottest per-step tap.
+        // RGBA8 (not float): 1/255 color steps are invisible, and 8-bit texels
+        // filter at full rate on the raymarch's hottest per-step tap.
         const std::vector<ses::Rgb> lut = ses::phase_lut(kPhaseLutSize);
         std::vector<std::uint8_t> texels(4 * lut.size());
         auto quantize = [](double c) {
@@ -1992,8 +1932,8 @@ private:
         return ok;
     }
 
-    // CPU staging path (GPU engine unavailable): the RG staging IS the texel
-    // layout, whole volume in one buffer-to-image copy.
+    // CPU fallback (no GPU engine): the RG staging IS the texel layout, whole
+    // volume in one buffer-to-image copy.
     void upload_fallback_volume(const std::vector<float>& psi_staging) {
         const std::uint32_t nx = static_cast<std::uint32_t>(grid_.x.n);
         const std::uint32_t ny = static_cast<std::uint32_t>(grid_.y.n);
@@ -2030,8 +1970,8 @@ private:
         aux_valid_ = false;  // fresh field: rebuild occupancy + shadow
         volume_bound_view_ = view;
     }
-    // Re-point the advect set's velocity binding at the (flipping) engine
-    // velocity volume each frame. Cached to skip redundant writes.
+    // Re-point the advect set's velocity binding at the ping-pong engine
+    // velocity volume each frame; cached to skip redundant writes.
     void point_flow_velocity_binding(VkImageView engine_view) {
         if (engine_view == VK_NULL_HANDLE ||
             engine_view == flow_vel_bound_view_) {
@@ -2126,8 +2066,7 @@ private:
         vol_u.inv_peak =
             static_cast<float>(in.peak > 0.0 ? 1.0 / in.peak : 0.0);
         vol_u.absorbance = static_cast<float>(in.absorbance);
-        // Nucleus marker balls; count 0 = none (scene-controlled; the
-        // tunneling scene has no nucleus to suggest).
+        // Nucleus marker balls; count 0 = none.
         const int nmk = std::min(in.marker_count, kMaxMarkers);
         for (int m = 0; m < nmk; ++m) {
             const Marker& mk = in.markers[m];
@@ -2140,10 +2079,9 @@ private:
             vol_u.marker_col[m][2] = mk.b;
         }
         vol_u.marker_meta[0] = static_cast<float>(nmk);
-        // Rotate the raymarch jitter ONLY while accumulating: a still frame
-        // averages the rotating pattern into hundreds of effective samples,
-        // while a moving/evolving scene keeps a STATIC dither (no shimmer --
-        // the physics stays smooth on screen, as the smooth field it is).
+        // Rotate the raymarch jitter only while accumulating: a still frame
+        // averages the pattern into many samples; a moving scene keeps a static
+        // dither (no shimmer).
         vol_u.jitter_frame = in.accumulate ? in.frame_index : 0.0f;
         vol_u.clip[0] = in.clip_on ? 1.0f : 0.0f;
         vol_u.clip[1] = static_cast<float>(in.clip_axis);
@@ -2156,8 +2094,8 @@ private:
         vol_u.barrier[0] = in.barrier_on ? 1.0f : 0.0f;
         vol_u.barrier[1] = in.barrier_lo;
         vol_u.barrier[2] = in.barrier_hi;
-        // Fog density: a perpendicular crossing of the 2-Bohr slab reads
-        // ~50% opaque (1 - e^{-0.35*2}); grazing rays thicken naturally.
+        // Fog density 0.35: a perpendicular 2-Bohr crossing reads ~50% opaque
+        // (1 - e^{-0.35*2}); grazing rays thicken naturally.
         vol_u.barrier[3] = 0.35f;
         std::memcpy(volume_ubuf_.mapped, &vol_u, sizeof(vol_u));
 
@@ -2247,7 +2185,7 @@ private:
     Buffer compose_ubo_{};
     // Probability-flow particles.
     // Sparse streaklines: kFlowStreaks strips, each a kFlowTrail-vertex trail
-    // of recent positions (weather-map Lagrangian flux look, low frame cost).
+    // of recent positions (low frame cost).
     static constexpr std::uint32_t kFlowStreaks = 512;
     static constexpr std::uint32_t kFlowTrail = 40;
     struct alignas(16) FlowParams {
@@ -2289,7 +2227,7 @@ private:
     VkDescriptorSet particles_set_ = VK_NULL_HANDLE;
     VkDescriptorSet flow_set_ = VK_NULL_HANDLE;
 
-    // 1D-scene overlay polylines (phasor curve + potential profile).
+    // 1D-scene overlay polylines.
     DslHolder overlay_dsl_holder_;
     VkPipelineLayout overlay_pl_ = VK_NULL_HANDLE;
     VkPipeline overlay_pipe_ = VK_NULL_HANDLE;
@@ -2307,7 +2245,7 @@ private:
     VkPipeline mesh_pipe_ = VK_NULL_HANDLE;
     VkPipeline volume_pipe_ = VK_NULL_HANDLE;
     VkPipeline slice_pipe_ = VK_NULL_HANDLE;
-    VkPipeline marker_pipe_ = VK_NULL_HANDLE;  // glassy fresnel balls
+    VkPipeline marker_pipe_ = VK_NULL_HANDLE;
     VkSampler samp_3d_ = VK_NULL_HANDLE;
     VkSampler samp_1d_ = VK_NULL_HANDLE;
     DescriptorArena arena_;

@@ -1,10 +1,6 @@
-# ---------------------------------------------------------------------------
-# ses_viz: the raw-Vulkan visualization library -- scene renderer (volume /
-# mesh / slice / flow / HDR-bloom compose) and the swapchain presenter. Rides
-# the solver's device; knows NOTHING about SDL or ImGui (the presenter takes
-# an opaque UI-record callback). Consumers import ses.vk.render /
-# ses.vk.present / ses.vk.render_blobs.
-# ---------------------------------------------------------------------------
+# ses_viz: raw-Vulkan renderer + swapchain presenter. Rides the solver's
+# device (PUBLIC ses_solver); UI-agnostic -- presenter takes an opaque
+# UI-record callback, so it links no SDL/ImGui.
 set(_ses_viz_spv_dir "${CMAKE_CURRENT_BINARY_DIR}/spv")
 file(MAKE_DIRECTORY "${_ses_viz_spv_dir}")
 set(_ses_viz_hdrs "")
@@ -27,8 +23,7 @@ foreach(_k IN ITEMS mesh.vert mesh.frag marker.frag volume.vert volume.frag
 endforeach()
 add_custom_target(ses_viz_spv DEPENDS ${_ses_viz_hdrs})
 
-# Sources are the CXX_MODULES file set -- each interface unit compiles to a
-# real object, so the archive needs no placeholder TU.
+# Module interface units compile to real objects -- no placeholder TU needed.
 add_library(ses_viz STATIC)
 target_sources(ses_viz
     PUBLIC FILE_SET CXX_MODULES FILES
@@ -37,8 +32,7 @@ target_sources(ses_viz
         src/render_blobs.ixx)
 target_compile_features(ses_viz PUBLIC cxx_std_20)
 add_dependencies(ses_viz ses_viz_spv)
-# PUBLIC spv dir: the shell's own swapchain pass textually includes the blit
-# pair (blit_vert_spv.h / blit_frag_spv.h) from here.
+# PUBLIC: shell's swapchain pass textually includes blit_{vert,frag}_spv.h.
 target_include_directories(ses_viz PUBLIC "${_ses_viz_spv_dir}")
 target_link_libraries(ses_viz
     PUBLIC

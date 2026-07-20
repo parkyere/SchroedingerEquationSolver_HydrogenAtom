@@ -1,8 +1,5 @@
-// Fixed-order tree reduction of |psi|^2 into one (sum, max) partial per
-// workgroup; the host finishes the per-workgroup partials in double.
-// Bindings: psi (readonly, 0), partials (writeonly, 2), std140 UBO n (1).
-// No atomics, so the fixed-order fold stays deterministic (bit-exactness
-// checks rely on this). partials pack (sum, max) -- not a complex number.
+// No-atomics fixed-order fold => bit-exact partials; host finishes in double.
+// partials float2 packs (sum, max) -- not a complex number.
 import complex;
 
 [[vk::binding(0, 0)]] StructuredBuffer<Complex, Std430DataLayout> psi;

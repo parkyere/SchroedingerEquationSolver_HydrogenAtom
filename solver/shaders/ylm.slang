@@ -1,12 +1,9 @@
-// ylm.slang -- real spherical harmonics Y_lm (l = 0..5), shared by
-// synth / mcwf_axpy / project_deposit. Pure scalar float math.
-// Import with `import ylm;`.
+// Real Y_lm, l=0..5; shared by synth / mcwf_axpy / project_deposit.
 module ylm;
 
 public static const float PI = 3.14159265358979323846;
 
-// Real Y_lm(theta,phi) evaluated at Cartesian (x,y,z); returns 0 at the origin
-// for l>0 (the r=0 singularity the callers pin separately).
+// r=0 singularity pinned by caller.
 public float real_Ylm(int l, int m, float x, float y, float z) {
     float r2 = x * x + y * y + z * z;
     if (l == 0) return 1.0 / (2.0 * sqrt(PI));
@@ -49,7 +46,7 @@ public float real_Ylm(int l, int m, float x, float y, float z) {
         return (3.0 / 16.0) * sqrt(35.0 / PI) *
                (x * x * x * x - 6.0 * x * x * y * y + y * y * y * y) / r4;
     }
-    // l == 5
+    // l == 5 (implicit fall-through; caller guarantees l<=5)
     float r5 = r2 * r2 * sqrt(r2);
     float x2 = x * x;
     float y2 = y * y;

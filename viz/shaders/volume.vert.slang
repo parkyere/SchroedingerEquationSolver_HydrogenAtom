@@ -1,6 +1,5 @@
-// Volume box vertex stage: pass the world-space cube corner to the fragment
-// raymarcher. Shares the volume std140 UBO (binding 0) with the fragment
-// stage. The MVP carries the GL->Vulkan clip correction host-side.
+// UBO (binding 0) shared with the fragment raymarch stage.
+// mvp bakes the GL->Vulkan clip correction host-side.
 struct VSIn {
     [[vk::location(0)]] float3 pos : POSITION;
 };

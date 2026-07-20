@@ -14,10 +14,7 @@ export import ses.field;
 export import ses.wavepacket;
 
 
-// WavepacketSimulation: the tested orchestration layer the app shell drives.
-// Owns grid + potential + propagator + psi; advance() steps real time.
-// Exactly equivalent to gaussian_wavepacket followed by SplitOperator3D
-// steps (pinned by tests) -- no hidden physics lives here.
+// Contract (test-pinned): only gaussian_wavepacket + SplitOperator3D, no hidden physics.
 
 
 export namespace ses {
@@ -45,9 +42,7 @@ public:
         steps_ += nsteps;
     }
 
-    // Imaginary-time relaxation toward the ground state. Does NOT advance
-    // real time (tau is not t). The propagator's decay tables are cached and
-    // rebuilt only when dtau changes.
+    // Relaxer keyed on dtau (decay tables); tau != t, no real-time advance.
     void relax(int nsteps, double dtau) {
         if (!relaxer_ || relaxer_dtau_ != dtau) {
             relaxer_.emplace(grid_, potential_, dtau);
@@ -56,10 +51,7 @@ public:
         relaxer_->relax(psi_, nsteps);
     }
 
-    // Soft position measurement: sample a collapse cell from the sigma_m-
-    // blurred POVM outcome density (detector-consistent Born rule) using the
-    // injected uniform draw u, collapse psi onto a Gaussian of width sigma_m
-    // there, and return the collapse center. Instantaneous.
+    // u = injected uniform[0,1) draw selecting the sigma_m-blurred POVM outcome cell.
     Vec3d measure(double u, double sigma_m) {
         const int idx = sample_povm_index(psi_, sigma_m, u);
         const int i = idx % grid_.x.n;
@@ -77,8 +69,7 @@ public:
     const std::vector<double>& potential() const noexcept { return potential_; }
     const SplitOperator3D& propagator() const noexcept { return propagator_; }
 
-    // Replace the state (e.g. hand a GPU-evolved field back to this CPU
-    // session). Grid sizes must match.
+    // Inject a GPU-evolved field back into this CPU session.
     void set_psi(const Field3D& psi) {
         assert(psi.data().size() == psi_.data().size());
         psi_ = psi;

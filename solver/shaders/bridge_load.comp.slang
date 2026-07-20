@@ -1,8 +1,4 @@
-// Inverse of bridge_store, for verification only: read the volume texture
-// back into an SSBO so the bridge can be checked without a 3D-texture
-// readback. The RG16F texel quantizes psi, so the round-trip is checked
-// against a CPU-side fp16 round-to-nearest of the SSBO contents.
-// out SSBO (binding 0), image3D in (binding 1), grid dims UBO (binding 2).
+// Verification-only inverse of bridge_store; RG16F round-trip vs CPU fp16 round-to-nearest.
 import complex;
 import grid;
 

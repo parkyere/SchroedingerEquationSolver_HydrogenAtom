@@ -1,11 +1,5 @@
-# ---------------------------------------------------------------------------
-# Slang AOT toolchain (shared by solver/ and viz/). Every ses_vk compute
-# kernel and render shader is a Slang source baked to plain SPIR-V by slangc
-# at build time and embedded as a C array via tools/cmake/bin2h.cmake
-# (symbol k_<x>_spv). slangc is a prebuilt BUILD-TIME tool (FetchContent) --
-# it adds no runtime or vcpkg dependency; matrices are column-major to match
-# the host std140 mat4 upload.
-# ---------------------------------------------------------------------------
+# Slang AOT bake (solver/ + viz/): slangc = prebuilt FetchContent tool, no
+# runtime/vcpkg dep. Column-major matches host std140 mat4 upload contract.
 include(FetchContent)
 set(SES_SLANG_VERSION "2026.13.1")
 if(WIN32)
@@ -22,18 +16,12 @@ find_program(SES_SLANGC slangc
     NO_DEFAULT_PATH REQUIRED)
 message(STATUS "Slang AOT compiler: ${SES_SLANGC}")
 
-# Shared Slang modules (complex, ylm, grid, vec ...) live in solver/shaders:
-# they are physics math, `import`-ed by both solver kernels and viz shaders
-# (via -I), never baked as entry points; listed as bake deps so editing a
-# module rebakes its consumers.
+# Shared import-only modules (-I); as bake DEPENDS so an edit rebakes consumers.
 set(SES_SLANG_MODULE_DIR "${CMAKE_SOURCE_DIR}/solver/shaders")
 file(GLOB SES_SLANG_MODULES CONFIGURE_DEPENDS "${SES_SLANG_MODULE_DIR}/*.slang")
 list(FILTER SES_SLANG_MODULES EXCLUDE REGEX "\\.(comp|vert|frag)\\.slang$")
 
-# Bake one Slang shader (<srcdir>/<srcfile>.slang -> <spvdir>/<x>_spv.h,
-# symbol k_<x>_spv) and append the header to the list variable <hdrs_var>
-# (caller scope). The stage extension in the source name is a human hint;
-# slangc takes -stage.
+# Stage extension in the srcfile name is a human hint; slangc uses -stage.
 function(ses_bake_shader hdrs_var srcdir spvdir _srcfile _stage _x)
     set(_slang "${srcdir}/${_srcfile}.slang")
     set(_spv "${spvdir}/${_x}.spv")

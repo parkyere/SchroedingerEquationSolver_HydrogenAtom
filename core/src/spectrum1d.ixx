@@ -8,22 +8,13 @@ export import ses.grid;
 import ses.radial;
 
 
-// Bound states of an ARBITRARY 1D potential on the scene grid: the 1D box
-// [xmin, xmax] with Dirichlet ends IS a radial problem at l = 0, so this is
-// a thin adapter over the radial engine's tridiagonal FD solver (Sturm
-// bisection + shifted inverse iteration -- the same machinery that builds
-// the hydrogen manifold). The mapping is exact: with m = g.n - 1 interior
-// points the radial spacing L/(m+1) equals the scene spacing, and interior
-// point j sits on scene point j+1; scene point 0 (= the periodic wrap
-// point) carries the Dirichlet zero. For states confined well inside the
-// box the Dirichlet-vs-periodic difference is exponentially negligible.
-//
-// This is the shared oracle of the solvable-well scenes: the double well's
-// splitting doublet, the Morse ladder, the Poschl-Teller bound set --
-// verified in tests against the HO ladder and the closed-form Morse
-// spectrum. Eigenfunctions are real (stored in the complex Field1D for
-// direct use as scene states), discretely normalized, with the radial
-// engine's sign convention (positive near xmin).
+// 1D box [xmin,xmax] with Dirichlet ends is the l=0 radial problem; thin
+// adapter over the radial FD solver. Mapping is exact: m = g.n-1 interior
+// points give radial spacing L/(m+1) = scene spacing, interior point j ->
+// scene point j+1, scene point 0 carries the Dirichlet zero. Dirichlet-vs-
+// periodic error is exponentially small for confined states. Eigenfunctions
+// real, discretely normalized, sign convention positive near xmin. Verified
+// in tests vs the HO ladder and the closed-form Morse spectrum.
 
 
 export namespace ses {
@@ -50,7 +41,7 @@ inline std::vector<Bound1D> bound_states_1d(const Grid1D& g,
         const RadialState s = radial_eigenstate(rg, ham, k);
         Bound1D b{g};
         b.energy = s.energy;
-        b.psi[0] = 0.0;  // the Dirichlet end (also the periodic wrap point)
+        b.psi[0] = 0.0;  // Dirichlet end (periodic wrap point)
         for (int j = 0; j + 1 < g.n; ++j) {
             b.psi[j + 1] = s.u[static_cast<std::size_t>(j)];
         }

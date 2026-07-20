@@ -6,32 +6,26 @@ export import ses.scenario.line1d_director;
 import ses.wavepacket;
 
 
-// 1D reduction of the 3D tunneling scene (same V0, launch, k0;
-// E = k0^2/2 = 0.125 Ha < V0 = 0.25, forbidden). Slab is HALF the 3D
-// scene's (2.5 vs 5 Bohr): kappa*w = 1.25, so the transmitted packet is
-// plainly visible instead of a ~1% wisp. Red V(x) + white phasor curve.
-// The boundary absorber swallows outgoing flux; T is reported against
-// the initial unit norm (probability_in_range is absolute).
+// Slab is HALF the 3D tunneling scene's width so kappa*w = 1.25 keeps the
+// transmitted packet visible, not a ~1% wisp. T is vs initial unit norm
+// (probability_in_range is absolute).
 
 
 export namespace ses_shell {
 
-constexpr double kTun1dBox = 80.0;   // Bohr half-extent
-// 65536 points (2^16, h ~ 0.0024): a 1D line is ~4 decades cheaper than
-// the 3D volumes, so oversample generously -- the phasor curve resolves
-// the incident/reflected interference ripples and the evanescent decay
-// smoothly. No ladder here, so the huge k_max costs nothing.
+constexpr double kTun1dBox = 80.0;   // Bohr
+// oversampled (1D is cheap): phasor curve resolves ripples + evanescent decay
 constexpr int kTun1dPoints = 65536;
 constexpr double kTun1dV0 = 0.25;    // Ha
-constexpr double kTun1dXLo = 0.0;    // slab [0, 2.5): kappa = 0.5
+constexpr double kTun1dXLo = 0.0;
 constexpr double kTun1dXHi = 2.5;
-constexpr double kTun1dK0 = 0.5;     // mean E = 0.125 Ha < V0 (forbidden)
+constexpr double kTun1dK0 = 0.5;
 constexpr double kTun1dLaunchX = -30.0;
 constexpr double kTun1dSigma = 5.0;
 constexpr double kTun1dDt = 0.04;
-constexpr double kTun1dAbsorb = 10.0;  // cos^2 wall layer (Bohr)
-constexpr double kTun1dRScale = 60.0;  // radius = 60 |psi|^2 (~5 Bohr peak)
-constexpr double kTun1dEScale = 40.0;  // V display: barrier reads 10 tall
+constexpr double kTun1dAbsorb = 10.0;  // Bohr
+constexpr double kTun1dRScale = 60.0;  // radius ~ |psi|^2
+constexpr double kTun1dEScale = 40.0;  // V display scale
 constexpr double kTun1dYClamp = 12.0;
 
 class Tunneling1DDirector final : public Line1DDirector, public TunnelApi {
@@ -50,16 +44,14 @@ public:
     TunnelApi* tunnel() override { return this; }
     double transmitted_max() const override { return t_max_; }
 
-    // Near side-on, like the 3D scene: packet left, wall a thin red gate,
-    // transmission right; a slight angle keeps the phasor twist readable.
+    // slight angle keeps the phasor twist readable
     double default_camera_azimuth() const override { return 0.22; }
     double default_camera_elevation() const override { return 0.24; }
     double default_camera_distance() const override { return 185.0; }
 
 protected:
     const char* scene_name() const override { return "1D quantum tunneling"; }
-    // The packet crawls at v = k0 = 0.5 Bohr/au: two steps per tick keeps
-    // the approach ~12 s of wall clock at scale 1.
+    // paces the approach to ~12 s at scale 1
     int steps_per_tick() const override { return 2; }
 
     std::string title_suffix() override {
@@ -69,7 +61,7 @@ protected:
                     kTun1dXHi, p_right_, t_max_);
     }
 
-    // 64k-point linear probe is still microseconds: track T every batch.
+    // probe is microseconds: safe to track T every batch
     void after_batch() override {
         p_left_ = ses::probability_in_range(psi_, grid1d_.xmin, kTun1dXLo);
         p_right_ = ses::probability_in_range(psi_, kTun1dXHi, grid1d_.xmax);

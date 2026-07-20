@@ -3,25 +3,19 @@ module;
 export module ses.vram_budget;
 
 
-// Pick the resident eigenstate-atlas precision (fp32 vs fp16) that fits GPU
-// VRAM: an fp32 atlas that overflows VRAM makes WDDM page across PCIe and
-// thrash every frame. Pure integer decision (no GPU-API deps, unit-tested);
-// the VK_EXT_memory_budget probe is ses.vk.vram_probe (solver/), which
-// returns kVramUnknown when unmeasurable; the app shell forwards it.
+// An overflowing fp32 atlas makes WDDM page across PCIe and thrash every frame.
+// Free-VRAM probe lives in ses.vk.vram_probe (solver/).
 
 
 export namespace ses {
 
 enum class GpuPrecision { Fp32, Fp16 };
 
-// Sentinel the app shell passes when free VRAM could not be measured
-// (VK_EXT_memory_budget unavailable).
+// Sentinel: VK_EXT_memory_budget unavailable.
 inline constexpr std::int64_t kVramUnknown = -1;
 
-// Choose the atlas state-buffer precision. headroom_bytes = VRAM reserved for
-// textures/framebuffers/driver overhead; out_fits is set false when even fp16
-// overflows (caller warns). An unmeasurable budget never silently degrades
-// fidelity: it keeps fp32.
+// headroom_bytes: VRAM held back for textures/framebuffers/driver.
+// Unmeasurable budget keeps fp32 (never silently degrade fidelity).
 inline constexpr GpuPrecision choose_state_precision(std::int64_t free_vram_bytes,
                                                      int num_states,
                                                      std::int64_t bytes_per_state_fp32,
@@ -49,7 +43,7 @@ inline constexpr GpuPrecision choose_state_precision(std::int64_t free_vram_byte
         set_fits(true);
         return GpuPrecision::Fp16;
     }
-    set_fits(false);  // even fp16 overflows: best effort, and warn.
+    set_fits(false);  // best effort: even fp16 overflows.
     return GpuPrecision::Fp16;
 }
 

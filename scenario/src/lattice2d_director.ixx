@@ -18,13 +18,8 @@ export import ses.grid;
 export import ses.lattice2d;
 
 
-// Shared base for the corral and qdot CPU 2D lattice scenes (doubleslit/
-// landau are standalone ScenarioDirectors with their own slab plumbing):
-// physics on one z-plane (nz = 1) of a Field3D,
-// displayed through the volume path by replicating the plane into a thin
-// z slab (CPU staging fallback -- gpu_ok() false by design). Subclasses
-// own the propagator and stepping (do_steps), the base owns the frame
-// plumbing, staging, and display flags.
+// CPU 2D lattice base for corral/qdot. Physics on one z-plane (nz=1),
+// replicated into the display slab; gpu_ok()=false by design.
 // volk.h textually first: VK_* macros never cross module boundaries.
 
 
@@ -119,15 +114,11 @@ protected:
           nz_(nz),
           psi_{phys_grid_} {}
 
-    // Scene hooks: the subclass owns the propagator and the batch.
     virtual void do_steps(int n) = 0;
     virtual int steps_per_tick() const { return 8; }
     int steps_per_tick_x1() const override { return steps_per_tick(); }
-    // Display rebuild after psi moved: default = the phase-hued volume
-    // slab; a scene may substitute its own display (corral's heightfield).
     virtual void rebuild_display() { rebuild_staging(); }
 
-    // Reset the clock and the display flags around a re-preparation.
     void mark_fired() {
         sim_time_ = 0.0;
         pending_steps_ = 0;
@@ -154,12 +145,9 @@ protected:
         const std::size_t plane =
             static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny);
         staging_.resize(plane * static_cast<std::size_t>(nz_) * 2);
-        // SERIAL on purpose: ses::parallel_for instantiated inside this
-        // SHARED BASE module's inline member crashes a pool worker at
-        // runtime (MSVC modules footgun -- the same call is fine in every
-        // LEAF scene module; kin of the OpenMP-in-module-interface
-        // miscompile that begat ses.parallel). The copy is ~2 MB: serial
-        // costs ~1 ms and correctness beats it.
+        // SERIAL on purpose: ses::parallel_for in this shared base module's
+        // inline member crashes a pool worker (MSVC modules footgun; fine in
+        // leaf scene modules). Copy ~2 MB, serial ~1 ms.
         for (int j = 0; j < ny; ++j) {
             for (int i = 0; i < nx; ++i) {
                 const std::complex<double> z = psi_(i, j, 0);

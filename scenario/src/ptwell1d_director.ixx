@@ -11,30 +11,27 @@ import ses.spectral;
 import ses.wavepacket;
 
 
-// Poschl-Teller V = -l(l+1)/(2 a^2) sech^2(x/a), integer l: reflectionless
-// (KdV soliton potential); the equal-depth/area square well is not. Key W
-// swaps the wells and relaunches the same packet; the HUD tracks R as the
-// NEGATIVE-momentum probability (position gates would be polluted by the
-// slow transmitted tail), frozen once the absorber has eaten most of the
-// norm so absorbed flux cannot inflate the ratio.
-// License physics: tests/solvable_wells_test.cpp (R_pt < 5e-3, R_sq > 3e-2).
+// Poschl-Teller V = -l(l+1)/(2 a^2) sech^2(x/a), integer l: reflectionless;
+// equal-depth/area square well is not. R = negative-momentum probability
+// (position gates are polluted by the slow transmitted tail).
+// Contract: tests/solvable_wells_test.cpp (R_pt < 5e-3, R_sq > 3e-2).
 
 
 export namespace ses_shell {
 
-constexpr double kPt1dBox = 80.0;   // Bohr half-extent
+constexpr double kPt1dBox = 80.0;
 constexpr int kPt1dPoints = 65536;
 constexpr double kPt1dLambda = 2.0;
 constexpr double kPt1dA = 2.0;
-// The magic depth l(l+1)/(2 a^2) = 6/8 for l = 2, a = 2.
+// l(l+1)/(2 a^2) = 6/8, l = 2, a = 2
 constexpr double kPt1dV0 = 0.75;
-constexpr double kPt1dK0 = 0.5;     // E = 0.125 Ha
+constexpr double kPt1dK0 = 0.5;
 constexpr double kPt1dLaunchX = -30.0;
 constexpr double kPt1dSigma = 5.0;
 constexpr double kPt1dDt = 0.04;
 constexpr double kPt1dAbsorb = 10.0;
 constexpr double kPt1dRScale = 60.0;
-constexpr double kPt1dEScale = 13.0;  // depth 0.75 dips ~10 Bohr below axis
+constexpr double kPt1dEScale = 13.0;
 constexpr double kPt1dYClamp = 1e30;
 
 class PtWell1DDirector final : public Line1DDirector, public ReflectApi {
@@ -61,7 +58,7 @@ public:
                                                    kPt1dA)
                           : ses::poschl_teller_potential(grid1d_, kPt1dV0,
                                                          kPt1dA));
-        launch();  // same packet, fresh probes: a fair A/B comparison
+        launch();  // fair A/B: same packet, fresh probes
     }
 
     bool handle_key(char key) override {
@@ -90,7 +87,7 @@ protected:
                     0.5 * kPt1dK0 * kPt1dK0, kPt1dV0, r_now_, r_max_);
     }
 
-    // R at title cadence (a 64k FFT is ~ms; every batch would be waste).
+    // Probe at title cadence: a 64k FFT every batch is waste.
     void after_batch() override {
         if (++probe_phase_ % 8 != 0) {
             return;
@@ -108,12 +105,9 @@ protected:
             }
         }
         r_now_ = tot > 0.0 ? neg / tot : 0.0;
-        // Record R only while the absorber has not touched the packet:
-        // chopping a moving wave train (psi *= mask) is non-unitary and
-        // MANUFACTURES spurious k < 0 sidebands (measured ~3% once the
-        // transmitted front enters the ramp). The full reflection develops
-        // by t ~ 120 au; anything within 15 Bohr of the ramp freezes the
-        // record with the honest value already taken.
+        // Freeze R before the absorber: masking (psi *= mask) is non-unitary
+        // and manufactures spurious k < 0 sidebands (~3%, blows the 5e-3
+        // contract); the -15 keeps the guard 15 Bohr clear of the ramp.
         const double guard = kPt1dBox - kPt1dAbsorb - 15.0;
         if (ses::probability_in_range(psi_, -guard, guard) > 1.0 - 1e-3) {
             r_max_ = std::max(r_max_, r_now_);
