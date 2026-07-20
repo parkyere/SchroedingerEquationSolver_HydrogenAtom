@@ -62,6 +62,7 @@ add_executable(sesolver_tests
     mcwf_test.cpp
     measurement_test.cpp
     molecule_test.cpp
+    molecular_seed_test.cpp
     multichannel_decay_test.cpp
     observables_test.cpp
     parallel_test.cpp

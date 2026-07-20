@@ -13,6 +13,7 @@ target_sources(ses_scenario
         src/scenario.ixx
         src/manifold_spec.ixx
         src/kepler_seed.ixx
+        src/molecular_seed.ixx
         src/atom_model.ixx
         src/base_director.ixx
         src/hydrogen_director.ixx
