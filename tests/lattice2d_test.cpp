@@ -34,6 +34,7 @@
 import ses.field;
 import ses.grid;
 import ses.lattice2d;
+import ses.potential;
 
 namespace {
 
@@ -458,6 +459,57 @@ TEST(PeierlsLattice2D, LandauLadderClimbsOneCyclotronQuantum) {
     ses::normalize(up2);
     const double e2 = prop.energy(up2);
     EXPECT_NEAR((e2 - e1) / b, 1.0, 0.2);
+}
+
+// RED: the continuous-beam mechanism of the double-slit scene: a coherent
+// on-shell source (psi += A src e^{-i w t} dt per step, w = the lattice
+// band energy of k0) feeding an OPEN box (absorber frame each step, no
+// renormalization) must reach a STEADY state -- injected flux balances
+// absorbed flux; the norm saturates instead of growing without bound.
+TEST(PeierlsLattice2D, BeamSourceWithOpenBoundaryReachesSteadyState) {
+    const ses::Grid3D g{ses::Grid1D{-30.0, 30.0, 128},
+                        ses::Grid1D{-15.0, 15.0, 64}, ses::Grid1D{0.0, 2.0, 1}};
+    const std::vector<double> zero(static_cast<std::size_t>(g.size()), 0.0);
+    const double dt = 0.01;
+    ses::PeierlsLattice2D prop{g, zero, dt};
+    const std::vector<double> mask = ses::absorbing_mask(g, 6.0);
+    const double k0 = 2.0;
+    const double hx = g.x.spacing();
+    const double w = (1.0 - std::cos(k0 * hx)) / (hx * hx);  // on-shell
+    ses::Field3D psi{g};  // vacuum boot: the source fills the box
+    ses::Field3D src{g};
+    for (int j = 0; j < g.y.n; ++j) {
+        const double y = g.y.coord(j);
+        for (int i = 0; i < g.x.n; ++i) {
+            const double x = g.x.coord(i);
+            const double dxs = x + 18.0;  // emitter column
+            src(i, j, 0) = std::exp(-dxs * dxs / 8.0 - y * y / 50.0) *
+                           std::complex<double>{std::cos(k0 * x),
+                                                std::sin(k0 * x)};
+        }
+    }
+    auto run = [&](int nsteps, double t0) {
+        for (int s = 0; s < nsteps; ++s) {
+            prop.step(psi, 1);
+            const double t = t0 + (s + 1) * dt;
+            const std::complex<double> ph{std::cos(w * t), -std::sin(w * t)};
+            for (std::size_t i = 0; i < psi.data().size(); ++i) {
+                psi.data()[i] = psi.data()[i] * mask[i] +
+                                0.05 * dt * ph * src.data()[i];
+            }
+        }
+        return t0 + nsteps * dt;
+    };
+    // Box transit ~ 35 au (v_g = sin(k0 h)/h ~ 1.7): equilibration needs a
+    // few transits, so the plateau probe sits at t ~ 60-75 au.
+    double t = run(800, 0.0);
+    const double n_early = ses::norm_sq(psi);
+    t = run(5200, t);
+    const double n_mid = ses::norm_sq(psi);
+    run(1500, t);
+    const double n_late = ses::norm_sq(psi);
+    EXPECT_GT(n_mid, 2.0 * n_early);       // the beam filled the box...
+    EXPECT_NEAR(n_late / n_mid, 1.0, 0.1); // ...then injection = absorption
 }
 
 }  // namespace
