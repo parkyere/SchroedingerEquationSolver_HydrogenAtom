@@ -12,6 +12,9 @@ module;
 #include <phase_multiply_spv.h>
 #include <lat2d_sweep_x_spv.h>
 #include <lat2d_sweep_y_spv.h>
+#include <norm_peak_spv.h>
+#include <norm_finalize_spv.h>
+#include <scale_buf_spv.h>
 #include <algorithm>
 #include <cmath>
 #include <complex>
@@ -28,7 +31,9 @@ import ses.grid;
 // GPU port of ses::PeierlsLattice2D: the Strang-split exact-2x2 Peierls bond
 // sweep, one compute dispatch per (phase / sweep_x / sweep_y) with a
 // compute-to-compute barrier between every dispatch (all alias state_ in place).
-// fp32, bit-faithful to the CPU oracle. CONTRACT: vkcheck check_lattice2d_step.
+// relax() adds cosh/sinh imaginary-time sweeps + a fused norm reduce->rescale
+// (norm_peak/norm_finalize/scale_buf). fp32, bit-faithful to the CPU oracle.
+// CONTRACT: vkcheck check_lattice2d_step / check_lattice2d_relax.
 
 
 export namespace ses_vk {
@@ -43,22 +48,30 @@ public:
     // false => caller stays on CPU.
     bool initialize(DeviceContext& ctx) {
         ctx_ = &ctx;
-        if (!phase_k_.create(ctx, k_phase_multiply_spv, k_phase_multiply_spv_size,
-                             {{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
-                              {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
-                              {2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER}}) ||
+        const std::initializer_list<BindingDesc> ssb_ssb_ubo = {
+            {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
+            {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
+            {2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER}};
+        const std::initializer_list<BindingDesc> ssb_ubo_ssb = {
+            {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
+            {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER},
+            {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER}};
+        if (!phase_k_.create(ctx, k_phase_multiply_spv,
+                             k_phase_multiply_spv_size, ssb_ssb_ubo) ||
             !sweepx_k_.create(ctx, k_lat2d_sweep_x_spv, k_lat2d_sweep_x_spv_size,
-                              {{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
-                               {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
-                               {2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER}}) ||
+                              ssb_ssb_ubo) ||
             !sweepy_k_.create(ctx, k_lat2d_sweep_y_spv, k_lat2d_sweep_y_spv_size,
-                              {{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
-                               {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
-                               {2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER}})) {
+                              ssb_ssb_ubo) ||
+            !normpeak_k_.create(ctx, k_norm_peak_spv, k_norm_peak_spv_size,
+                                ssb_ubo_ssb) ||
+            !normfinal_k_.create(ctx, k_norm_finalize_spv,
+                                 k_norm_finalize_spv_size, ssb_ubo_ssb) ||
+            !scalebuf_k_.create(ctx, k_scale_buf_spv, k_scale_buf_spv_size,
+                                ssb_ubo_ssb)) {
             return false;
         }
-        // 5 sets (phase + 2 sweep_x + 2 sweep_y); headroom for relax later.
-        if (!arena_.create(ctx, 16, 48, 24)) {
+        // 15 sets (RT: phase+2sx+2sy; IT: phase+2sx+2sy; 3 norm); headroom.
+        if (!arena_.create(ctx, 24, 64, 32)) {
             return false;
         }
         ready_ = true;
@@ -73,6 +86,9 @@ public:
         phase_k_.destroy(*ctx_);
         sweepx_k_.destroy(*ctx_);
         sweepy_k_.destroy(*ctx_);
+        normpeak_k_.destroy(*ctx_);
+        normfinal_k_.destroy(*ctx_);
+        scalebuf_k_.destroy(*ctx_);
         free_lattice();
         ctx_ = nullptr;
         ready_ = false;
@@ -81,8 +97,8 @@ public:
     bool ready() const { return ready_ && n_cells_ > 0; }
 
     // (Re)build all lattice-sized buffers + the Strang coefficients for a grid,
-    // on-site potential, and dt. link phases default to 1 (set_uniform_field to
-    // add a field). Safe to call repeatedly (dt / potential changes).
+    // on-site potential, and dt. Links default to 1 (set_uniform_field adds a
+    // field). Safe to call repeatedly (dt / potential changes).
     void set_lattice(const ses::Grid3D& g, const std::vector<double>& potential,
                      double dt) {
         g_ = &g;
@@ -94,65 +110,54 @@ public:
         if (cells != n_cells_) {
             free_lattice();
             n_cells_ = cells;
-            const VkDeviceSize bytes =
-                static_cast<VkDeviceSize>(cells) * 2 * sizeof(float);
-            const bool ok =
-                ctx_->create_device_buffer(bytes, &state_) &&
-                ctx_->create_device_buffer(bytes, &link_x_) &&
-                ctx_->create_device_buffer(bytes, &link_y_) &&
-                ctx_->create_device_buffer(bytes, &hv_rt_) &&
-                ctx_->create_host_buffer(bytes,
-                                         VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-                                             VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                         &staging_) &&
-                ctx_->create_host_buffer(sizeof(PhaseParams),
-                                         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                                         &phase_ubo_) &&
-                ctx_->create_host_buffer(sizeof(SweepParams),
-                                         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                                         &sx_ubo_[0]) &&
-                ctx_->create_host_buffer(sizeof(SweepParams),
-                                         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                                         &sx_ubo_[1]) &&
-                ctx_->create_host_buffer(sizeof(SweepParams),
-                                         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                                         &sy_ubo_[0]) &&
-                ctx_->create_host_buffer(sizeof(SweepParams),
-                                         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                                         &sy_ubo_[1]);
-            if (!ok) {
+            if (!alloc_lattice(cells)) {
                 n_cells_ = 0;
                 return;
             }
             allocate_sets();
-            std::vector<std::complex<double>> ones(
+            const std::vector<std::complex<double>> ones(
                 static_cast<std::size_t>(cells), std::complex<double>{1.0, 0.0});
             upload_complex(link_x_, ones);
             upload_complex(link_y_, ones);
         }
-        // On-site real-time phase table e^{-i (V + 2tx + 2ty) dt/2}.
-        std::vector<std::complex<double>> hv(static_cast<std::size_t>(cells));
+        // On-site tables: real-time e^{-i e0 dt/2}, imag-time e^{-e0 dt/2}.
+        std::vector<std::complex<double>> hv_rt(static_cast<std::size_t>(cells));
+        std::vector<std::complex<double>> hv_it(static_cast<std::size_t>(cells));
         for (int idx = 0; idx < cells; ++idx) {
             const double e0 = potential[static_cast<std::size_t>(idx)] +
                               2.0 * tx + 2.0 * ty;
-            hv[static_cast<std::size_t>(idx)] =
-                std::complex<double>{std::cos(-0.5 * e0 * dt),
-                                     std::sin(-0.5 * e0 * dt)};
+            hv_rt[static_cast<std::size_t>(idx)] = std::complex<double>{
+                std::cos(-0.5 * e0 * dt), std::sin(-0.5 * e0 * dt)};
+            hv_it[static_cast<std::size_t>(idx)] =
+                std::complex<double>{std::exp(-0.5 * e0 * dt), 0.0};
         }
-        upload_complex(hv_rt_, hv);
+        upload_complex(hv_rt_, hv_rt);
+        upload_complex(hv_it_, hv_it);
 
-        PhaseParams pp{static_cast<std::uint32_t>(cells), 0, 0, 0};
-        write_ubo(phase_ubo_, &pp, sizeof(pp));
-        // Real-time bond coefficients: c = cos(t dt/2), mix = i sin(t dt/2);
-        // y-odd bond is the full-dt palindrome centre.
+        const NParams np{static_cast<std::uint32_t>(cells), 0, 0, 0};
+        write_ubo(phase_ubo_, &np, sizeof(np));
+        write_ubo(np_ubo_, &np, sizeof(np));
+        write_ubo(sc_ubo_, &np, sizeof(np));
+        const NFParams nf{kGroups, static_cast<float>(g.cell_volume()), 0.0f,
+                          0.0f};
+        write_ubo(nf_ubo_, &nf, sizeof(nf));
+        // Real-time bonds: c = cos(t dt/2), mix = i sin(t dt/2); y-odd = full dt.
         write_sweep(sx_ubo_[0], 0, std::cos(tx * 0.5 * dt),
                     {0.0, std::sin(tx * 0.5 * dt)});
         write_sweep(sx_ubo_[1], 1, std::cos(tx * 0.5 * dt),
                     {0.0, std::sin(tx * 0.5 * dt)});
         write_sweep(sy_ubo_[0], 0, std::cos(ty * 0.5 * dt),
                     {0.0, std::sin(ty * 0.5 * dt)});
-        write_sweep(sy_ubo_[1], 1, std::cos(ty * dt),
-                    {0.0, std::sin(ty * dt)});
+        write_sweep(sy_ubo_[1], 1, std::cos(ty * dt), {0.0, std::sin(ty * dt)});
+        // Imag-time bonds: c = cosh, mix = sinh (real).
+        write_sweep(sx_it_ubo_[0], 0, std::cosh(tx * 0.5 * dt),
+                    {std::sinh(tx * 0.5 * dt), 0.0});
+        write_sweep(sx_it_ubo_[1], 1, std::cosh(tx * 0.5 * dt),
+                    {std::sinh(tx * 0.5 * dt), 0.0});
+        write_sweep(sy_it_ubo_[0], 0, std::cosh(ty * 0.5 * dt),
+                    {std::sinh(ty * 0.5 * dt), 0.0});
+        write_sweep(sy_it_ubo_[1], 1, std::cosh(ty * dt),
+                    {std::sinh(ty * dt), 0.0});
     }
 
     // Uniform field B along z (Landau gauge A_x = B y): x-links of row j carry
@@ -206,36 +211,75 @@ public:
             return;
         }
         VkCommandBuffer cb = shot.cb();
-        const std::uint32_t groups =
-            static_cast<std::uint32_t>((n_cells_ + 255) / 256);
-        auto go = [&](const Kernel& k, VkDescriptorSet set) {
-            k.bind(cb, set);
+        for (int s = 0; s < n; ++s) {
+            palindrome(cb, phase_set_, sx_set_, sy_set_);
+        }
+        shot.submit_and_wait(*ctx_);
+    }
+
+    // n imaginary-time steps, each renormalized to <psi|psi> = 1 (cell measure).
+    void relax(int n) {
+        OneShot shot;
+        if (!shot.begin_compute(*ctx_)) {
+            return;
+        }
+        VkCommandBuffer cb = shot.cb();
+        const std::uint32_t groups = cell_groups();
+        for (int s = 0; s < n; ++s) {
+            palindrome(cb, phase_it_set_, sx_it_set_, sy_it_set_);
+            normpeak_k_.bind(cb, normpeak_set_);
+            vkCmdDispatch(cb, kGroups, 1, 1);
+            barrier_compute_to_compute(cb);
+            normfinal_k_.bind(cb, normfinal_set_);
+            vkCmdDispatch(cb, 1, 1, 1);
+            barrier_compute_to_compute(cb);
+            scalebuf_k_.bind(cb, scale_set_);
             vkCmdDispatch(cb, groups, 1, 1);
             barrier_compute_to_compute(cb);
-        };
-        for (int s = 0; s < n; ++s) {
-            go(phase_k_, phase_set_);
-            go(sweepx_k_, sx_set_[0]);
-            go(sweepx_k_, sx_set_[1]);
-            go(sweepy_k_, sy_set_[0]);
-            go(sweepy_k_, sy_set_[1]);
-            go(sweepy_k_, sy_set_[0]);
-            go(sweepx_k_, sx_set_[1]);
-            go(sweepx_k_, sx_set_[0]);
-            go(phase_k_, phase_set_);
         }
         shot.submit_and_wait(*ctx_);
     }
 
 private:
-    struct PhaseParams {
+    static constexpr std::uint32_t kGroups = 256;
+
+    struct NParams {
         std::uint32_t n, pad0, pad1, pad2;
+    };
+    struct NFParams {
+        std::uint32_t ngroups;
+        float cell_volume, pad0, pad1;
     };
     struct SweepParams {
         std::uint32_t nx, ny, parity;
         float c;
         float mix_re, mix_im, pad0, pad1;
     };
+
+    std::uint32_t cell_groups() const {
+        return static_cast<std::uint32_t>((n_cells_ + 255) / 256);
+    }
+
+    // One Strang palindrome: (1/2)V . Bx . By(full) . Bx . (1/2)V, with a
+    // compute-to-compute barrier between every dispatch (state aliased in place).
+    void palindrome(VkCommandBuffer cb, VkDescriptorSet phase_set,
+                    const VkDescriptorSet* sx, const VkDescriptorSet* sy) {
+        const std::uint32_t groups = cell_groups();
+        auto go = [&](const Kernel& k, VkDescriptorSet set) {
+            k.bind(cb, set);
+            vkCmdDispatch(cb, groups, 1, 1);
+            barrier_compute_to_compute(cb);
+        };
+        go(phase_k_, phase_set);
+        go(sweepx_k_, sx[0]);
+        go(sweepx_k_, sx[1]);
+        go(sweepy_k_, sy[0]);
+        go(sweepy_k_, sy[1]);
+        go(sweepy_k_, sy[0]);
+        go(sweepx_k_, sx[1]);
+        go(sweepx_k_, sx[0]);
+        go(phase_k_, phase_set);
+    }
 
     void write_ubo(Buffer& b, const void* src, std::size_t bytes) {
         std::memcpy(b.mapped, src, bytes);
@@ -276,18 +320,71 @@ private:
         shot.submit_and_wait(*ctx_);
     }
 
-    void allocate_sets() {
-        phase_set_ = arena_.allocate(*ctx_, phase_k_.set_layout());
-        write3(phase_set_, hv_rt_.buf, phase_ubo_.buf, sizeof(PhaseParams));
-        for (int p = 0; p < 2; ++p) {
-            sx_set_[p] = arena_.allocate(*ctx_, sweepx_k_.set_layout());
-            write3(sx_set_[p], link_x_.buf, sx_ubo_[p].buf, sizeof(SweepParams));
-            sy_set_[p] = arena_.allocate(*ctx_, sweepy_k_.set_layout());
-            write3(sy_set_[p], link_y_.buf, sy_ubo_[p].buf, sizeof(SweepParams));
-        }
+    bool alloc_lattice(int cells) {
+        const VkDeviceSize bytes =
+            static_cast<VkDeviceSize>(cells) * 2 * sizeof(float);
+        const VkBufferUsageFlags ubo = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+        return ctx_->create_device_buffer(bytes, &state_) &&
+               ctx_->create_device_buffer(bytes, &link_x_) &&
+               ctx_->create_device_buffer(bytes, &link_y_) &&
+               ctx_->create_device_buffer(bytes, &hv_rt_) &&
+               ctx_->create_device_buffer(bytes, &hv_it_) &&
+               ctx_->create_device_buffer(2 * kGroups * sizeof(float),
+                                          &partials_) &&
+               ctx_->create_device_buffer(sizeof(float), &renorm_) &&
+               ctx_->create_host_buffer(bytes,
+                                        VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                        &staging_) &&
+               ctx_->create_host_buffer(sizeof(NParams), ubo, &phase_ubo_) &&
+               ctx_->create_host_buffer(sizeof(NParams), ubo, &np_ubo_) &&
+               ctx_->create_host_buffer(sizeof(NFParams), ubo, &nf_ubo_) &&
+               ctx_->create_host_buffer(sizeof(NParams), ubo, &sc_ubo_) &&
+               ctx_->create_host_buffer(sizeof(SweepParams), ubo, &sx_ubo_[0]) &&
+               ctx_->create_host_buffer(sizeof(SweepParams), ubo, &sx_ubo_[1]) &&
+               ctx_->create_host_buffer(sizeof(SweepParams), ubo, &sy_ubo_[0]) &&
+               ctx_->create_host_buffer(sizeof(SweepParams), ubo, &sy_ubo_[1]) &&
+               ctx_->create_host_buffer(sizeof(SweepParams), ubo,
+                                        &sx_it_ubo_[0]) &&
+               ctx_->create_host_buffer(sizeof(SweepParams), ubo,
+                                        &sx_it_ubo_[1]) &&
+               ctx_->create_host_buffer(sizeof(SweepParams), ubo,
+                                        &sy_it_ubo_[0]) &&
+               ctx_->create_host_buffer(sizeof(SweepParams), ubo,
+                                        &sy_it_ubo_[1]);
     }
 
-    // Shared 3-binding layout: 0 = state (RW), 1 = aux SSBO, 2 = params UBO.
+    void allocate_sets() {
+        phase_set_ = arena_.allocate(*ctx_, phase_k_.set_layout());
+        write3(phase_set_, hv_rt_.buf, phase_ubo_.buf, sizeof(NParams));
+        phase_it_set_ = arena_.allocate(*ctx_, phase_k_.set_layout());
+        write3(phase_it_set_, hv_it_.buf, phase_ubo_.buf, sizeof(NParams));
+        for (int p = 0; p < 2; ++p) {
+            const std::size_t pi = static_cast<std::size_t>(p);
+            sx_set_[p] = arena_.allocate(*ctx_, sweepx_k_.set_layout());
+            write3(sx_set_[p], link_x_.buf, sx_ubo_[pi].buf, sizeof(SweepParams));
+            sy_set_[p] = arena_.allocate(*ctx_, sweepy_k_.set_layout());
+            write3(sy_set_[p], link_y_.buf, sy_ubo_[pi].buf, sizeof(SweepParams));
+            sx_it_set_[p] = arena_.allocate(*ctx_, sweepx_k_.set_layout());
+            write3(sx_it_set_[p], link_x_.buf, sx_it_ubo_[pi].buf,
+                   sizeof(SweepParams));
+            sy_it_set_[p] = arena_.allocate(*ctx_, sweepy_k_.set_layout());
+            write3(sy_it_set_[p], link_y_.buf, sy_it_ubo_[pi].buf,
+                   sizeof(SweepParams));
+        }
+        // norm chain layouts: {0:storage, 1:ubo, 2:storage}.
+        normpeak_set_ = arena_.allocate(*ctx_, normpeak_k_.set_layout());
+        write_reduce(normpeak_set_, state_.buf, np_ubo_.buf, sizeof(NParams),
+                     partials_.buf);
+        normfinal_set_ = arena_.allocate(*ctx_, normfinal_k_.set_layout());
+        write_reduce(normfinal_set_, partials_.buf, nf_ubo_.buf, sizeof(NFParams),
+                     renorm_.buf);
+        scale_set_ = arena_.allocate(*ctx_, scalebuf_k_.set_layout());
+        write_reduce(scale_set_, state_.buf, sc_ubo_.buf, sizeof(NParams),
+                     renorm_.buf);
+    }
+
+    // 3-binding sweep/phase layout: 0 = state (RW), 1 = aux SSBO, 2 = params UBO.
     void write3(VkDescriptorSet set, VkBuffer aux, VkBuffer ubo,
                 VkDeviceSize ubo_bytes) {
         arena_.write_buffer(*ctx_, set, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -298,20 +395,28 @@ private:
                             ubo, ubo_bytes);
     }
 
+    // norm-chain layout: 0 = data SSBO, 1 = params UBO, 2 = aux SSBO.
+    void write_reduce(VkDescriptorSet set, VkBuffer data, VkBuffer ubo,
+                      VkDeviceSize ubo_bytes, VkBuffer aux) {
+        arena_.write_buffer(*ctx_, set, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                            data);
+        arena_.write_buffer(*ctx_, set, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                            ubo, ubo_bytes);
+        arena_.write_buffer(*ctx_, set, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                            aux);
+    }
+
     void free_lattice() {
         if (n_cells_ == 0) {
             return;
         }
-        ctx_->destroy_buffer(&state_);
-        ctx_->destroy_buffer(&link_x_);
-        ctx_->destroy_buffer(&link_y_);
-        ctx_->destroy_buffer(&hv_rt_);
-        ctx_->destroy_buffer(&staging_);
-        ctx_->destroy_buffer(&phase_ubo_);
-        ctx_->destroy_buffer(&sx_ubo_[0]);
-        ctx_->destroy_buffer(&sx_ubo_[1]);
-        ctx_->destroy_buffer(&sy_ubo_[0]);
-        ctx_->destroy_buffer(&sy_ubo_[1]);
+        for (Buffer* b : {&state_, &link_x_, &link_y_, &hv_rt_, &hv_it_,
+                          &partials_, &renorm_, &staging_, &phase_ubo_, &np_ubo_,
+                          &nf_ubo_, &sc_ubo_, &sx_ubo_[0], &sx_ubo_[1],
+                          &sy_ubo_[0], &sy_ubo_[1], &sx_it_ubo_[0],
+                          &sx_it_ubo_[1], &sy_it_ubo_[0], &sy_it_ubo_[1]}) {
+            ctx_->destroy_buffer(b);
+        }
         n_cells_ = 0;
     }
 
@@ -325,20 +430,37 @@ private:
     Kernel phase_k_;
     Kernel sweepx_k_;
     Kernel sweepy_k_;
+    Kernel normpeak_k_;
+    Kernel normfinal_k_;
+    Kernel scalebuf_k_;
     DescriptorArena arena_;
 
     Buffer state_;
     Buffer link_x_;
     Buffer link_y_;
     Buffer hv_rt_;
+    Buffer hv_it_;
+    Buffer partials_;
+    Buffer renorm_;
     Buffer staging_;
     Buffer phase_ubo_;
+    Buffer np_ubo_;
+    Buffer nf_ubo_;
+    Buffer sc_ubo_;
     Buffer sx_ubo_[2];
     Buffer sy_ubo_[2];
+    Buffer sx_it_ubo_[2];
+    Buffer sy_it_ubo_[2];
 
     VkDescriptorSet phase_set_ = VK_NULL_HANDLE;
+    VkDescriptorSet phase_it_set_ = VK_NULL_HANDLE;
     VkDescriptorSet sx_set_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     VkDescriptorSet sy_set_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkDescriptorSet sx_it_set_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkDescriptorSet sy_it_set_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkDescriptorSet normpeak_set_ = VK_NULL_HANDLE;
+    VkDescriptorSet normfinal_set_ = VK_NULL_HANDLE;
+    VkDescriptorSet scale_set_ = VK_NULL_HANDLE;
 };
 
 }  // namespace ses_vk

@@ -2076,6 +2076,62 @@ bool check_lattice2d_step(ses_vk::DeviceContext& ctx) {
     return all_pass;
 }
 
+// GPU relax vs CPU PeierlsLattice2D::relax (imaginary time + renormalize): the
+// cosh/sinh sweep + norm reduce->rescale must track the oracle on a parabolic
+// dot in a field. fp32.
+bool check_lattice2d_relax(ses_vk::DeviceContext& ctx) {
+    const ses::Grid1D axis{-10.0, 10.0, 64};
+    const ses::Grid3D g{axis, axis, ses::Grid1D{0.0, 2.0, 1}};
+    const double w0 = 0.5;
+    std::vector<double> v(static_cast<std::size_t>(g.size()));
+    for (int j = 0; j < g.y.n; ++j) {
+        for (int i = 0; i < g.x.n; ++i) {
+            const double x = g.x.coord(i);
+            const double y = g.y.coord(j);
+            v[static_cast<std::size_t>(g.flat(i, j, 0))] =
+                0.5 * w0 * w0 * (x * x + y * y);
+        }
+    }
+    const double dt = 0.01;
+    const double b = 0.6;
+    ses::Field3D psi0 = ses::gaussian_wavepacket(
+        g, ses::Vec3d{1.0, 0.0, 0.0}, ses::Vec3d{3.0, 3.0, 3.0},
+        ses::Vec3d{0.0, 0.0, 0.0});
+
+    ses::PeierlsLattice2D cpu_prop{g, v, dt};
+    cpu_prop.set_uniform_field(b);
+    ses::Field3D cpu = psi0;
+    cpu_prop.relax(cpu, 30);
+
+    ses_vk::Lattice2DEngine eng;
+    if (!eng.initialize(ctx)) {
+        std::printf("lattice2d relax: engine init FAIL\n");
+        return false;
+    }
+    eng.set_lattice(g, v, dt);
+    eng.set_uniform_field(b);
+    eng.upload(psi0.data());
+    eng.relax(30);
+    eng.download();
+    const float* out = eng.state();
+
+    double max_err = 0.0;
+    double max_mag = 0.0;
+    for (std::size_t i = 0; i < cpu.data().size(); ++i) {
+        max_err = std::max(max_err, std::abs(out[2 * i] - cpu.data()[i].real()));
+        max_err =
+            std::max(max_err, std::abs(out[2 * i + 1] - cpu.data()[i].imag()));
+        max_mag = std::max(max_mag, std::abs(cpu.data()[i].real()));
+        max_mag = std::max(max_mag, std::abs(cpu.data()[i].imag()));
+    }
+    const double tol = 1e-3 + 2e-4 * max_mag;
+    const bool pass = max_err < tol;
+    std::printf(
+        "lattice2d relax 30 (B=%.1f): max |gpu - cpu| = %.3e (tol %.3e)  [%s]\n",
+        b, max_err, tol, pass ? "PASS" : "FAIL");
+    return pass;
+}
+
 bool check_engine_step(ses_vk::DeviceContext& ctx) {
     const ses::Grid1D axis{-4.0, 4.0, 8};
     const ses::Grid3D g{axis, axis, axis};
@@ -3685,6 +3741,7 @@ int main() {
     failures += check_spin_hamiltonian(ctx) ? 0 : 1;
     failures += check_spin_chebyshev(ctx) ? 0 : 1;
     failures += check_lattice2d_step(ctx) ? 0 : 1;
+    failures += check_lattice2d_relax(ctx) ? 0 : 1;
     failures += check_engine_step(ctx) ? 0 : 1;
     failures += check_engine_planar(ctx) ? 0 : 1;
     failures += check_engine_absorber(ctx) ? 0 : 1;
