@@ -355,4 +355,106 @@ inline void fused_step(SpinState16& s, const std::vector<FusedGate>& gs) {
     }
 }
 
+// Embed a gate matrix on `src` qubits into the `dst` window (src subset of dst,
+// both ascending); identity on dst\src. Row-major (1<<|dst|)^2.
+inline std::vector<std::complex<double>> expand_matrix(
+    const std::vector<std::complex<double>>& mat, const std::vector<int>& src,
+    const std::vector<int>& dst) {
+    const std::size_t ks = src.size();
+    const std::size_t ds = std::size_t{1} << ks;
+    const std::size_t dd = std::size_t{1} << dst.size();
+    std::vector<int> pos(ks, 0);  // dst-bit position of each src qubit
+    for (std::size_t q = 0; q < ks; ++q) {
+        for (std::size_t p = 0; p < dst.size(); ++p) {
+            if (dst[p] == src[q]) {
+                pos[q] = static_cast<int>(p);
+                break;
+            }
+        }
+    }
+    std::size_t srcmask = 0;
+    for (int p : pos) {
+        srcmask |= std::size_t{1} << p;
+    }
+    std::vector<std::complex<double>> e(dd * dd, std::complex<double>{0.0, 0.0});
+    for (std::size_t r = 0; r < dd; ++r) {
+        for (std::size_t c = 0; c < dd; ++c) {
+            if ((r & ~srcmask) != (c & ~srcmask)) {
+                continue;  // identity off the src qubits
+            }
+            std::size_t rs = 0, cs = 0;
+            for (std::size_t q = 0; q < ks; ++q) {
+                if ((r >> pos[q]) & 1u) rs |= std::size_t{1} << q;
+                if ((c >> pos[q]) & 1u) cs |= std::size_t{1} << q;
+            }
+            e[r * dd + c] = mat[rs * ds + cs];
+        }
+    }
+    return e;
+}
+
+inline std::vector<std::complex<double>> mat_mul(
+    const std::vector<std::complex<double>>& A,
+    const std::vector<std::complex<double>>& B, std::size_t d) {
+    std::vector<std::complex<double>> C(d * d, std::complex<double>{0.0, 0.0});
+    for (std::size_t i = 0; i < d; ++i) {
+        for (std::size_t k = 0; k < d; ++k) {
+            const std::complex<double> a = A[i * d + k];
+            if (a.real() == 0.0 && a.imag() == 0.0) {
+                continue;
+            }
+            for (std::size_t jc = 0; jc < d; ++jc) {
+                C[i * d + jc] += a * B[k * d + jc];
+            }
+        }
+    }
+    return C;
+}
+
+inline std::vector<int> qubit_union(const std::vector<int>& a,
+                                    const std::vector<int>& b) {
+    std::vector<int> u = a;
+    for (int q : b) {
+        if (std::find(u.begin(), u.end(), q) == u.end()) {
+            u.push_back(q);
+        }
+    }
+    std::sort(u.begin(), u.end());
+    return u;
+}
+
+// Greedily merge consecutive gates whose combined support fits kmax qubits into
+// one dense fused gate (order preserved: later gate left-multiplies). Amortized
+// once per parameter change; the per-frame cost is then #fused passes, not #gates.
+inline std::vector<FusedGate> fuse_gates(const std::vector<FusedGate>& gs,
+                                         int kmax) {
+    std::vector<FusedGate> out;
+    FusedGate cur;
+    bool have = false;
+    for (const FusedGate& g : gs) {
+        if (!have) {
+            cur = g;
+            have = true;
+            continue;
+        }
+        const std::vector<int> w = qubit_union(cur.qubits, g.qubits);
+        if (static_cast<int>(w.size()) <= kmax) {
+            const std::size_t dd = std::size_t{1} << w.size();
+            const std::vector<std::complex<double>> e1 =
+                expand_matrix(cur.mat, cur.qubits, w);
+            const std::vector<std::complex<double>> e2 =
+                expand_matrix(g.mat, g.qubits, w);
+            cur.qubits = w;
+            cur.mat = mat_mul(e2, e1, dd);  // g applied after cur
+        } else {
+            out.push_back(cur);
+            cur = g;
+        }
+    }
+    if (have) {
+        out.push_back(cur);
+    }
+    return out;
+}
+
 }  // namespace ses

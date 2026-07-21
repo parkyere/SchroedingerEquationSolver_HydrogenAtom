@@ -100,6 +100,21 @@ TEST(SpinFuse, FusedStepMatchesExactStep) {
     EXPECT_LT(max_amp_diff(a, b), 1e-10);
 }
 
+TEST(SpinFuse, GreedyFuseReducesPassesAndMatchesExactStep) {
+    const double bx = 0.1, by = -0.05, bz = 0.2, jj = 0.5, dt = 0.05;
+    const std::vector<ses::FusedGate> flat =
+        ses::step_gates(bx, by, bz, jj, dt);
+    const std::vector<ses::FusedGate> fused = ses::fuse_gates(flat, 4);
+    EXPECT_LT(fused.size(), flat.size());  // fewer passes than raw gates
+    ses::SpinState16 a = seed_tilted();
+    ses::SpinState16 b = a;
+    for (int k = 0; k < 20; ++k) {
+        ses::exact_step(a, bx, by, bz, jj, dt);
+        ses::fused_step(b, fused);
+    }
+    EXPECT_LT(max_amp_diff(a, b), 1e-10);
+}
+
 TEST(SpinExact, ProductBootRoundTripsTheArrows) {
     ses::SpinLattice l;
     l.nx = ses::kExactSide;
