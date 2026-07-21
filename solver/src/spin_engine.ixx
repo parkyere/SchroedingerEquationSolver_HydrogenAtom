@@ -11,6 +11,7 @@ module;
 #endif
 #include <spin_site_gate_spv.h>
 #include <spin_bond_gate_spv.h>
+#include <spin_site_bloch_spv.h>
 #include <algorithm>
 #include <cmath>
 #include <complex>
@@ -27,6 +28,9 @@ export import ses.spinexact;
 // GPU exact 2^N Heisenberg; fp32 bit-faithful to CPU oracle
 // (ses.spinexact gates; vkcheck check_spin_step).
 // Gates alias the state SSBO in place -> compute-to-compute barrier between dispatches is mandatory.
+// step()/upload() fold a per-site Bloch reduction so only 48 floats read back
+// per frame (state stays GPU-resident); download_state() pulls the full 2^16
+// only on demand (measurement). CONTRACT: vkcheck check_spin_bloch.
 
 
 export namespace ses_vk {
@@ -68,9 +72,10 @@ public:
         }
         const int n_sites = ses::kExactSites;
         const int n_sets = n_sites + nbonds_;
-        if (!arena_.create(ctx, static_cast<std::uint32_t>(n_sets),
-                           static_cast<std::uint32_t>(n_sets),
-                           static_cast<std::uint32_t>(n_sets))) {
+        // +1 set for the reduce (it binds 2 storage + 1 uniform).
+        if (!arena_.create(ctx, static_cast<std::uint32_t>(n_sets + 1),
+                           static_cast<std::uint32_t>(n_sets + 2),
+                           static_cast<std::uint32_t>(n_sets + 1))) {
             return false;
         }
         site_ubo_.resize(static_cast<std::size_t>(n_sites));
@@ -105,6 +110,37 @@ public:
                                 VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                                 bond_ubo_[bi].buf, sizeof(BondParams));
         }
+        // Per-site Bloch reduction: state SSBO -> 48-float device buffer.
+        if (!reduce_k_.create(ctx, k_spin_site_bloch_spv,
+                              k_spin_site_bloch_spv_size,
+                              {{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
+                               {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
+                               {2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER}})) {
+            return false;
+        }
+        const VkDeviceSize bloch_bytes = kBlochFloats * sizeof(float);
+        if (!ctx.create_device_buffer(bloch_bytes, &bloch_dev_) ||
+            !ctx.create_host_buffer(bloch_bytes,
+                                    VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                    &bloch_host_) ||
+            !ctx.create_host_buffer(sizeof(BlochParams),
+                                    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                    &bloch_ubo_)) {
+            return false;
+        }
+        BlochParams bp{};
+        bp.half_n = static_cast<std::uint32_t>(dim_ / 2);
+        write_ubo(bloch_ubo_, &bp, sizeof(bp));
+        reduce_set_ = arena_.allocate(ctx, reduce_k_.set_layout());
+        if (reduce_set_ == VK_NULL_HANDLE) return false;
+        arena_.write_buffer(ctx, reduce_set_, 0,
+                            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, state_.buf);
+        arena_.write_buffer(ctx, reduce_set_, 1,
+                            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, bloch_dev_.buf,
+                            bloch_bytes);
+        arena_.write_buffer(ctx, reduce_set_, 2,
+                            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, bloch_ubo_.buf,
+                            sizeof(BlochParams));
         ready_ = true;
         return true;
     }
@@ -120,8 +156,12 @@ public:
         arena_.destroy(*ctx_);
         site_k_.destroy(*ctx_);
         bond_k_.destroy(*ctx_);
+        reduce_k_.destroy(*ctx_);
         ctx_->destroy_buffer(&state_);
         ctx_->destroy_buffer(&staging_);
+        ctx_->destroy_buffer(&bloch_dev_);
+        ctx_->destroy_buffer(&bloch_host_);
+        ctx_->destroy_buffer(&bloch_ubo_);
         ctx_ = nullptr;
         ready_ = false;
     }
@@ -173,13 +213,19 @@ public:
         if (!shot.begin_compute(*ctx_)) {
             return;
         }
+        VkCommandBuffer cb = shot.cb();
         const VkDeviceSize bytes = dim_ * 2 * sizeof(float);
         const VkBufferCopy r{0, 0, bytes};
-        vkCmdCopyBuffer(shot.cb(), staging_.buf, state_.buf, 1, &r);
-        barrier_transfer_to_compute(shot.cb());
+        vkCmdCopyBuffer(cb, staging_.buf, state_.buf, 1, &r);
+        barrier_transfer_to_compute(cb);
+        record_reduce_and_copy(cb);  // bloch() reflects the uploaded state
         shot.submit_and_wait(*ctx_);
+        vmaInvalidateAllocation(ctx_->allocator, bloch_host_.alloc, 0,
+                                VK_WHOLE_SIZE);
     }
 
+    // n Strang steps then a per-site Bloch reduction, all in one submit; only
+    // 48 floats read back (state stays GPU-resident).
     void step(int n) {
         OneShot shot;
         if (!shot.begin_compute(*ctx_)) {
@@ -209,7 +255,21 @@ public:
                 }
             }
         }
-        barrier_compute_to_transfer(cb);
+        barrier_compute_to_compute(cb);  // last gate -> reduce reads state_
+        record_reduce_and_copy(cb);
+        shot.submit_and_wait(*ctx_);
+        vmaInvalidateAllocation(ctx_->allocator, bloch_host_.alloc, 0,
+                                VK_WHOLE_SIZE);
+    }
+
+    // Full 2^16 state -> host staging; measurement path only (not per frame).
+    void download_state() {
+        OneShot shot;
+        if (!shot.begin_compute(*ctx_)) {
+            return;
+        }
+        VkCommandBuffer cb = shot.cb();
+        barrier_compute_to_transfer(cb);  // prior step's writes -> transfer read
         const VkDeviceSize bytes = dim_ * 2 * sizeof(float);
         const VkBufferCopy r{0, 0, bytes};
         vkCmdCopyBuffer(cb, state_.buf, staging_.buf, 1, &r);
@@ -219,9 +279,14 @@ public:
                                 VK_WHOLE_SIZE);
     }
 
-    // The current fp32 state (interleaved re/im), valid after step()/upload.
+    // The full fp32 state (interleaved re/im), valid after download_state()/upload.
     const float* state() const {
         return static_cast<const float*>(staging_.mapped);
+    }
+
+    // 48 floats: [3*site+0..2] = (<sx>,<sy>,<sz>); valid after step()/upload.
+    const float* bloch() const {
+        return static_cast<const float*>(bloch_host_.mapped);
     }
 
 private:
@@ -235,6 +300,10 @@ private:
         float gate[4];
         float off4[4];
     };
+    struct alignas(16) BlochParams {
+        std::uint32_t half_n, pad0, pad1, pad2;
+    };
+    static constexpr int kBlochFloats = 3 * ses::kExactSites;
 
     static void fill_c(float* dst, const std::complex<double>& z) {
         dst[0] = static_cast<float>(z.real());
@@ -258,6 +327,17 @@ private:
         bond_k_.bind(cb, bond_set_[static_cast<std::size_t>(b)]);
         vkCmdDispatch(cb, quarter_groups_, 1, 1);
     }
+    // One workgroup per site reduces state_ -> bloch_dev_, then copy 48 floats
+    // to host. Caller must barrier the state writes visible to this read.
+    void record_reduce_and_copy(VkCommandBuffer cb) {
+        reduce_k_.bind(cb, reduce_set_);
+        vkCmdDispatch(cb, static_cast<std::uint32_t>(ses::kExactSites), 1, 1);
+        barrier_compute_to_transfer(cb);
+        const VkDeviceSize bytes = kBlochFloats * sizeof(float);
+        const VkBufferCopy r{0, 0, bytes};
+        vkCmdCopyBuffer(cb, bloch_dev_.buf, bloch_host_.buf, 1, &r);
+        barrier_transfer_to_host(cb);
+    }
 
     DeviceContext* ctx_ = nullptr;
     std::size_t dim_ = 0;
@@ -269,11 +349,16 @@ private:
     Buffer staging_{};
     Kernel site_k_;
     Kernel bond_k_;
+    Kernel reduce_k_;
     DescriptorArena arena_;
     std::vector<Buffer> site_ubo_;
     std::vector<Buffer> bond_ubo_;
     std::vector<VkDescriptorSet> site_set_;
     std::vector<VkDescriptorSet> bond_set_;
+    Buffer bloch_dev_{};
+    Buffer bloch_host_{};
+    Buffer bloch_ubo_{};
+    VkDescriptorSet reduce_set_ = VK_NULL_HANDLE;
     bool has_field_ = false;
     bool ready_ = false;
 };

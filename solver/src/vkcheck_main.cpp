@@ -1234,6 +1234,7 @@ bool check_spin_engine_step(ses_vk::DeviceContext& ctx) {
     ses::SpinState16 boot = ses::exact_from_product(lat);
     eng.upload(boot.c);
     eng.step(steps);
+    eng.download_state();  // step() reads back only Bloch now; pull the full state
     const float* out = eng.state();
     double max_err = 0.0;
     double norm = 0.0;
@@ -1251,6 +1252,51 @@ bool check_spin_engine_step(ses_vk::DeviceContext& ctx) {
     std::printf("spin engine %d steps (raw Vulkan, 2^16): max |gpu - cpu| = "
                 "%.3e, norm %.6f  [%s]\n",
                 steps, max_err, norm, pass ? "PASS" : "FAIL");
+    return pass;
+}
+
+// Per-site GPU Bloch reduction vs ses::exact_site_bloch (fp64) on the SAME
+// state: isolates the reduce kernel (partial trace) from evolution drift.
+// The state is entangled first (|<sigma>| < 1) so the partial trace is exercised.
+bool check_spin_bloch(ses_vk::DeviceContext& ctx) {
+    ses::SpinLattice lat;
+    lat.nx = ses::kExactSide;
+    lat.ny = ses::kExactSide;
+    lat.s.resize(ses::kExactSites);
+    for (int y = 0; y < ses::kExactSide; ++y) {
+        for (int x = 0; x < ses::kExactSide; ++x) {
+            const double sgn = ((x + y) & 1) != 0 ? -1.0 : 1.0;
+            lat.s[static_cast<std::size_t>(y * ses::kExactSide + x)] =
+                ses::spinor_from_bloch(0.6, 0.0, sgn * 0.8);
+        }
+    }
+    ses::SpinState16 st = ses::exact_from_product(lat);
+    for (int k = 0; k < 12; ++k) {
+        ses::exact_step(st, 0.1, -0.05, 0.2, 0.5, 0.05);  // entangle
+    }
+
+    ses_vk::SpinEngine eng;
+    if (!eng.initialize(ctx)) {
+        std::printf("spin bloch: init FAIL\n");
+        return false;
+    }
+    eng.upload(st.c);  // upload folds a reduce -> bloch() reflects this state
+    const float* gb = eng.bloch();
+    double max_err = 0.0;
+    for (int i = 0; i < ses::kExactSites; ++i) {
+        double x = 0.0, y = 0.0, z = 0.0;
+        ses::exact_site_bloch(st, i, &x, &y, &z);
+        const std::size_t o = static_cast<std::size_t>(3 * i);
+        max_err = std::max(max_err, std::abs(gb[o + 0] - x));
+        max_err = std::max(max_err, std::abs(gb[o + 1] - y));
+        max_err = std::max(max_err, std::abs(gb[o + 2] - z));
+    }
+    eng.destroy();
+    // fp32 tree-sum of 2^16 terms vs fp64: absolute error stays ~1e-5.
+    const bool pass = max_err < 5e-4;
+    std::printf("spin bloch reduce (raw Vulkan, 16 sites): max |gpu - cpu| = "
+                "%.3e  [%s]\n",
+                max_err, pass ? "PASS" : "FAIL");
     return pass;
 }
 
@@ -3029,6 +3075,7 @@ int main() {
     failures += check_fft3(ctx) ? 0 : 1;
     failures += check_spin_step(ctx) ? 0 : 1;
     failures += check_spin_engine_step(ctx) ? 0 : 1;
+    failures += check_spin_bloch(ctx) ? 0 : 1;
     failures += check_engine_step(ctx) ? 0 : 1;
     failures += check_engine_planar(ctx) ? 0 : 1;
     failures += check_engine_absorber(ctx) ? 0 : 1;
