@@ -14,6 +14,7 @@ module;
 #include <spin_site_bloch_spv.h>
 #include <spin_mf_snapshot_spv.h>
 #include <spin_mf_sweep_spv.h>
+#include <spin_mf_measure_spv.h>
 #include <algorithm>
 #include <cmath>
 #include <complex>
@@ -413,7 +414,13 @@ public:
             !sweep_k_.create(ctx, k_spin_mf_sweep_spv, k_spin_mf_sweep_spv_size,
                              {{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
                               {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
-                              {2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER}})) {
+                              {2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER}}) ||
+            !meas_k_.create(ctx, k_spin_mf_measure_spv,
+                            k_spin_mf_measure_spv_size,
+                            {{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
+                             {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER},
+                             {2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER},
+                             {3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER}})) {
             return false;
         }
         const VkDeviceSize sp_bytes = kSites * 4 * sizeof(float);
@@ -429,10 +436,17 @@ public:
             !ctx.create_host_buffer(sizeof(MfParams),
                                     VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &ubo0_) ||
             !ctx.create_host_buffer(sizeof(MfParams),
-                                    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &ubo1_)) {
+                                    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &ubo1_) ||
+            !ctx.create_host_buffer(sizeof(AxisParams),
+                                    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                    &axis_ubo_) ||
+            !ctx.create_host_buffer(kSites * sizeof(float),
+                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                    &u_buf_)) {
             return false;
         }
-        if (!arena_.create(ctx, 3, 6, 2)) {
+        // +1 set for measure (3 storage + 1 uniform).
+        if (!arena_.create(ctx, 4, 9, 3)) {
             return false;
         }
         snap_set_ = arena_.allocate(ctx, snap_k_.set_layout());
@@ -459,6 +473,19 @@ public:
         arena_.write_buffer(ctx, sweep1_set_, 2,
                             VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, ubo1_.buf,
                             sizeof(MfParams));
+        meas_set_ = arena_.allocate(ctx, meas_k_.set_layout());
+        if (meas_set_ == VK_NULL_HANDLE) {
+            return false;
+        }
+        arena_.write_buffer(ctx, meas_set_, 0,
+                            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, spinors_.buf);
+        arena_.write_buffer(ctx, meas_set_, 1,
+                            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, bloch_dev_.buf);
+        arena_.write_buffer(ctx, meas_set_, 2,
+                            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, axis_ubo_.buf,
+                            sizeof(AxisParams));
+        arena_.write_buffer(ctx, meas_set_, 3,
+                            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, u_buf_.buf);
         ready_ = true;
         return true;
     }
@@ -470,12 +497,15 @@ public:
         arena_.destroy(*ctx_);
         snap_k_.destroy(*ctx_);
         sweep_k_.destroy(*ctx_);
+        meas_k_.destroy(*ctx_);
         ctx_->destroy_buffer(&spinors_);
         ctx_->destroy_buffer(&sp_staging_);
         ctx_->destroy_buffer(&bloch_dev_);
         ctx_->destroy_buffer(&bloch_host_);
         ctx_->destroy_buffer(&ubo0_);
         ctx_->destroy_buffer(&ubo1_);
+        ctx_->destroy_buffer(&axis_ubo_);
+        ctx_->destroy_buffer(&u_buf_);
         ctx_ = nullptr;
         ready_ = false;
     }
@@ -562,23 +592,27 @@ public:
         return static_cast<const float*>(bloch_host_.mapped);
     }
 
-    // 16 spinors (interleaved up.re,up.im,dn.re,dn.im); valid after download().
-    void download() {
+    // Born-measure every site along unit axis n with host uniform draws u16
+    // (one per site); collapses each spinor and refreshes bloch().
+    void measure(double nx, double ny, double nz, const float* u16) {
+        AxisParams ap{};
+        ap.nx = static_cast<float>(nx);
+        ap.ny = static_cast<float>(ny);
+        ap.nz = static_cast<float>(nz);
+        write_ubo(axis_ubo_, &ap, sizeof(ap));
+        std::memcpy(u_buf_.mapped, u16, kSites * sizeof(float));
+        vmaFlushAllocation(ctx_->allocator, u_buf_.alloc, 0, VK_WHOLE_SIZE);
         OneShot shot;
         if (!shot.begin_compute(*ctx_)) {
             return;
         }
         VkCommandBuffer cb = shot.cb();
-        barrier_compute_to_transfer(cb);
-        const VkBufferCopy r{0, 0, kSites * 4 * sizeof(float)};
-        vkCmdCopyBuffer(cb, spinors_.buf, sp_staging_.buf, 1, &r);
-        barrier_transfer_to_host(cb);
+        meas_k_.bind(cb, meas_set_);
+        vkCmdDispatch(cb, 1, 1, 1);
+        copy_bloch_to_host(cb);
         shot.submit_and_wait(*ctx_);
-        vmaInvalidateAllocation(ctx_->allocator, sp_staging_.alloc, 0,
+        vmaInvalidateAllocation(ctx_->allocator, bloch_host_.alloc, 0,
                                 VK_WHOLE_SIZE);
-    }
-    const float* spinors_host() const {
-        return static_cast<const float*>(sp_staging_.mapped);
     }
 
 private:
@@ -586,6 +620,9 @@ private:
         float bx, by, bz, j;
         float alpha, h, pad0, pad1;
         std::uint32_t parity, nx, ny, pad2;
+    };
+    struct alignas(16) AxisParams {
+        float nx, ny, nz, pad;
     };
     void write_ubo(Buffer& b, const void* src, std::size_t sz) {
         std::memcpy(b.mapped, src, sz);
@@ -601,6 +638,7 @@ private:
     DeviceContext* ctx_ = nullptr;
     Kernel snap_k_;
     Kernel sweep_k_;
+    Kernel meas_k_;
     DescriptorArena arena_;
     Buffer spinors_{};
     Buffer sp_staging_{};
@@ -608,9 +646,12 @@ private:
     Buffer bloch_host_{};
     Buffer ubo0_{};
     Buffer ubo1_{};
+    Buffer axis_ubo_{};
+    Buffer u_buf_{};
     VkDescriptorSet snap_set_ = VK_NULL_HANDLE;
     VkDescriptorSet sweep0_set_ = VK_NULL_HANDLE;
     VkDescriptorSet sweep1_set_ = VK_NULL_HANDLE;
+    VkDescriptorSet meas_set_ = VK_NULL_HANDLE;
     bool ready_ = false;
 };
 

@@ -284,16 +284,26 @@ public:
                 ses::exact_site_rotate(exact_, i, ax, ay, 0.0, th);
             }
             push_exact_to_gpu();  // collapse must reach the GPU state
+        } else if (gpu_ready_) {
+            // Collapse on the GPU; host supplies only the uniform draws. plus is
+            // read off the displayed Bloch (== the engine's per-site <sigma>).
+            float u[kSlN * kSlN];
+            for (int i = 0; i < kSlN * kSlN; ++i) {
+                u[i] = static_cast<float>(uni(rng_));
+                const std::size_t o = static_cast<std::size_t>(3 * i);
+                const double pp = 0.5 * (1.0 + nx * bloch_[o] +
+                                         ny * bloch_[o + 1] + nz * bloch_[o + 2]);
+                if (static_cast<double>(u[i]) < pp) {
+                    ++plus;
+                }
+            }
+            gpu_mf_.measure(nx, ny, nz, u);
         } else {
-            // lat_ is GPU-resident; pull it, Born-collapse, push it back.
-            // (the collapse itself moves to GPU in runtime-pure-GPU part B.)
-            download_mf_from_gpu();
             for (auto& s : lat_.s) {
                 plus += ses::spin_measure(s, nx, ny, nz, uni(rng_)) > 0
                             ? 1
                             : 0;
             }
-            upload_mf_to_gpu();
         }
         note_ = strf("measured: %d/%d aligned", plus, kSlN * kSlN);
         display_changed_ = true;
@@ -444,18 +454,6 @@ private:
             dn[static_cast<std::size_t>(i)] = lat_.s[static_cast<std::size_t>(i)].dn;
         }
         gpu_mf_.upload(up, dn);
-    }
-    void download_mf_from_gpu() {
-        if (!gpu_ready_) {
-            return;
-        }
-        gpu_mf_.download();
-        const float* sp = gpu_mf_.spinors_host();
-        for (int i = 0; i < kSlN * kSlN; ++i) {
-            const std::size_t si = static_cast<std::size_t>(i);
-            lat_.s[si].up = std::complex<double>{sp[4 * i], sp[4 * i + 1]};
-            lat_.s[si].dn = std::complex<double>{sp[4 * i + 2], sp[4 * i + 3]};
-        }
     }
     void sync_gpu_params() {
         if (!gpu_ready_) {

@@ -1576,6 +1576,60 @@ bool check_spin_mf(ses_vk::DeviceContext& ctx) {
     return pass;
 }
 
+// GPU mean-field Born measurement vs CPU ses::spin_measure with the SAME axis
+// and per-site uniform draws -- the collapse must land on the same eigenstates.
+bool check_spin_mf_measure(ses_vk::DeviceContext& ctx) {
+    const int nx = 4, ny = 4;
+    const double n0 = 0.36, n1 = -0.48, n2 = 0.8;  // unit axis
+    ses::SpinLattice lat;
+    lat.nx = nx;
+    lat.ny = ny;
+    lat.s.resize(16);
+    float u[16];
+    for (int i = 0; i < 16; ++i) {
+        const double a = 0.3 + 0.17 * i;
+        lat.s[static_cast<std::size_t>(i)] = ses::spinor_from_bloch(
+            0.7 * std::cos(a), 0.7 * std::sin(a), (i & 1) ? -0.71 : 0.71);
+        u[i] = static_cast<float>(std::fmod(0.13 + 0.31 * i, 1.0));
+    }
+
+    ses::SpinLattice cpu = lat;
+    for (int i = 0; i < 16; ++i) {
+        ses::spin_measure(cpu.s[static_cast<std::size_t>(i)], n0, n1, n2,
+                          static_cast<double>(u[i]));
+    }
+    double cb[3 * 16];
+    for (int i = 0; i < 16; ++i) {
+        ses::bloch_vector(cpu.s[static_cast<std::size_t>(i)], &cb[3 * i],
+                          &cb[3 * i + 1], &cb[3 * i + 2]);
+    }
+
+    ses_vk::SpinMeanFieldEngine eng;
+    if (!eng.initialize(ctx)) {
+        std::printf("spin mf measure: init FAIL\n");
+        return false;
+    }
+    eng.set_params(0.0, 0.0, 0.0, 0.0, 0.0, 0.05);
+    std::vector<std::complex<double>> up(16), dn(16);
+    for (int i = 0; i < 16; ++i) {
+        up[static_cast<std::size_t>(i)] = lat.s[static_cast<std::size_t>(i)].up;
+        dn[static_cast<std::size_t>(i)] = lat.s[static_cast<std::size_t>(i)].dn;
+    }
+    eng.upload(up, dn);
+    eng.measure(n0, n1, n2, u);
+    const float* gb = eng.bloch();
+    double max_err = 0.0;
+    for (int i = 0; i < 3 * 16; ++i) {
+        max_err = std::max(max_err, std::abs(gb[i] - cb[i]));
+    }
+    eng.destroy();
+    const bool pass = max_err < 1e-5;
+    std::printf("spin mf measure (raw Vulkan, 16 sites): max |gpu - cpu| = "
+                "%.3e  [%s]\n",
+                max_err, pass ? "PASS" : "FAIL");
+    return pass;
+}
+
 // 3-D forward FFT of an 8x8x8 cube: the line FFT once per axis, three
 // dispatches aliasing ONE buffer with compute-to-compute barriers between
 // axes -- the multi-axis orchestration at the heart of the engine's Strang
@@ -3355,6 +3409,7 @@ int main() {
     failures += check_spin_fused_gate(ctx) ? 0 : 1;
     failures += check_spin_permute(ctx) ? 0 : 1;
     failures += check_spin_mf(ctx) ? 0 : 1;
+    failures += check_spin_mf_measure(ctx) ? 0 : 1;
     failures += check_engine_step(ctx) ? 0 : 1;
     failures += check_engine_planar(ctx) ? 0 : 1;
     failures += check_engine_absorber(ctx) ? 0 : 1;
